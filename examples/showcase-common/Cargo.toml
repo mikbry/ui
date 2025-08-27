@@ -1,0 +1,18 @@
+[package]
+name = "showcase-common"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui = { path = "../../crates/mkui" }
+mkui-core = { path = "../../crates/mkui-core" }
+
+# Optional web dependencies
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+
+[features]
+web = ["mkui/web", "wasm-bindgen", "web-sys"]
+console = ["mkui/console"]

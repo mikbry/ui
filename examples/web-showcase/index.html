@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>mkui - Modern UI Framework for Rust & C++</title>
+    <link href="./dist/styles.css" rel="stylesheet">
+    <link href="./themes.css" rel="stylesheet">
+</head>
+<body class="theme-container">
+    <div id="app"></div>
+    
+    <script type="module">
+        import init from './pkg/web_showcase.js';
+        
+        async function run() {
+            await init();
+        }
+        
+        run().catch(console.error);
+    </script>
+</body>
+</html>

@@ -1,0 +1,75 @@
+
+/* Base theme setup */
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Component classes */
+* {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  .btn-md {
+    @apply h-10 px-4 py-2;
+  }
+
+  .btn-primary {
+    @apply bg-primary text-primary-foreground hover:bg-primary/90;
+  }
+  
+  .btn-secondary {
+    background-color: var(--secondary);
+    color: var(--secondary-foreground);
+  }
+  
+  .btn-secondary:hover {
+    filter: brightness(0.95);
+  }
+  
+  .btn-destructive {
+    background-color: var(--destructive);
+    color: var(--destructive-foreground);
+  }
+  
+  .btn-destructive:hover {
+    filter: brightness(0.9);
+  }
+  
+  .btn-outline {
+    border: 1px solid var(--input);
+    background-color: var(--background);
+  }
+  
+  .btn-outline:hover {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
+  
+  .btn-ghost {
+  }
+  
+  .btn-ghost:hover {
+    background-color: var(--accent);
+    color: var(--accent-foreground);
+  }
+  
+  .btn-link {
+    color: var(--primary);
+    @apply underline-offset-4 hover:underline;
+  }
+
+  .btn-sm {
+    @apply h-9 rounded-md px-3;
+  }
+  
+  .btn-lg {
+    @apply h-11 rounded-md px-8;
+  }
+  
+  .btn-icon {
+    @apply h-10 w-10;
+  }
+}
