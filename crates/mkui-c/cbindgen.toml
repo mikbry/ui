@@ -1,0 +1,55 @@
+# Configuration for cbindgen header generation
+language = "C"
+style = "both"
+cpp_compat = true
+
+[defines]
+# Add header guard
+"MKUI_C_H" = ""
+
+[export]
+# Only export items marked with #[no_mangle]
+include = [
+    "MkuiErrorCode",
+    "MkuiResult", 
+    "mkui_app_new",
+    "mkui_app_free",
+    "mkui_app_add_view",
+    "mkui_app_add_text",
+    "mkui_app_add_button",
+    "mkui_app_run_console",
+    "mkui_free_error_message",
+    "mkui_version",
+    "MKUI_BUTTON_PRIMARY",
+    "MKUI_BUTTON_SECONDARY", 
+    "MKUI_BUTTON_DESTRUCTIVE",
+    "MKUI_BUTTON_OUTLINE",
+    "MKUI_BUTTON_GHOST",
+    "MKUI_BUTTON_LINK"
+]
+
+# Exclude internal types
+exclude = [
+    "MkuiApp"  # This should be opaque
+]
+
+[struct]
+# Generate forward declarations for opaque types
+derive_eq = false
+derive_neq = false
+
+[enum]
+prefix_with_name = true
+derive_helper_methods = false
+
+[macro_expansion]
+bitflags = true
+
+[parse]
+parse_deps = false
+include_guard = "MKUI_C_H"
+pragma_once = true
+autogen_warning = "/* Warning: This file is auto-generated. Do not modify manually. */"
+
+# Don't try to parse standard library types
+sys_includes = ["stdint.h", "stdbool.h"]

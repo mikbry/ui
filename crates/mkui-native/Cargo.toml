@@ -1,0 +1,10 @@
+[package]
+name = "mkui-native"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-core = { path = "../mkui-core" }
+# Future: wgpu and rendering dependencies

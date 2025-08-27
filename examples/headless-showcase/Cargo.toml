@@ -1,0 +1,10 @@
+[package]
+name = "headless-showcase"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-core = { path = "../../crates/mkui-core" }
+mkui-web = { path = "../../crates/mkui-web" }

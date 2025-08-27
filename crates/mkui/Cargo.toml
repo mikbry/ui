@@ -1,0 +1,23 @@
+[package]
+name = "mkui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-core = { path = "../mkui-core" }
+
+# Optional dependencies based on features
+mkui-web = { path = "../mkui-web", optional = true }
+mkui-console = { path = "../mkui-console", optional = true }
+
+# Web-specific deps (only when web feature is enabled)
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+
+[features]
+default = []
+web = ["mkui-web", "wasm-bindgen", "web-sys"]
+console = ["mkui-console"]
+console_error_panic_hook = ["mkui-web/console_error_panic_hook"]

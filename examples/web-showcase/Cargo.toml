@@ -1,0 +1,19 @@
+[package]
+name = "web-showcase"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+showcase-common = { path = "../showcase-common", features = ["web"] }
+mkui = { path = "../../crates/mkui", features = ["web"] }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }
+
+[features]
+default = ["console_error_panic_hook"]
+console_error_panic_hook = ["mkui/console_error_panic_hook"]

@@ -1,0 +1,13 @@
+{
+  "name": "mkui-web-showcase",
+  "version": "0.1.0",
+  "scripts": {
+    "build-css": "npx @tailwindcss/cli -i ./styles.css -o ./dist/styles.css --minify",
+    "build": "./build.sh && npm run build-css"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.12",
+    "tailwindcss": "^4.1.12",
+    "tw-animate-css": "^1.3.7"
+  }
+}

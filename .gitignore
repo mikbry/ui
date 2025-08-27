@@ -1,0 +1,12 @@
+**/target
+**/pkg
+**/.DS_Store
+**/node_modules
+**/dist
+**/build
+**/.env
+**/mkui_c_example
+**/mkui_cpp_example
+**/.venv
+**/__pycache__
+**/*.pyc

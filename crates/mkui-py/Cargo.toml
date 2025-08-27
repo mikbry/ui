@@ -1,0 +1,27 @@
+[package]
+name = "mkui-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Python bindings for mkui UI library"
+
+[lib]
+name = "mkui_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+mkui = { path = "../mkui" }
+mkui-core = { path = "../mkui-core" }
+showcase-common = { path = "../../examples/showcase-common" }
+
+# PyO3 for Python bindings
+pyo3 = { workspace = true, features = ["extension-module"] }
+
+[features]
+default = ["console"]
+web = ["mkui/web"]
+console = ["mkui/console"]
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
