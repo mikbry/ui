@@ -10,3 +10,6 @@
 **/.venv
 **/__pycache__
 **/*.pyc
+
+# Tool-generated agent briefs (regenerated per batch run)
+.claude-agent-instructions.md

@@ -1,13 +1,21 @@
-/// Theme mode for applications
-#[derive(Clone, Copy, Debug, PartialEq)]
+//! Backend-agnostic theme contracts.
+//!
+//! `mkui-core` describes themes as abstract values: a [`ThemeMode`] (light /
+//! dark / system) and a [`ColorTheme`] catalog entry. Backends are
+//! responsible for translating these into platform-specific colors, CSS
+//! classes, or terminal styles — those translations live in `mkui-web`,
+//! `mkui-console`, `mkui-native`, etc., never here.
+
+/// Theme mode for applications.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeMode {
     Light,
     Dark,
     System,
 }
 
-/// Color themes matching shadcn UI
-#[derive(Clone, Debug, PartialEq)]
+/// Color themes (matches the shadcn UI catalog).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ColorTheme {
     Default,
     Blue,
@@ -42,7 +50,7 @@ impl ColorTheme {
             ColorTheme::Violet => "theme-violet",
         }
     }
-    
+
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "default" => Some(ColorTheme::Default),
@@ -61,7 +69,7 @@ impl ColorTheme {
             _ => None,
         }
     }
-    
+
     pub fn all() -> Vec<ColorTheme> {
         vec![
             ColorTheme::Default,
@@ -81,79 +89,47 @@ impl ColorTheme {
     }
 }
 
-/// Console-specific theme configuration
-#[cfg(feature = "console")]
-#[derive(Clone, Debug)]
-pub struct ConsoleTheme {
+/// Bundled theme value passed across the contract.
+///
+/// Backends consume this and produce backend-specific styling (CSS classes
+/// on web, `crossterm`/`ratatui` colors on console, sampled colors on WGPU).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Theme {
     pub mode: ThemeMode,
     pub color: ColorTheme,
 }
 
-#[cfg(feature = "console")]
-impl Default for ConsoleTheme {
+impl Theme {
+    pub fn new(mode: ThemeMode, color: ColorTheme) -> Self {
+        Self { mode, color }
+    }
+}
+
+impl Default for Theme {
     fn default() -> Self {
         Self {
-            mode: ThemeMode::Dark,
+            mode: ThemeMode::System,
             color: ColorTheme::Default,
         }
     }
 }
 
-#[cfg(feature = "console")]
-impl ConsoleTheme {
-    pub fn new(mode: ThemeMode, color: ColorTheme) -> Self {
-        Self { mode, color }
-    }
-    
-    /// Get primary color for the theme
-    pub fn primary_color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
-        match (&self.mode, &self.color) {
-            (ThemeMode::Light, ColorTheme::Default) => Color::Black,
-            (ThemeMode::Dark, ColorTheme::Default) => Color::White,
-            (ThemeMode::System, ColorTheme::Default) => Color::White, // Default to dark mode
-            (_, ColorTheme::Blue) => Color::Blue,
-            (_, ColorTheme::Green) => Color::Green,
-            (_, ColorTheme::Amber) => Color::Yellow,
-            (_, ColorTheme::Rose) => Color::Magenta,
-            (_, ColorTheme::Purple) => Color::Magenta,
-            (_, ColorTheme::Orange) => Color::Red,
-            (_, ColorTheme::Teal) => Color::Cyan,
-            (_, ColorTheme::Mono) => Color::Gray,
-            (_, ColorTheme::Scaled) => Color::Gray,
-            (_, ColorTheme::Red) => Color::Red,
-            (_, ColorTheme::Yellow) => Color::Yellow,
-            (_, ColorTheme::Violet) => Color::Magenta,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_theme_round_trips_through_string() {
+        for theme in ColorTheme::all() {
+            let s = theme.to_class().trim_start_matches("theme-");
+            assert_eq!(ColorTheme::from_str(s), Some(theme));
         }
     }
-    
-    /// Get foreground color for the theme
-    pub fn foreground_color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
-        match self.mode {
-            ThemeMode::Light => Color::Black,
-            ThemeMode::Dark => Color::White,
-            ThemeMode::System => Color::White, // Default to dark
-        }
-    }
-    
-    /// Get muted foreground color
-    pub fn muted_foreground_color(&self) -> ratatui::style::Color {
-        use ratatui::style::Color;
-        match self.mode {
-            ThemeMode::Light => Color::Gray,
-            ThemeMode::Dark => Color::DarkGray,
-            ThemeMode::System => Color::DarkGray, // Default to dark
-        }
-    }
-    
-    /// Get destructive color
-    pub fn destructive_color(&self) -> ratatui::style::Color {
-        ratatui::style::Color::Red
-    }
-    
-    /// Get ring/focus color
-    pub fn ring_color(&self) -> ratatui::style::Color {
-        self.primary_color()
+
+    #[test]
+    fn theme_default_is_system_default() {
+        let theme = Theme::default();
+        assert_eq!(theme.mode, ThemeMode::System);
+        assert_eq!(theme.color, ColorTheme::Default);
     }
 }
