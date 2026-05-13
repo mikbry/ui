@@ -140,6 +140,60 @@ button:
 
 ---
 
+## 🧭 Crate Layout
+
+mkui is organized around a single contract crate that every backend consumes.
+Backend-specific code never leaks into the contract.
+
+```
+crates/
+  mkui-core       ← shared contract: component model, headless logic,
+                    theme/layout/input/style/error contracts. Zero
+                    backend dependencies — does not pull in wasm-bindgen,
+                    crossterm, ratatui, wgpu, etc.
+  mkui-web        ← web/WASM backend. Translates the shared component
+                    tree into DOM elements via web-sys.
+  mkui-console    ← terminal backend. Translates the shared component
+                    tree into crossterm output.
+  mkui-native     ← native (WGPU) backend. Walks the shared component
+                    tree into draw records ready for a GPU scene.
+  mkui            ← bridge: re-exports the backend chosen by Cargo
+                    features and presents a single `Mkui` entry point.
+  mkui-rsx        ← RSX/JSX-like macro (in progress).
+  mkui-c          ← C/C++ FFI bindings over the `mkui` bridge.
+  mkui-py         ← Python bindings via PyO3.
+```
+
+### What lives in `mkui-core`
+
+- `components` — the renderable tree: `Component`, `View`, `Text`, `Button`.
+- `headless` — pure-logic components (state, events, a11y traits) shared
+  by every backend.
+- `theme` — `Theme`, `ThemeMode`, `ColorTheme` (no platform colors).
+- `layout` — `Layout`, `FlexDirection`, `Justify`, `Align`, `Edges`.
+- `input` — `InputEvent`, `Key`, `PointerButton` (backend-neutral events).
+- `style`, `event`, `state`, `error` — supporting contracts.
+
+### What does **not** live in `mkui-core`
+
+- DOM construction, `web-sys` / `wasm-bindgen` types → `mkui-web`.
+- Terminal styles, crossterm/ratatui types → `mkui-console`.
+- WGPU pipelines, scene transforms → `mkui-native`.
+
+### Adding a new backend
+
+A new backend is any crate that:
+
+1. Depends on `mkui-core` (and only `mkui-core` from the contract side).
+2. Consumes `mkui_core::components::Component` trees via `Any` downcasting.
+3. Maps `theme::Theme` and `layout::Layout` values to its native styling.
+4. Normalizes its native events into `mkui_core::input::InputEvent`.
+
+If a contract change is needed (e.g. a new component type), it goes in
+`mkui-core` so every backend keeps consuming the same model.
+
+---
+
 ## 🌍 Target Platforms & Languages
 
 ### Platforms

@@ -6,6 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui-core = { path = "../mkui-core", features = ["console"] }
+mkui-core = { path = "../mkui-core" }
 crossterm = { workspace = true }
 thiserror = { workspace = true }
