@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui-core = { path = "../mkui-core", features = ["web"] }
+mkui-core = { path = "../mkui-core" }
 wasm-bindgen = { workspace = true }
 web-sys = { workspace = true, features = [
     "Document", 

@@ -4,21 +4,13 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+description = "Shared component, event, state, theme, and layout contracts for mkui backends"
 
 [dependencies]
 thiserror = { workspace = true }
 derive_more = { workspace = true }
 serde = { workspace = true, optional = true }
 
-# Web-specific dependencies
-wasm-bindgen = { workspace = true, optional = true }
-web-sys = { workspace = true, optional = true }
-
-# Console-specific dependencies  
-ratatui = { workspace = true, optional = true }
-
 [features]
 default = []
 serde = ["dep:serde"]
-web = ["dep:wasm-bindgen", "dep:web-sys"]
-console = ["dep:ratatui"]
