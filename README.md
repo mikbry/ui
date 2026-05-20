@@ -309,6 +309,36 @@ python main.py
 
 ---
 
+## 🧪 Local Verification
+
+Before opening a PR, run the workspace checks. The Python bindings need a
+local PyO3 / Python toolchain, so the everyday loop excludes `mkui-py` and
+only the full check brings it in.
+
+```bash
+# Non-Python workspace (everyday loop — no PyO3 toolchain required)
+cargo build   --workspace --exclude mkui-py
+cargo test    --workspace --exclude mkui-py
+cargo clippy  --workspace --exclude mkui-py --all-targets -- -D warnings
+cargo fmt     --all -- --check
+
+# Full workspace (requires Python + maturin set up for mkui-py)
+cargo build   --workspace
+cargo test    --workspace
+```
+
+Backend-specific feature checks for the bridge crate:
+
+```bash
+cargo test -p mkui                       # default: no backend, verifies init-error path
+cargo test -p mkui --features console    # console backend smoke
+```
+
+The web backend is exercised by `examples/web-showcase` via `wasm-pack`;
+the native `cargo test` runs cover the contract + dispatch surface only.
+
+---
+
 ## 🔮 Roadmap
 
 ### ✅ Phase 1: Foundation (COMPLETED)
