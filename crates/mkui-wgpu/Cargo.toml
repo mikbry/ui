@@ -1,0 +1,11 @@
+[package]
+name = "mkui-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WGPU-oriented scene primitives and declarative builders for mkui"
+
+[dependencies]
+mkui-core = { path = "../mkui-core" }
