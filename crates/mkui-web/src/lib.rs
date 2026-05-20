@@ -25,6 +25,18 @@
 //! The [`utils`] module contains tiny `window()` / `document()` helpers
 //! shared by every layer.
 //!
+//! ## Extending the renderer
+//!
+//! Dispatch goes through the [`render::WebRendererRegistry`] in [`render`].
+//! Downstream crates that ship their own components implement
+//! [`render::WebRenderable`] on their types and call
+//! [`Mkui::register`](high_level::Mkui::register) at app construction; the
+//! built-in [`mkui_core::components::View`] /
+//! [`Text`](mkui_core::components::Text) /
+//! [`Button`](mkui_core::components::Button) plus the in-crate
+//! [`ThemeSelector`](high_level::ThemeSelector) all flow through the same
+//! path. See [`render`] for the full contract.
+//!
 //! ## What does *not* belong here
 //!
 //! Cross-platform component types, headless logic, theme primitives, layout
@@ -39,10 +51,12 @@ pub mod app;
 pub mod components;
 pub mod high_level;
 pub mod prelude;
+pub mod render;
 pub mod renderer;
 pub mod utils;
 
 pub use app::WebApp;
 pub use components::{WebButton, WebToggle};
-pub use high_level::Mkui;
+pub use high_level::{Mkui, ThemeSelector};
+pub use render::{WebRenderable, WebRendererRegistry};
 pub use renderer::WebRenderer;
