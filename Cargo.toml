@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/mkui-core",        # Core types, traits, and headless logic
+    "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
     "crates/mkui-rsx",         # Future RSX macro support
     "crates/mkui-web",         # Web/WASM renderer  
     "crates/mkui-native",      # Future WGPU renderer

@@ -468,6 +468,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-wgpu"
+version = "0.2.0"
+dependencies = [
+ "mkui-core",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
