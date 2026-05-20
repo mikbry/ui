@@ -66,10 +66,10 @@ pub use renderer::WgpuRenderer;
 
 // Low-level types
 pub use types::{
-    AtlasRect, Axis, Color, Constraints, CornerRadii, Element, FontFaceId, GlyphKey,
+    rect_contains, AtlasRect, Axis, Color, Constraints, CornerRadii, Element, FontFaceId, GlyphKey,
     GlyphPlacement, GuiTriangle, HitRegion, Icon, IconId, IconMask, Insets, PanelLayout, Point,
     Primitive, Quad, RasterizedGlyph, Rect, Scene, Shadow, Size, StackCursor, StackStyle, Stroke,
-    Text, TextAlign, TextBuffer, TextStyle, rect_contains,
+    Text, TextAlign, TextBuffer, TextStyle,
 };
 
 // Theme + cva-style variant system
