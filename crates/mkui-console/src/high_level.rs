@@ -255,4 +255,17 @@ mod tests {
             .iter()
             .any(|l| matches!(l, Line::Muted(t) if t == "subtitle")));
     }
+
+    #[test]
+    fn child_components_are_stored_on_the_console_mkui() {
+        // Guard: if the bridge ever drops children silently the console
+        // backend would render a blank screen with no panic — make that a
+        // test failure instead.
+        let app = Mkui::new()
+            .expect("Mkui::new should succeed without a real TTY")
+            .child(Text::new("a"))
+            .child(View::new().child(CoreButton::new("ok")));
+
+        assert_eq!(app.children.len(), 2);
+    }
 }
