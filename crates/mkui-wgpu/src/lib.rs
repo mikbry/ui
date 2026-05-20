@@ -1,10 +1,21 @@
+//! # mkui-wgpu — WGPU/scene backend for mkui
+//!
 //! Shared GUI primitives, theme, and backend scaffolding for mkui WGPU surfaces.
 //!
 //! The crate is domain-free — it depends on nothing above the standard
 //! library and does not know about projects, timelines, tools, or any
 //! product-specific concept. WGPU-facing shells and overlays compose from here.
 //!
-//! Layers:
+//! ## Module layout (aligned with [`mkui_web`] / [`mkui_console`])
+//!
+//! Every backend in the workspace exposes the same five-module shape so the
+//! bridge crate ([`mkui`]) can dispatch against a uniform surface and
+//! follow-up backends have a template to copy. For the WGPU backend that
+//! shape is filled by [`app`] / [`renderer`] / [`components`] /
+//! [`high_level`] / [`prelude`], with a few scene-specific extras
+//! ([`builder`], [`theme`], [`types`]) layered on top.
+//!
+//! ## Layers
 //!
 //! - [`types`]        — primitives (Point / Rect / Color / Scene / Primitive),
 //!    text & font handles, `HitRegion<T>`, `PanelLayout<T>`.
@@ -34,6 +45,9 @@
 //!    fallback used until the SDF atlas lands.
 //!
 //! [`miklabs/ui`]: https://github.com/mikbry/ui
+//! [`mkui`]: https://docs.rs/mkui
+//! [`mkui_web`]: https://docs.rs/mkui-web
+//! [`mkui_console`]: https://docs.rs/mkui-console
 
 pub mod app;
 pub mod builder;
