@@ -1,121 +1,23 @@
 use crate::app::WebApp;
-use crate::components::WebButton;
+use crate::render::{WebRenderable, WebRendererRegistry};
 use mkui_core::components::*;
 use mkui_core::headless::ButtonVariant;
 use mkui_core::theme::{ColorTheme, ThemeMode};
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
+use web_sys::{Document, Element};
 
-// Local trait for web rendering to avoid orphan rule issues
-trait WebRenderable {
-    fn render_to_web(
-        &self,
-        document: &web_sys::Document,
-    ) -> Result<web_sys::Element, wasm_bindgen::JsValue>;
-}
-
-// Implementations for core components
-impl WebRenderable for View {
-    fn render_to_web(
-        &self,
-        document: &web_sys::Document,
-    ) -> Result<web_sys::Element, wasm_bindgen::JsValue> {
-        let element = document.create_element("div")?;
-        element.set_class_name(self.class_name());
-
-        for child in self.children() {
-            let child_element = render_component_to_web(child.as_ref(), document)?;
-            element.append_child(&child_element)?;
-        }
-
-        Ok(element)
-    }
-}
-
-impl WebRenderable for Text {
-    fn render_to_web(
-        &self,
-        document: &web_sys::Document,
-    ) -> Result<web_sys::Element, wasm_bindgen::JsValue> {
-        let element = document.create_element("p")?;
-        element.set_class_name(self.class_name());
-        element.set_text_content(Some(self.content()));
-        Ok(element)
-    }
-}
-
-impl WebRenderable for Button {
-    fn render_to_web(
-        &self,
-        _document: &web_sys::Document,
-    ) -> Result<web_sys::Element, wasm_bindgen::JsValue> {
-        let mut web_button = WebButton::new(self.content())?.variant(self.button_variant().clone());
-
-        web_button.attach_events()?;
-
-        let element = web_button.element().clone();
-
-        // Add custom classes if provided
-        if !self.class_name().is_empty() {
-            let current_classes = element.class_name();
-            element.set_class_name(&format!("{} {}", current_classes, self.class_name()));
-        }
-
-        // Add click handler if provided
-        if let Some(handler) = self.on_press_handler() {
-            let handler = Rc::clone(handler);
-            let closure =
-                wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                    handler();
-                }) as Box<dyn FnMut(_)>);
-
-            element
-                .dyn_ref::<web_sys::HtmlElement>()
-                .unwrap()
-                .set_onclick(Some(closure.as_ref().unchecked_ref()));
-            closure.forget();
-        }
-
-        Ok(element)
-    }
-}
-
-// Helper function to render any Component to web
-fn render_component_to_web(
-    component: &dyn Component,
-    document: &web_sys::Document,
-) -> Result<web_sys::Element, JsValue> {
-    // We need to downcast to concrete types since we can't implement traits on external types
-    // This is a workaround for the orphan rule
-
-    if let Some(view) = (component as &dyn std::any::Any).downcast_ref::<View>() {
-        return view.render_to_web(document);
-    }
-
-    if let Some(text) = (component as &dyn std::any::Any).downcast_ref::<Text>() {
-        return text.render_to_web(document);
-    }
-
-    if let Some(button) = (component as &dyn std::any::Any).downcast_ref::<Button>() {
-        return button.render_to_web(document);
-    }
-
-    if let Some(theme_selector) = (component as &dyn std::any::Any).downcast_ref::<ThemeSelector>()
-    {
-        return theme_selector.render_web(document);
-    }
-
-    // Fallback for unknown component types
-    let placeholder = document.create_element("div")?;
-    placeholder.set_text_content(Some("Unsupported Component"));
-    Ok(placeholder)
-}
-
-// High-level mkui-style components with web rendering
+/// High-level web app entry point.
+///
+/// `Mkui` holds the component tree plus the [`WebRendererRegistry`] that
+/// turns each component into DOM. The registry starts with renderers for
+/// the built-in `mkui-core` components and can be extended for product
+/// components via [`Mkui::register`] without editing `mkui-web` itself.
 pub struct Mkui {
     app: Rc<RefCell<WebApp>>,
     children: Vec<Box<dyn Component>>,
+    registry: WebRendererRegistry,
 }
 
 impl Mkui {
@@ -124,11 +26,32 @@ impl Mkui {
         Ok(Self {
             app,
             children: Vec::new(),
+            registry: WebRendererRegistry::with_defaults(),
         })
     }
 
     pub fn child(mut self, child: impl Component + 'static) -> Self {
         self.children.push(Box::new(child));
+        self
+    }
+
+    /// Register a custom component type with the underlying
+    /// [`WebRendererRegistry`]. The type must implement [`WebRenderable`].
+    pub fn register<T: WebRenderable + 'static>(mut self) -> Self {
+        self.registry.register::<T>();
+        self
+    }
+
+    /// Install a deliberate fallback handler invoked when a component
+    /// reaches the renderer without a registered handler. Without a
+    /// fallback, missing handlers panic in debug builds and return a
+    /// `JsValue` error in release.
+    pub fn fallback<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&dyn Component, &Document, &WebRendererRegistry) -> Result<Element, JsValue>
+            + 'static,
+    {
+        self.registry.set_fallback(f);
         self
     }
 
@@ -144,9 +67,8 @@ impl Mkui {
         let wrapper = document.create_element("div")?;
         wrapper.set_class_name("min-h-screen flex flex-col bg-background text-foreground");
 
-        // Render all children using the proper rendering system
         for child in &self.children {
-            let element = render_component_to_web(child.as_ref(), &document)?;
+            let element = self.registry.render(child.as_ref(), &document)?;
             wrapper.append_child(&element)?;
         }
 
@@ -157,11 +79,9 @@ impl Mkui {
     }
 }
 
-// TODO: Implement proper component rendering
-// The orphan rule prevents implementing Component for external types directly
-// This needs to be redesigned with a different architecture
-
-// Theme selector component
+/// Theme selector component shipped with mkui-web. Implemented as a
+/// [`WebRenderable`] so it dispatches through the same registry path as
+/// user-defined components.
 pub struct ThemeSelector {
     app: Rc<RefCell<WebApp>>,
 }
@@ -174,12 +94,12 @@ impl ThemeSelector {
 
 impl Component for ThemeSelector {}
 
-// Temporarily implement a custom render method
-impl ThemeSelector {
-    pub fn render_web(
+impl WebRenderable for ThemeSelector {
+    fn render_web(
         &self,
-        document: &web_sys::Document,
-    ) -> Result<web_sys::Element, wasm_bindgen::JsValue> {
+        document: &Document,
+        registry: &WebRendererRegistry,
+    ) -> Result<Element, JsValue> {
         let section = document.create_element("div")?;
         section.set_class_name("rounded-lg border bg-card text-card-foreground shadow-sm p-6");
 
@@ -211,27 +131,25 @@ impl ThemeSelector {
         let mode_container = document.create_element("div")?;
         mode_container.set_class_name("flex flex-wrap gap-4");
 
-        // Theme mode buttons using proper Button components
-        let create_mode_button =
-            |text: &str, mode: ThemeMode| -> Result<web_sys::Element, JsValue> {
-                let is_active = self.app.borrow().get_theme_mode() == mode;
-                let variant = if is_active {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Outline
-                };
-
-                let app_clone = Rc::clone(&self.app);
-                let button = Button::new(text)
-                    .variant(variant)
-                    .class("h-9 px-4 py-2")
-                    .on_press(move || {
-                        let _ = app_clone.borrow_mut().set_theme_mode(mode);
-                        web_sys::window().unwrap().location().reload().ok();
-                    });
-
-                button.render_to_web(document)
+        let create_mode_button = |text: &str, mode: ThemeMode| -> Result<Element, JsValue> {
+            let is_active = self.app.borrow().get_theme_mode() == mode;
+            let variant = if is_active {
+                ButtonVariant::Primary
+            } else {
+                ButtonVariant::Outline
             };
+
+            let app_clone = Rc::clone(&self.app);
+            let button = Button::new(text)
+                .variant(variant)
+                .class("h-9 px-4 py-2")
+                .on_press(move || {
+                    let _ = app_clone.borrow_mut().set_theme_mode(mode);
+                    web_sys::window().unwrap().location().reload().ok();
+                });
+
+            registry.render(&button, document)
+        };
 
         mode_container.append_child(&create_mode_button("Light", ThemeMode::Light)?.into())?;
         mode_container.append_child(&create_mode_button("Dark", ThemeMode::Dark)?.into())?;
@@ -251,7 +169,7 @@ impl ThemeSelector {
         let color_grid = document.create_element("div")?;
         color_grid.set_class_name("grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4");
 
-        let create_color_button = |theme: ColorTheme| -> Result<web_sys::Element, JsValue> {
+        let create_color_button = |theme: ColorTheme| -> Result<Element, JsValue> {
             let theme_name = format!("{:?}", theme);
             let is_active = self.app.borrow().get_color_theme() == &theme;
             let variant = if is_active {
@@ -269,7 +187,7 @@ impl ThemeSelector {
                     web_sys::window().unwrap().location().reload().ok();
                 });
 
-            button.render_to_web(document)
+            registry.render(&button, document)
         };
 
         for theme in ColorTheme::all() {

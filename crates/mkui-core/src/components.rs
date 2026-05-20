@@ -9,6 +9,32 @@
 //! [`std::any::Any`] so backends can downcast to the concrete component types
 //! ([`View`], [`Text`], [`Button`], or any user-defined component) and render
 //! them in a backend-specific way.
+//!
+//! ## The renderer / component boundary
+//!
+//! Backends must satisfy two rules:
+//!
+//! 1. **No closed downcast list.** A backend MUST NOT branch on a fixed set
+//!    of concrete `mkui-core` types as its only extension path. The orphan
+//!    rule prevents downstream crates from implementing a backend-specific
+//!    render trait on `mkui-core` types, but user crates own *their own*
+//!    component types and must be able to plug them into the renderer
+//!    without forking the backend.
+//!
+//! 2. **Open dispatch via [`std::any::TypeId`].** The recommended pattern is
+//!    a registry that maps each component's [`TypeId`](std::any::TypeId) to a
+//!    handler function. The backend defines a local extension trait
+//!    (e.g. `mkui_web::WebRenderable`) and a registry
+//!    (e.g. `mkui_web::WebRendererRegistry`) seeded with handlers for the
+//!    built-in [`View`], [`Text`], and [`Button`] types. User code
+//!    implements the extension trait for its own components and registers
+//!    them at app construction. Unknown components are a deliberate failure
+//!    (panic in debug / explicit fallback hook), not a silent placeholder.
+//!
+//! Anything that requires a backend-specific value (DOM nodes, terminal
+//! cells, GPU buffers) lives in the backend crate — never in `mkui-core`.
+//! See `mkui-web`'s `render` module for a reference implementation of this
+//! boundary.
 
 use std::rc::Rc;
 
@@ -19,6 +45,13 @@ use crate::headless::{ButtonVariant, TextVariant};
 /// Implementations are simple value types that backends introspect via
 /// [`std::any::Any`]. No rendering logic lives here — keeping
 /// backend-specific code out of `mkui-core` is the whole point of the crate.
+///
+/// Backends dispatch by reading [`Any::type_id`](std::any::Any::type_id) and
+/// looking the type up in a registry of backend-specific render handlers
+/// (see the module-level docs on the renderer / component boundary). User
+/// crates may implement `Component` on their own types and register the
+/// matching backend-specific render handler — the backend does not need to
+/// know about the type in advance.
 pub trait Component: std::any::Any {
     /// Optional stable identifier used by backends for diffing or focus
     /// tracking. The default implementation returns `None`.
@@ -214,9 +247,15 @@ mod tests {
         let text: Box<dyn Component> = Box::new(Text::new("hello"));
         let button: Box<dyn Component> = Box::new(Button::new("ok"));
 
-        assert!((view.as_ref() as &dyn std::any::Any).downcast_ref::<View>().is_some());
-        assert!((text.as_ref() as &dyn std::any::Any).downcast_ref::<Text>().is_some());
-        assert!((button.as_ref() as &dyn std::any::Any).downcast_ref::<Button>().is_some());
+        assert!((view.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<View>()
+            .is_some());
+        assert!((text.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<Text>()
+            .is_some());
+        assert!((button.as_ref() as &dyn std::any::Any)
+            .downcast_ref::<Button>()
+            .is_some());
     }
 
     #[test]
