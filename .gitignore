@@ -14,6 +14,9 @@
 # Tool-generated agent briefs (regenerated per batch run)
 .claude-agent-instructions.md
 
+# Claude Code per-worktree state
+.claude/
+
 # Per-issue ship prompts and other ephemeral miky state
 .miky/
 
