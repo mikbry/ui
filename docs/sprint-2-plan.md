@@ -222,13 +222,13 @@ Phase 1.5 lands last but writes claims about `ci.yml` (1.2), MSRV (1.4), `mkui-c
 - [ ] **Sprint 1 retro's binding lessons applied:**
   - Lesson 1: every `miky batch rebase` call defaults to sequential (no `--merge parallel`)
   - Lesson 2: pre-push gates are now CI-enforced (Phase 1.2 makes them real, not theatre)
-  - Lesson 3: audit-driven planning — this Sprint 2 plan IS the canonical example for the cross-project meta-skill (per Miky's reply on 2026-05-20)
+  - Lesson 3: audit-driven planning — this Sprint 2 plan's existence is one of two empirical instances (mkui + marabot) that motivated the single principle line landing in `sprint-and-batch-discipline.skill.md` per Miky's correction note on 2026-05-21. **Not** a promoted meta-skill; the plan-template-as-skill is deferred to a third-instance trigger.
 - [ ] **Audit refreshed** after Sprint 2 close (per #180 — staleness warning fires if not re-run)
 - [ ] **The 3 owed bug filings** from Sprint 1 retro land on `mikbry/miky`:
   - `miky pr diff` subcommand missing
   - `.claude-audit-instructions.md` not in default gitignore
   - Rebase prompt assumes CI exists
-- [ ] **`docs/downstream-consumers.md`** lands (per Miky's reply: canonical example for `project-self-description.skill.md`); don't slim it
+- [ ] **`docs/downstream-consumers.md`** lands as an example future projects can copy from. Per Miky's correction note on 2026-05-21, the gap is not promoted to a separate skill yet (Sandi Metz's rule of three — `project-self-description.skill.md` earns its keep only when a third project independently surfaces the need). Don't slim the file regardless.
 - [ ] **`docs/CONTRIBUTING.md`** lands (referenced by audit-staleness warning; closes the dangling reference)
 - [ ] **Sprint 2 retro filed** per the per-sprint discipline; includes:
   - Did the 3-round Codex/operator-attention budget hold for Phase 1.1?
@@ -274,12 +274,14 @@ The Sprint 1 close-out commit lands `audit + retro + this plan + downstream-cons
 
 ## Discipline notes
 
-This is the **third sprint plan written to the depth of `mikbry/miky-internal/docs/sprint-7-plan.md`** in a non-miky project (after `mikbry/marabot/.../sprint-2-plan.md`). Both prior plans surfaced cross-project gaps that landed in `mikbry/agent-skills#2`:
+This is the **second non-miky sprint plan written to the depth of `mikbry/miky-internal/docs/sprint-7-plan.md`** (after `mikbry/marabot/.../sprint-2-plan.md`). Both surfaced cross-project gaps that informed `mikbry/agent-skills#2`:
 
-- **Marabot Sprint 2 plan:** sprint-plan-artifact gap — CONTRIBUTING described the invariants but didn't list this artifact as a required deliverable at sprint-creation time
-- **mkui Sprint 2 plan (this doc):** audit-driven-planning gap — `miky project audit` should run *before* the first batch, not just before sprint close
+- **Marabot Sprint 2 plan:** sprint-plan-artifact gap — CONTRIBUTING described the invariants but didn't list this artifact as a required deliverable at sprint-creation time (temporal axis).
+- **mkui Sprint 2 plan (this doc):** audit-driven-planning gap — `miky project audit` should run *before* the first batch, not just before sprint close (operational axis).
 
-This plan's existence is itself signal: the cross-project meta-skill (`ground-in-current-state-before-planning.skill.md`) integrates both gaps into one principle, and this plan is the third canonical example demonstrating the skill's portability.
+Per Miky's correction note on 2026-05-21, the actual scope landing in `mikbry/agent-skills#2` is **one principle line** in the existing `sprint-and-batch-discipline.skill.md` covering "ground in current-state evidence before planning or claim" across both axes — not a promoted standalone meta-skill. The 9-section sprint-plan template that this doc demonstrates is deferred to a third-instance trigger per Sandi Metz's rule of three; if a future independent project surfaces the same need, the template earns its keep then.
+
+This plan is, in honest framing, **a planning artifact for mkui** that happens to be the second empirical data point informing the principle line — not a canonical reference for an external skill.
 
 **What's different from Sprint 1's planning:**
 

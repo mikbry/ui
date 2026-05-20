@@ -112,11 +112,16 @@ CI enforces these on every PR push. Local pre-push hooks may run them as a court
 
 ## Cross-project signal
 
-mkui is the second non-miky project (after `mikbry/marabot`) modeling miky's sprint-and-batch discipline. Per the 2026-05-20 cross-project check-in, every gap mkui surfaces is signal that miky's own orchestrator sessions wouldn't find. The current bound contributions are tracked in `mikbry/agent-skills#2`:
+mkui is the second non-miky project (after `mikbry/marabot`) modeling miky's sprint-and-batch discipline. Per the 2026-05-20 cross-project check-in, every gap mkui surfaces is signal that miky's own orchestrator sessions wouldn't find.
 
-- **Audit-driven planning** (Sprint 1 retro Lesson 3) → `ground-in-current-state-before-planning.skill.md` integration
-- **Project self-description** (Sprint 1 retro Caveat 3) → `project-self-description.skill.md` (new skill; `docs/downstream-consumers.md` is the canonical example)
-- **Calibration table** (Sprint 1 retro Caveat 1) → `sprint-and-batch-discipline.skill.md` (existing skill, mkui rows added)
+Per Miky's correction note on 2026-05-21, the actual scope landing in `mikbry/agent-skills#2` from Sprint 1 retro is **two amendments**, not a multi-skill promotion (the earlier over-claim was retracted per Sandi Metz's rule-of-three discipline — abstractions earn their keep on the third instance, not the second):
+
+- **Cadence-is-project-shaped subsection** added to `sprint-and-batch-discipline.skill.md`, with mkui's "3-4 issues/batch, file-dense workspace" calibration as one row alongside miky's and marabot's. Sourced from Sprint 1 retro Caveat 1.
+- **Single principle line** added to the same skill covering "ground in current-state evidence before planning or claim" across temporal, operational, and alignment axes. Sourced jointly from Marabot's temporal-axis finding and mkui's Sprint 1 retro Lesson 3 (operational axis).
+
+Deferred to third-instance triggers (not promoted as separate skills until a third independent project surfaces the same need): the 9-section sprint-plan template, the 7-section retro template, the sprint-kick-off ritual, the Sprint-Done 8-item checklist, `project-self-description.skill.md` (mkui's Caveat 3), and `ground-in-current-state-before-planning.skill.md` as a standalone meta-skill.
+
+This means `docs/downstream-consumers.md` is **the example future projects can copy from**, not the canonical reference for an existing skill. If a third project independently needs the same project-self-description artifact, the skill earns its keep then.
 
 When future sprint retros surface new gaps, file them as comments on `mikbry/agent-skills#2` or as bugs on `mikbry/miky` per the filing-split convention (mkui files 3 owed bugs at Sprint 1 formal close; subsequent retros follow the same pattern).
 

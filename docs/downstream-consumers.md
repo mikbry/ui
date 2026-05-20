@@ -1,6 +1,6 @@
 # Downstream consumers of `mkui`
 
-> **This document exists because a cold orchestrator planning the next sprint cannot reach into sibling repos.** `mkui` is internal substrate — the projects that consume it determine which gaps matter, which components must ship next, and which "renderer realities" must paint pixels first. Without this document, sprint planning depends on operator side-channel knowledge of `mikbry/stonesketch`, `mikbry/miky-internal`, and other consumer repos. That dependency surfaced as the load-bearing project-self-description gap in mkui's Sprint 1 retro (2026-05-20) and is the canonical example for `project-self-description.skill.md` on `mikbry/agent-skills#2`.
+> **This document exists because a cold orchestrator planning the next sprint cannot reach into sibling repos.** `mkui` is internal substrate — the projects that consume it determine which gaps matter, which components must ship next, and which "renderer realities" must paint pixels first. Without this document, sprint planning depends on operator side-channel knowledge of `mikbry/stonesketch`, `mikbry/miky-internal`, and other consumer repos. That dependency surfaced as the load-bearing project-self-description gap in mkui's Sprint 1 retro (2026-05-20). Per Miky's correction note on 2026-05-21, the gap is **not yet promoted to a separate skill** — `project-self-description.skill.md` would require a third independent project to need the same artifact (Sandi Metz's rule of three). Until then, this file is **the example future projects can copy from**, not a skill's canonical reference.
 >
 > **Maintenance contract:** every active consumer below has a status section. When a consumer's needs change (new components required, renderer becomes blocking, deprecation pending), update that section in the same sprint. The doc isn't optional context — it's the *shape* of mkui's roadmap.
 
@@ -114,4 +114,4 @@ These are the sprints where consumer needs and mkui capabilities synchronize:
 
 ---
 
-**Last updated:** 2026-05-20 (Sprint 1 close-out batch — created as the canonical example for `project-self-description.skill.md` per `mikbry/agent-skills#2`).
+**Last updated:** 2026-05-21 (Sprint 1 close-out batch + correction note — created as an example future projects can copy from; not promoted as a separate skill until a third independent project surfaces the same need).
