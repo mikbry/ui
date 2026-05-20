@@ -13,6 +13,7 @@
 
 # Tool-generated agent briefs (regenerated per batch run)
 .claude-agent-instructions.md
+.claude-audit-instructions.md
 
 # Claude Code per-worktree state
 .claude/
