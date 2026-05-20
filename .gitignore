@@ -13,3 +13,9 @@
 
 # Tool-generated agent briefs (regenerated per batch run)
 .claude-agent-instructions.md
+
+# Per-issue ship prompts and other ephemeral miky state
+.miky/
+
+# VS Code multi-root workspace file (personal dev layout)
+*.code-workspace
