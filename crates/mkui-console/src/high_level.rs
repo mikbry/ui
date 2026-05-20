@@ -6,16 +6,20 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, size, Clear, ClearType},
 };
 use mkui_core::components::{Button, Component, Text, View};
-use mkui_core::headless::ButtonVariant;
+use mkui_core::headless::{ButtonVariant, TextVariant};
 use std::io::{self, stdout, Write};
 use std::rc::Rc;
 
-/// Console app with the high-level mkui interface.
+/// Console backend for the shared `mkui-core` component tree.
 ///
-/// The component tree is held as `Box<dyn Component>` from `mkui-core` —
-/// exactly the same model the web and native backends consume.
+/// The renderer walks any `Box<dyn Component>` tree built from `mkui-core` —
+/// the same model the web and native backends consume — and produces a
+/// terminal rendering. It does not know about showcase-specific class
+/// strings or layouts; styling comes from the typed `TextVariant` /
+/// `ButtonVariant` values on each component.
 pub struct Mkui {
     children: Vec<Box<dyn Component>>,
+    layout: Vec<Line>,
     buttons: Vec<ConsoleButton>,
     selected_button: usize,
     last_terminal_size: (u16, u16),
@@ -28,7 +32,7 @@ struct ConsoleButton {
     on_press: Option<Rc<dyn Fn()>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 enum Line {
     Heading(String),
     Body(String),
@@ -42,6 +46,7 @@ impl Mkui {
         let initial_size = size().unwrap_or((80, 24));
         Ok(Self {
             children: Vec::new(),
+            layout: Vec::new(),
             buttons: Vec::new(),
             selected_button: 0,
             last_terminal_size: initial_size,
@@ -55,14 +60,13 @@ impl Mkui {
     }
 
     pub fn run(mut self) -> std::io::Result<()> {
-        let layout = self.flatten_tree();
-        self.collect_buttons(&layout);
+        self.build_layout();
 
         if self.buttons.is_empty() {
             // No interactive controls — render once without the
             // "Press q/Esc" footer and return. The footer would advertise
             // a key the program never reads.
-            return self.render(&layout, false);
+            return self.render(false);
         }
 
         enable_raw_mode()?;
@@ -75,7 +79,7 @@ impl Mkui {
                 execute!(stdout(), Clear(ClearType::All), Clear(ClearType::Purge))?;
             }
 
-            self.render(&layout, true)?;
+            self.render(true)?;
 
             let evt = event::read()?;
             match evt {
@@ -114,74 +118,17 @@ impl Mkui {
         Ok(())
     }
 
-    fn flatten_tree(&self) -> Vec<Line> {
-        let mut out = Vec::new();
+    fn build_layout(&mut self) {
+        let mut layout = Vec::new();
+        let mut buttons = Vec::new();
         for child in &self.children {
-            self.flatten_component(child.as_ref(), &mut out);
+            walk_component(child.as_ref(), &mut layout, &mut buttons);
         }
-        out
+        self.layout = layout;
+        self.buttons = buttons;
     }
 
-    fn flatten_component(&self, component: &dyn Component, out: &mut Vec<Line>) {
-        let any = component as &dyn std::any::Any;
-
-        if let Some(view) = any.downcast_ref::<View>() {
-            for child in view.children() {
-                self.flatten_component(child.as_ref(), out);
-            }
-            return;
-        }
-
-        if let Some(text) = any.downcast_ref::<Text>() {
-            let content = text.content().to_string();
-            let class = text.class_name();
-            let line = if class.contains("text-4xl") || class.contains("text-2xl") {
-                Line::Heading(content)
-            } else if class.contains("text-muted-foreground") {
-                Line::Muted(content)
-            } else {
-                Line::Body(content)
-            };
-            out.push(line);
-            out.push(Line::Spacer);
-            return;
-        }
-
-        if let Some(_button) = any.downcast_ref::<Button>() {
-            let index = self
-                .buttons
-                .len()
-                .saturating_add(out.iter().filter(|l| matches!(l, Line::Button(_))).count());
-            out.push(Line::Button(index));
-        }
-    }
-
-    fn collect_buttons(&mut self, _layout: &[Line]) {
-        // Walk the component tree once and pull every Button into `buttons`
-        // in the same order they appear in `_layout`.
-        let mut collected = Vec::new();
-        for child in &self.children {
-            Self::collect_buttons_in(child.as_ref(), &mut collected);
-        }
-        self.buttons = collected;
-    }
-
-    fn collect_buttons_in(component: &dyn Component, out: &mut Vec<ConsoleButton>) {
-        let any = component as &dyn std::any::Any;
-        if let Some(view) = any.downcast_ref::<View>() {
-            for child in view.children() {
-                Self::collect_buttons_in(child.as_ref(), out);
-            }
-        } else if let Some(button) = any.downcast_ref::<Button>() {
-            out.push(ConsoleButton {
-                label: button.content().to_string(),
-                variant: button.button_variant().clone(),
-                on_press: button.on_press_handler().clone(),
-            });
-        }
-    }
-
-    fn render(&self, layout: &[Line], interactive: bool) -> io::Result<()> {
+    fn render(&self, interactive: bool) -> io::Result<()> {
         let (width, height) = size()?;
         let width = width as usize;
         let height = height as usize;
@@ -189,12 +136,16 @@ impl Mkui {
         let clear_width = width.max(self.last_terminal_size.0 as usize);
         let clear_height = height.max(self.last_terminal_size.1 as usize);
         for row in 0..clear_height {
-            execute!(stdout(), MoveTo(0, row as u16), Print(" ".repeat(clear_width)))?;
+            execute!(
+                stdout(),
+                MoveTo(0, row as u16),
+                Print(" ".repeat(clear_width))
+            )?;
         }
         execute!(stdout(), MoveTo(0, 0))?;
 
         let mut current_row: u16 = 2;
-        for line in layout {
+        for line in &self.layout {
             match line {
                 Line::Heading(text) => {
                     execute!(stdout(), MoveTo(2, current_row))?;
@@ -218,15 +169,25 @@ impl Mkui {
                         let text = format!("[ {} ]", button.label);
                         execute!(stdout(), MoveTo(4, current_row))?;
                         match (is_selected, &button.variant) {
-                            (true, ButtonVariant::Primary) => print!("{}", text.white().on_blue().bold()),
-                            (true, ButtonVariant::Secondary) => print!("{}", text.black().on_grey().bold()),
-                            (true, ButtonVariant::Destructive) => print!("{}", text.white().on_red().bold()),
+                            (true, ButtonVariant::Primary) => {
+                                print!("{}", text.white().on_blue().bold())
+                            }
+                            (true, ButtonVariant::Secondary) => {
+                                print!("{}", text.black().on_grey().bold())
+                            }
+                            (true, ButtonVariant::Destructive) => {
+                                print!("{}", text.white().on_red().bold())
+                            }
                             (true, ButtonVariant::Outline) => print!("{}", text.blue().bold()),
                             (true, ButtonVariant::Ghost) => print!("{}", text.blue().bold()),
-                            (true, ButtonVariant::Link) => print!("{}", text.blue().bold().underlined()),
+                            (true, ButtonVariant::Link) => {
+                                print!("{}", text.blue().bold().underlined())
+                            }
                             (false, ButtonVariant::Primary) => print!("{}", text.white().on_blue()),
                             (false, ButtonVariant::Secondary) => print!("{}", text.dark_grey()),
-                            (false, ButtonVariant::Destructive) => print!("{}", text.white().on_dark_red()),
+                            (false, ButtonVariant::Destructive) => {
+                                print!("{}", text.white().on_dark_red())
+                            }
                             (false, ButtonVariant::Outline) => print!("{}", text.white()),
                             (false, ButtonVariant::Ghost) => print!("{}", text.dark_grey()),
                             (false, ButtonVariant::Link) => print!("{}", text.white().underlined()),
@@ -254,6 +215,49 @@ impl Mkui {
     }
 }
 
+/// Single-pass walk over the shared component tree.
+///
+/// Emits flat lines for the terminal renderer and collects interactive
+/// buttons into the parallel array `Line::Button(index)` points into.
+fn walk_component(
+    component: &dyn Component,
+    layout: &mut Vec<Line>,
+    buttons: &mut Vec<ConsoleButton>,
+) {
+    let any = component as &dyn std::any::Any;
+
+    if let Some(view) = any.downcast_ref::<View>() {
+        for child in view.children() {
+            walk_component(child.as_ref(), layout, buttons);
+        }
+        return;
+    }
+
+    if let Some(text) = any.downcast_ref::<Text>() {
+        let content = text.content().to_string();
+        let line = match text.text_variant() {
+            TextVariant::Heading1 | TextVariant::Heading2 | TextVariant::Heading3 => {
+                Line::Heading(content)
+            }
+            TextVariant::Caption | TextVariant::Label => Line::Muted(content),
+            TextVariant::Body | TextVariant::Code => Line::Body(content),
+        };
+        layout.push(line);
+        layout.push(Line::Spacer);
+        return;
+    }
+
+    if let Some(button) = any.downcast_ref::<Button>() {
+        let index = buttons.len();
+        buttons.push(ConsoleButton {
+            label: button.content().to_string(),
+            variant: button.button_variant().clone(),
+            on_press: button.on_press_handler().clone(),
+        });
+        layout.push(Line::Button(index));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,7 +265,7 @@ mod tests {
     use std::cell::Cell;
 
     #[test]
-    fn collect_buttons_in_preserves_on_press_handler() {
+    fn walk_component_preserves_on_press_handler() {
         let pressed = Rc::new(Cell::new(0u32));
         let pressed_in = Rc::clone(&pressed);
 
@@ -269,11 +273,12 @@ mod tests {
             pressed_in.set(pressed_in.get() + 1);
         });
 
-        let mut collected = Vec::new();
-        Mkui::collect_buttons_in(&button, &mut collected);
+        let mut layout = Vec::new();
+        let mut buttons = Vec::new();
+        walk_component(&button, &mut layout, &mut buttons);
 
-        assert_eq!(collected.len(), 1);
-        let captured = collected[0]
+        assert_eq!(buttons.len(), 1);
+        let captured = buttons[0]
             .on_press
             .as_ref()
             .expect("handler must be captured, not dropped");
@@ -288,29 +293,108 @@ mod tests {
     }
 
     #[test]
-    fn collect_buttons_in_walks_nested_views() {
+    fn walk_component_recurses_into_nested_views() {
         let pressed = Rc::new(Cell::new(false));
         let pressed_in = Rc::clone(&pressed);
 
-        let tree = View::new()
-            .class("row")
-            .child(View::new().child(CoreButton::new("deep").on_press(move || pressed_in.set(true))));
+        let tree = View::new().class("row").child(
+            View::new().child(CoreButton::new("deep").on_press(move || pressed_in.set(true))),
+        );
 
-        let mut collected = Vec::new();
-        Mkui::collect_buttons_in(&tree, &mut collected);
+        let mut layout = Vec::new();
+        let mut buttons = Vec::new();
+        walk_component(&tree, &mut layout, &mut buttons);
 
-        assert_eq!(collected.len(), 1);
-        collected[0].on_press.as_ref().expect("handler")();
+        assert_eq!(buttons.len(), 1);
+        buttons[0].on_press.as_ref().expect("handler")();
         assert!(pressed.get());
     }
 
     #[test]
-    fn collect_buttons_in_handles_buttons_without_handlers() {
+    fn walk_component_handles_buttons_without_handlers() {
         let button = CoreButton::new("no handler");
-        let mut collected = Vec::new();
-        Mkui::collect_buttons_in(&button, &mut collected);
+        let mut layout = Vec::new();
+        let mut buttons = Vec::new();
+        walk_component(&button, &mut layout, &mut buttons);
 
-        assert_eq!(collected.len(), 1);
-        assert!(collected[0].on_press.is_none());
+        assert_eq!(buttons.len(), 1);
+        assert!(buttons[0].on_press.is_none());
+    }
+
+    #[test]
+    fn text_variant_drives_line_style_not_class_string() {
+        // The backend must classify text by its typed `TextVariant`, not by
+        // sniffing showcase-specific Tailwind class strings — that coupling
+        // is what the "real component renderer" issue removes.
+        let tree = View::new()
+            .child(
+                Text::new("title")
+                    .variant(TextVariant::Heading1)
+                    .class("text-4xl"),
+            )
+            .child(
+                Text::new("note")
+                    .variant(TextVariant::Caption)
+                    .class("text-xs"),
+            )
+            .child(Text::new("body").class("text-base"));
+
+        let mut layout = Vec::new();
+        let mut buttons = Vec::new();
+        walk_component(&tree, &mut layout, &mut buttons);
+
+        let lines: Vec<&Line> = layout
+            .iter()
+            .filter(|l| !matches!(l, Line::Spacer))
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(*lines[0], Line::Heading("title".into()));
+        assert_eq!(*lines[1], Line::Muted("note".into()));
+        assert_eq!(*lines[2], Line::Body("body".into()));
+    }
+
+    #[test]
+    fn build_layout_renders_a_realistic_showcase_tree() {
+        // Smoke test for the backend path: a small `mkui-core` tree
+        // containing a heading, a button, and nested views flows through
+        // `build_layout` and produces a non-trivial layout + button list.
+        let mut app = Mkui::new().expect("init mkui-console");
+        app = app.child(
+            View::new()
+                .class("container")
+                .child(Text::new("Hello").variant(TextVariant::Heading1))
+                .child(Text::new("subtitle").variant(TextVariant::Caption))
+                .child(
+                    View::new()
+                        .class("row")
+                        .child(CoreButton::new("Primary").variant(ButtonVariant::Primary))
+                        .child(CoreButton::new("Ghost").variant(ButtonVariant::Ghost)),
+                ),
+        );
+
+        app.build_layout();
+
+        assert_eq!(app.buttons.len(), 2);
+        assert_eq!(app.buttons[0].label, "Primary");
+        assert_eq!(app.buttons[1].label, "Ghost");
+        assert!(matches!(app.buttons[0].variant, ButtonVariant::Primary));
+
+        let button_lines: Vec<&Line> = app
+            .layout
+            .iter()
+            .filter(|l| matches!(l, Line::Button(_)))
+            .collect();
+        assert_eq!(button_lines.len(), 2);
+        assert_eq!(*button_lines[0], Line::Button(0));
+        assert_eq!(*button_lines[1], Line::Button(1));
+
+        assert!(app
+            .layout
+            .iter()
+            .any(|l| matches!(l, Line::Heading(t) if t == "Hello")));
+        assert!(app
+            .layout
+            .iter()
+            .any(|l| matches!(l, Line::Muted(t) if t == "subtitle")));
     }
 }

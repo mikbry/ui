@@ -1,8 +1,8 @@
 use mkui::prelude::*;
-use mkui_core::components::{View, Text, Button};
-use mkui_core::headless::ButtonVariant;
+use mkui_core::components::{Button, Text, View};
+use mkui_core::headless::{ButtonVariant, TextVariant};
 
-// Create the common showcase UI structure  
+// Create the common showcase UI structure
 pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
     Ok(Mkui::new()?
         .child(
@@ -20,10 +20,12 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                         .class("flex items-center space-x-4")
                                         .child(
                                             Text::new("miklabs/ui")
+                                                .variant(TextVariant::Heading2)
                                                 .class("text-xl font-semibold")
                                         )
                                         .child(
                                             Text::new("Modern UI toolkit for Rust, C, C++ & Python")
+                                                .variant(TextVariant::Caption)
                                                 .class("text-sm text-muted-foreground hidden sm:block")
                                         )
                                 )
@@ -64,10 +66,12 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                         .class("text-center mb-12")
                                         .child(
                                             Text::new("miklabs/ui Component Library")
+                                                .variant(TextVariant::Heading1)
                                                 .class("text-4xl font-bold tracking-tight text-foreground mb-4")
                                         )
                                         .child(
                                             Text::new("Beautiful, accessible components for Rust, C, C++ & Python")
+                                                .variant(TextVariant::Caption)
                                                 .class("text-xl text-muted-foreground")
                                         )
                                 )
@@ -80,10 +84,12 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                 .class("mb-6")
                                                 .child(
                                                     Text::new("Button Components")
+                                                        .variant(TextVariant::Heading2)
                                                         .class("text-2xl font-semibold leading-none tracking-tight")
                                                 )
                                                 .child(
                                                     Text::new("Various button styles and variants")
+                                                        .variant(TextVariant::Caption)
                                                         .class("text-sm text-muted-foreground mt-2")
                                                 )
                                         )
@@ -156,6 +162,7 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                         .class("flex flex-col sm:flex-row items-center justify-between gap-4 text-sm text-muted-foreground")
                                         .child(
                                             Text::new("Built with 🦀 Rust")
+                                                .variant(TextVariant::Caption)
                                         )
                                         .child(
                                             View::new()
@@ -178,8 +185,11 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             }
                                                         })
                                                 )
-                                                .child(Text::new("•"))
-                                                .child(Text::new("MIT/Apache Licensed"))
+                                                .child(Text::new("•").variant(TextVariant::Caption))
+                                                .child(
+                                                    Text::new("MIT/Apache Licensed")
+                                                        .variant(TextVariant::Caption)
+                                                )
                                         )
                                 )
                         )
