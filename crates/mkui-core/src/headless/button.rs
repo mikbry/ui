@@ -255,3 +255,9 @@ impl ButtonBuilder {
         }
     }
 }
+
+impl Default for ButtonBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}

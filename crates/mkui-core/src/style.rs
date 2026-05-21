@@ -1,3 +1,5 @@
+use std::fmt;
+
 /// Style classes and utilities (Tailwind-like)
 #[derive(Debug, Clone, Default)]
 pub struct StyleClass {
@@ -8,14 +10,16 @@ impl StyleClass {
     pub fn new() -> Self {
         Self { classes: Vec::new() }
     }
-    
-    pub fn add(mut self, class: &str) -> Self {
+
+    pub fn push_class(mut self, class: &str) -> Self {
         self.classes.push(class.to_string());
         self
     }
-    
-    pub fn to_string(&self) -> String {
-        self.classes.join(" ")
+}
+
+impl fmt::Display for StyleClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.classes.join(" "))
     }
 }
 
@@ -24,6 +28,6 @@ pub struct Style;
 
 impl Style {
     pub fn class(class: &str) -> StyleClass {
-        StyleClass::new().add(class)
+        StyleClass::new().push_class(class)
     }
 }

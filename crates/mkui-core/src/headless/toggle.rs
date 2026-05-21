@@ -166,3 +166,9 @@ impl ToggleBuilder {
         }
     }
 }
+
+impl Default for ToggleBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
