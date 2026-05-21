@@ -18,31 +18,31 @@
 //! ## Layers
 //!
 //! - [`types`]        — primitives (Point / Rect / Color / Scene / Primitive),
-//!    text & font handles, `HitRegion<T>`, `PanelLayout<T>`.
+//!   text & font handles, `HitRegion<T>`, `PanelLayout<T>`.
 //! - [`theme`]        — [`HudTheme`], [`ButtonVariant`], [`ButtonSize`],
-//!    [`ButtonState`], [`TextVariant`], and cva-style style resolvers.
-//!    Mirrors shadcn's variant / size / state model.
+//!   [`ButtonState`], [`TextVariant`], and cva-style style resolvers.
+//!   Mirrors shadcn's variant / size / state model.
 //! - [`components`]   — scene builders: [`components::card`],
-//!    [`components::button`], [`components::input`], [`components::slider`],
-//!    [`components::chip_group`], [`components::scrollbar`],
-//!    [`components::swatch`], [`components::heading`], [`components::text`], plus the
-//!    [`components::panel`] / [`components::titled_panel`] primitives the
-//!    higher-level components are built from. Mirrors the component surface
-//!    of [`miklabs/ui`] (`mkui-core::components`) — `View` / `Text` /
-//!    `Button` / `Toggle` with variant + size.
+//!   [`components::button`], [`components::input`], [`components::slider`],
+//!   [`components::chip_group`], [`components::scrollbar`],
+//!   [`components::swatch`], [`components::heading`], [`components::text`], plus the
+//!   [`components::panel`] / [`components::titled_panel`] primitives the
+//!   higher-level components are built from. Mirrors the component surface
+//!   of [`miklabs/ui`] (`mkui-core::components`) — `View` / `Text` /
+//!   `Button` / `Toggle` with variant + size.
 //! - [`builder`]      — [`UiBuilder<T>`], [`NumberRow`], [`ListRow`]: a
-//!    declarative immediate-mode layer above `components`. Overlay panels
-//!    describe rows as data (`NumberRow { … }`, `ListRow { … }`) rather than
-//!    hand-rolling per-row drawing helpers. Mirrors
-//!    `mkui-core::View` / `Stack` / `Row`.
+//!   declarative immediate-mode layer above `components`. Overlay panels
+//!   describe rows as data (`NumberRow { … }`, `ListRow { … }`) rather than
+//!   hand-rolling per-row drawing helpers. Mirrors
+//!   `mkui-core::View` / `Stack` / `Row`.
 //! - [`app`] / [`renderer`] / [`high_level`] — backend-oriented wrappers so
-//!    the crate can evolve like `mkui-web` and `mkui-console`, rather than
-//!    staying a loose pile of scene helpers.
+//!   the crate can evolve like `mkui-web` and `mkui-console`, rather than
+//!   staying a loose pile of scene helpers.
 //! - [`prelude`]      — one-glob import for scene builders: builder, theme
-//!    variants, geometry. Target shape is `use mkui_wgpu::prelude::*;`
-//!    so scene-based hosts read like `mkui::prelude::*` consumers.
+//!   variants, geometry. Target shape is `use mkui_wgpu::prelude::*;`
+//!   so scene-based hosts read like `mkui::prelude::*` consumers.
 //! - `tessellation`   — private: `Scene` → triangles and the bitmap-glyph
-//!    fallback used until the SDF atlas lands.
+//!   fallback used until the SDF atlas lands.
 //!
 //! [`miklabs/ui`]: https://github.com/mikbry/ui
 //! [`mkui`]: https://docs.rs/mkui
