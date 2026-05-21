@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+# `mkui-py` is excluded from every job because of the open PyO3 / Python 3.14
+# build issue. Re-enable it once that lands.
+#
+# Three jobs (fmt, clippy, build-release) are commented out below because the
+# workspace has pre-existing debt that lands as separate Sprint 2 hygiene PRs.
+# Each TODO marker references the issue that uncomments it.
+
+jobs:
+  # BLOCKED-BY: #27 — workspace `cargo fmt --all` cleanup.
+  # Uncomment when #27 lands. Until then, fmt drift is silently accepted.
+  # fmt:
+  #   name: fmt
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         components: rustfmt
+  #     - run: cargo fmt --all -- --check
+
+  # BLOCKED-BY: #18 (mkui-core std-trait shadowing + default impls + StyleClass::add rename),
+  #             #25 (mkui-wgpu doc-overindent + field-reassign + too-many-args),
+  #             #26 (mkui-c unused crate_dir),
+  #             Phase 1.1 / Sprint 4 (mkui-c FFI soundness — 11 not_unsafe_ptr_arg_deref errors).
+  # Uncomment when #18 + #25 + #26 all merge. At that point `--exclude mkui-c`
+  # is the temporary gate; full-workspace clippy comes after Sprint 4's Phase 1.1.
+  # clippy:
+  #   name: clippy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         components: clippy
+  #     - uses: actions/cache@v4
+  #       with:
+  #         path: |
+  #           ~/.cargo/registry/index
+  #           ~/.cargo/registry/cache
+  #           ~/.cargo/git/db
+  #           target
+  #         key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+  #         restore-keys: |
+  #           ${{ runner.os }}-cargo-clippy-
+  #     - run: cargo clippy --workspace --exclude mkui-py --exclude mkui-c --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+      - run: cargo test --workspace --exclude mkui-py
+
+  # BLOCKED-BY: same as clippy (depends on #18 + #25 + #26 to compile cleanly
+  # under `RUSTFLAGS: -D warnings`). Uncomment alongside clippy.
+  # build-release:
+  #   name: build-release
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dtolnay/rust-toolchain@stable
+  #     - uses: actions/cache@v4
+  #       with:
+  #         path: |
+  #           ~/.cargo/registry/index
+  #           ~/.cargo/registry/cache
+  #           ~/.cargo/git/db
+  #           target
+  #         key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
+  #         restore-keys: |
+  #           ${{ runner.os }}-cargo-build-release-
+  #     - run: cargo build --workspace --exclude mkui-py --release
