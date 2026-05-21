@@ -1,12 +1,11 @@
 [package]
-name = "mkui-wgpu"
+name = "mkui-text"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "WGPU-oriented scene primitives and declarative builders for mkui"
+description = "Text-system trait + from-scratch bitmap prototype for mkui (no external text-stack deps)"
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
-mkui-text = { path = "../mkui-text" }
