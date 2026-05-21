@@ -2,10 +2,31 @@
 
 - **Project:** ui (`miklabs/ui`, `mkui`)
 - **Path:** `/Users/mik/dev/mikbry/ui`
-- **Date:** 2026-05-20
+- **Date:** 2026-05-21
 - **Audience:** Codex (adversarial code reviewer) + future-me.
 - **Status:** Reference document backing a sprint-scope decision. Not a survey.
-- **Verification note:** Both `WebSearch` and `WebFetch` were unavailable in the environment this doc was authored in (permission denied). Version numbers and "last commit" claims below are taken from this assistant's training corpus (knowledge cutoff: January 2026) and are **flagged where staleness is the determining factor**. Codex should re-verify the four crates in section 3 (cosmic-text, glyphon, swash, parley) against crates.io and the source repos before signing off — the *decision* does not turn on point-version detail, but the *evidence* does.
+
+---
+
+## Pre-implementation verification checklist (BLOCKING)
+
+Per Codex review 2026-05-21, the verification caveat is **blocking** — the `mkui-text` implementation issue cannot be filed until each item is checked off and the result is amended back into this document. The conclusions in this doc do not turn on point-version detail, but the *evidence* does, and the doc's authority degrades fast as the ecosystem evolves.
+
+The mkui-text issue body (or the agent's first commit on the mkui-text branch) must verify the following against current state (crates.io + GitHub) and amend this document with the verified versions and dates:
+
+- [ ] **`cosmic-text`** — verify current crate version on crates.io, last commit date on `pop-os/cosmic-text`. The doc claims §3 are training-cutoff (January 2026). If the version has bumped or the API has shifted, update §3.1 and §5 accordingly.
+- [ ] **`glyphon`** — verify current crate version, last commit date on `grovesNL/glyphon`, and confirm the `TextAtlas` / `TextRenderer` shapes described in §6 match the current public API. If glyphon's internal pipeline has been refactored, §6's "lift the structure, not the dep" call may need to swap to direct dependency or to a different reference.
+- [ ] **`swash`** — verify current version, last commit on `linebender/swash`. Especially: confirm COLR/CBDT emoji rasterization is still supported (§3.2 claims it is).
+- [ ] **`parley`** — verify whether parley has hit 1.0 or shipped a public GPU/atlas story since the doc's writing (cutoff: pre-1.0, no atlas). If yes, §1's rejection of parley needs re-examination.
+- [ ] **GPUI's `PlatformTextSystem` trait shape** — confirm via the current `crates/gpui/src/text_system.rs` in `zed-industries/zed` that the trait surface described in §4 still matches. The doc's confidence in "cosmic-text now, platform-native later behind one trait" depends on GPUI's pattern being production-stable.
+- [ ] **iced's cosmic-text wiring** — confirm `iced_wgpu/src/text.rs` still uses cosmic-text + glyphon (or that iced has switched to something else). The doc treats iced as the most direct precedent (§4); if iced has moved off the stack, that changes risk assessment.
+- [ ] **shadcn-era assumptions** — the doc references shadcn naming/variant conventions; verify those references match the current `docs/components/mkui-to-shadcn-mapping.md` after its 2026-05-21 rewrite.
+
+**The verification artifact**: amend this section in-place with a "verified: 2026-MM-DD by <author>, results: …" block before the mkui-text PR opens for Codex review. The PR description must link to the verification commit.
+
+**Why this is blocking, not advisory:** the original draft of this doc framed the verification as a footnote (line 8). Codex flagged that as a P1 boundary violation: a decision doc cannot rest on unverified time-sensitive evidence. This section converts that footnote into a gate.
+
+---
 
 ---
 
@@ -193,19 +214,45 @@ use std::sync::Arc;
 pub struct FontId(pub u32);
 
 /// A line/run of shaped glyphs — the unit `mkui-wgpu` consumes.
+///
+/// Per Codex review (2026-05-21, P1): glyph positions must be absolute (relative
+/// to the run's own origin), not just advances + offsets. The renderer should
+/// not have to replay shaping math to recover final glyph positions; that
+/// defeats the trait's isolation of the text-layout layer.
 #[derive(Clone, Debug)]
 pub struct LayoutRun {
     pub font_id: FontId,
     pub font_size_px: f32,
     pub glyphs: Vec<LayoutGlyph>,
+    /// Origin point in the parent layout's coordinate space. Glyphs' `(x_px, y_px)`
+    /// are relative to this origin. The renderer typically translates by
+    /// `(origin_x_px, origin_y_px)` before emitting quads.
+    pub origin_x_px: f32,
+    pub origin_y_px: f32,
     pub line_y_baseline_px: f32,
     pub line_ascent_px: f32,
     pub line_descent_px: f32,
 }
 
+/// A single shaped glyph with absolute positioning *within its parent run*.
+///
+/// The renderer takes the parent `LayoutRun.origin_{x,y}_px` and adds
+/// `(x_px, y_px)` to get the final pen position. Advances/offsets are kept
+/// for callers that need to do additional layout math (caret hit-testing,
+/// selection-rect computation), but the absolute coordinates are the
+/// canonical positioning.
 #[derive(Copy, Clone, Debug)]
 pub struct LayoutGlyph {
     pub glyph_id: u16,
+    /// Absolute x position, relative to `LayoutRun.origin_x_px`.
+    pub x_px: f32,
+    /// Absolute y position, relative to `LayoutRun.origin_y_px`.
+    /// Typically equal to the line's baseline + y_offset.
+    pub y_px: f32,
+    /// Shaping outputs retained for callers that need them (hit-testing,
+    /// selection-rect math). The implementation MAY derive `x_px` from
+    /// `x_advance_px` + `x_offset_px`, but the trait guarantees `x_px`/`y_px`
+    /// are the final positions.
     pub x_advance_px: f32,
     pub x_offset_px: f32,
     pub y_offset_px: f32,
@@ -224,12 +271,89 @@ pub struct GlyphImage {
     pub data: Arc<[u8]>,
 }
 
+/// Cache key for the GPU atlas — must capture *every* dimension along which
+/// two rasterizations could differ. Per Codex review (2026-05-21, P2): a
+/// minimal `(font_id, glyph_id, size, subpixel)` key collides on variable-axis
+/// values, color-vs-mask format, font source identity (e.g. when a font is
+/// re-registered), transform/synthesis flags, and hinting mode. Each field
+/// below addresses a known collision class.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct GlyphCacheKey {
+    /// Identity of the font face. Two different `FontId`s never collide, even
+    /// if they refer to the same on-disk file (re-registration produces a new ID).
     pub font_id: FontId,
+
+    /// Generation counter on the font registry. Bumped when a font is
+    /// re-registered, replaced, or invalidated. Distinguishes "same font_id,
+    /// different generation" — important for hot-reload paths and for adapters
+    /// that may evict and re-register fonts under churn.
+    pub font_generation: u32,
+
+    /// OpenType glyph index.
     pub glyph_id: u16,
-    pub size_px_q16: u32,     // size * 64, fixed-point (avoids f32 hashing)
+
+    /// Font size in px × 64 (fixed-point Q26.6 — avoids f32 hashing, matches
+    /// FreeType / HarfBuzz convention).
+    pub size_px_q16: u32,
+
+    /// Variable-font axis values, packed. For non-variable fonts, all zero.
+    /// The tuple shape is implementation-detail; what matters is that two
+    /// rasterizations at different `wght`/`wdth`/`opsz`/etc. coordinates do
+    /// not share a cache slot. A `[u16; 4]` packed normalized fixed-point
+    /// representation (axis_index → value) covers the common variable-axis
+    /// count without making the key huge.
+    pub variation_axes: [u16; 4],
+
+    /// Output pixel format. Mask (alpha-only) vs. subpixel-RGB vs. color bitmap
+    /// (COLR/CBDT/sbix) MUST not collide — a color-emoji rasterization and an
+    /// alpha-mask rasterization of the same glyph_id are different cache entries.
+    pub format: GlyphFormat,
+
+    /// Subpixel horizontal positioning bucket, 0..=3 (quarter-pixel).
     pub subpixel_variant: u8,
+
+    /// Synthesis flags — synthetic bold (faux-bold via stroke), synthetic italic
+    /// (oblique slant), embolden/condense transforms. Each combination must be
+    /// a distinct cache entry. The implementation packs these into a bitfield.
+    pub synthesis_flags: u8,
+
+    /// Hinting mode. None / light / normal / full / autohint. Different hints
+    /// produce different rasterizations of the same glyph + size.
+    pub hinting: HintingMode,
+
+    /// Reserved for future transform support (2D affine rotation/skew). Today
+    /// `None` is the only value; the trait reserves the field so the cache key
+    /// width is stable when transforms land. See §5 "What Codex should
+    /// challenge" item 2.
+    pub transform: Option<GlyphTransform>,
+}
+
+/// Output pixel format for a rasterized glyph.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub enum GlyphFormat {
+    /// 8-bit alpha mask. The common case for body text. Atlas page format `R8Unorm`.
+    Alpha,
+    /// Subpixel RGB triplet (LCD-style anti-aliasing). Atlas page format `Rgba8UnormSrgb`,
+    /// sampled with RGB-channel-aware shading. Used selectively for high-DPI body text.
+    SubpixelRgb,
+    /// Pre-rendered color bitmap from COLR/CBDT/sbix tables (color emoji, multi-color
+    /// glyphs). Atlas page format `Rgba8UnormSrgb`.
+    ColorBitmap,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub enum HintingMode {
+    None,
+    Light,
+    Normal,
+    Full,
+    Autohint,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
+pub struct GlyphTransform {
+    // 2x2 affine, fixed-point. Reserved for Sprint 6+.
+    pub a: i16, pub b: i16, pub c: i16, pub d: i16,
 }
 
 /// Owns layers 1-5 (discover, parse, shape, layout, raster).
@@ -290,21 +414,32 @@ Three reasons:
 
 ### What mkui-wgpu should do instead
 
-Lift glyphon's *structure*, not its code:
+**glyphon is treated as a behavioral reference only — not a code source, not a dependency.** Per Codex review (2026-05-21, P2), the boundary must be sharp: mkui re-implements the atlas structure from first principles, citing glyphon as the architectural reference (named in this doc) and as the comparable production-tested precedent (named in `docs/sprint-2-plan.md`'s acceptance criteria). The implementation does **not** vendor any glyphon source code, does **not** copy glyphon's private pipeline choices that might not match mkui's renderer, and does **not** take a transitive license dependency on glyphon (which is MIT/Apache-2.0, compatible with mkui — but the deliberate decision is to own the surface and the maintenance).
 
-- **Use `etagere`** (https://github.com/nical/etagere) for shelf packing. Same crate glyphon uses; well-tested; no transitive deps of note.
-- **Cache key:** `GlyphCacheKey` from section 5. Identical content to glyphon's key, named differently so we own it.
-- **Atlas paging:** start with one 2048×2048 page; add `Vec<AtlasPage>` with allocation rolling onto the next page when shelf-fit fails. Eviction policy is LRU within a page, page is dropped only when empty for N frames.
+Lift glyphon's *structure*:
+
+- **Use `etagere`** (https://github.com/nical/etagere) for shelf packing. Same crate glyphon uses; well-tested; no transitive deps of note. This is a direct dependency, not a copy.
+- **Cache key:** `GlyphCacheKey` from section 5 — already expanded (per Codex P2) beyond glyphon's minimal key to cover variation axes, color/mask format, font generation, synthesis, hinting, and reserved transform. mkui-wgpu owns this type.
+- **Atlas paging:** start with one 2048×2048 page; add `Vec<AtlasPage>` with allocation rolling onto the next page when shelf-fit fails. Eviction policy is LRU within a page, page dropped only when empty for N frames.
 - **Color vs alpha:** two atlases (or two regions of one atlas), one `R8Unorm` for alpha glyphs, one `Rgba8UnormSrgb` for color glyphs. The fragment shader picks based on a sampler index in the vertex data.
 - **Pipeline:** mkui-wgpu's existing tessellation pipeline emits textured quads. The glyph atlas is one more sampler binding. The render pass is shared. **No second pass.** This is the architectural win over depending on glyphon.
 
+### Render contract for atlas paging
+
+Per Codex review (2026-05-21, P2), the "no second pass" claim depends on the render contract handling multi-page atlases correctly. Specifically:
+
+- **Vertex data carries page identity.** Each emitted glyph quad's vertices include a `page_index: u16` (or `sampler_index` if alpha/color are split into separate atlases per page). The shader uses this to select the correct sampler binding.
+- **Batching groups by page.** Within a single draw call, all glyphs must come from the same page (or sampler-bound combination). The renderer's instance buffer is sorted by `(page_index, sampler_kind)` before submission. For the Operator Console's expected glyph load (~2000-4000 active cache entries at steady state), 1-3 pages is the common case and the batching cost is acceptable.
+- **Eviction invalidates cached text meshes.** When a glyph is evicted (because its page is being recycled or the LRU policy fires), any cached `LayoutRun` that referenced that glyph's atlas slot is invalidated. The implementation's mesh cache (if any — Sprint 2's `mkui-text` likely re-shapes each frame and doesn't cache meshes) keys against `(LayoutRun, atlas_generation)`. When `atlas_generation` bumps (on eviction), prior meshes are dropped.
+- **Page sampler binding limit.** WebGPU's standard limit is 16 sampled-texture-bindings per pipeline. Each atlas page is one binding; the practical ceiling on simultaneous pages is ~12-14 (reserving slots for other uses). If a UI ever blows past that, the renderer either (a) splits into multiple draw calls per text element (acceptable for extreme cases), or (b) evicts a page sooner.
+
 ### Eviction
 
-LRU is the standard choice and what glyphon implements. The wrinkle: text atlases are pathologically prone to "almost-full + steady churn" because every new size of every glyph is a new entry. The Operator Console rendering 50 PRRows at three densities × two themes × two fonts is at least ~1200 distinct glyph cache entries before any text changes. We need to budget for that:
+LRU is the standard choice and what glyphon implements. The wrinkle: text atlases are pathologically prone to "almost-full + steady churn" because every new size of every glyph is a new entry. A complex UI rendering ~50 data rows at three densities × two themes × two fonts is at least ~1200 distinct glyph cache entries before any text changes. We need to budget for that:
 
 - A 2048×2048 R8 atlas is 4 MB and holds ~64K small glyphs at 8×8. Comfortable.
 - A 2048×2048 RGBA atlas is 16 MB. One page is plenty for a UI's worth of color emoji.
-- Pre-warming: on app start, rasterize ASCII for SF Pro + JetBrains Mono at each density. ~300 glyphs × 3 sizes × 2 fonts = ~1800 entries, < 50ms on a cold cache.
+- Pre-warming: on app start, rasterize ASCII for the primary text+mono font families at each density. ~300 glyphs × 3 sizes × 2 fonts = ~1800 entries, < 50ms on a cold cache.
 
 ---
 
