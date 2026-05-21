@@ -77,23 +77,23 @@ The intersection of 1, 2, and 3 is the sprint backlog. Operator vision unconstra
 
 ## Roadmap dependencies (forward-looking)
 
-These are the sprints where consumer needs and mkui capabilities synchronize:
+These are the sprints where consumer needs and mkui capabilities synchronize. **Revised 2026-05-21** after Miky's app deadline (~3 weeks to usable mkui) surfaced via operator review and StoneSketch's `crates/render` (2 854 lines of production wgpu) was confirmed available for extraction into `mkui-wgpu`. Pre-revision roadmap had Miky catalog starting Sprint 4; revised roadmap pulls it forward to Sprint 2 by reframing Issue #2 as substrate-tier extraction (not novel-surface greenfield) and shipping first atoms alongside the renderer.
 
 | Sprint | mkui delivers | Consumer can adopt |
 |---|---|---|
-| Sprint 1 (closed 2026-05-20) | Backend contract + `mkui-wgpu` primitives | StoneSketch can read `mkui-wgpu`'s API surface but cannot render yet |
-| Sprint 2 (this) | Operational hygiene (CI, clippy, MSRV) | StoneSketch confirms `mkui-wgpu` is build-stable on its platforms |
-| Sprint 3 (next) | Real wgpu renderer (issue #2); native boundary (issue #9) | **StoneSketch starts replacing `stonesketch-gui` with `mkui-wgpu`** |
-| Sprint 4 | Miky catalog Phase 1 — Atoms (Chip, Dot, StatePill, RoleBadge, TierTag, Kbd, Avatar) | **Operator Console starts implementing the atom-level scaffolding** |
-| Sprint 5 | Miky catalog Phase 2 — Inputs (Button variants 6, SearchInput, SegmentedControl, FilterChip, Tabs) | Operator Console can render basic forms |
-| Sprint 6 | Miky catalog Phase 3 — Structural (Window, Titlebar, Sidebar, NeedsYouRail, StatusBar, ModeSwitcher, RunControl, ResizeHandle) | Operator Console renders the full window chrome |
-| Sprint 7 | Miky catalog Phase 4 — Data rows (PRRow, IssueRow, AgentCard, NeedsYouItem, AuditRow, SprintCard) | Operator Console renders live data |
-| Sprint 8 | Miky catalog Phase 5 — Composites (ClientBanner, Advisory, BatchHeader, GatesStrip) | Operator Console reaches v0 feature-completeness |
+| Sprint 1 (closed 2026-05-20) | Backend contract + `mkui-wgpu` primitives (component catalog, theme, builders, tessellation — upstreamed from `stonesketch-gui`) | StoneSketch reads the API but doesn't render through mkui yet |
+| Sprint 2 (current, 4 days) | **Renderer foundations + first 3 atoms.** Batch 3: CI workflow + `mkui-core` clippy/std-trait fixes. Batch 4: port `stonesketch-render`'s HUD pipeline → `mkui-wgpu`; new `mkui-text` crate (cosmic-text + atlas behind `PlatformTextSystem` trait); shadcn-aligned `Badge` + `Dot` + `StatePill` atoms. | Miky's app team begins integration smoke against a real wgpu surface with real text |
+| Sprint 3 (~7 days) | **Window chrome + structural + remaining atoms/inputs.** Window, Titlebar, Sidebar (shadcn-aligned), StatusBar, NeedsYouRail. ModeSwitcher (Tabs variant), SearchInput (Input slot APIs), FilterChip (Toggle composition), Kbd, Avatar, RoleBadge/TierTag/LedgerChip (Badge variants), SegmentedControl (ToggleGroup), Button-variants-6. | **Miky's app reaches "usable mkui" — window chrome + atoms + inputs render end-to-end** |
+| Sprint 4 (~7 days) | **Data rows + composites + deferred Sprint 2 hygiene.** PRRow, IssueRow, AgentCard, NeedsYouItem, AuditRow, SprintCard (UiBuilder methods, not new components). ClientBanner, Advisory, BatchHeader, GatesStrip composites. Catch-up: mkui-c FFI safety (audit 1.1), MSRV declaration (audit 1.4), README rewrite (audit 1.5 / #7). | **Miky's app catalog-complete** — full Operator Console v0 surface renders through mkui |
+| Sprint 5+ | StoneSketch adoption: `mkui-wgpu` adopted; `stonesketch-gui` retired or thin-re-exports. Per-tier-color theme extension pattern hardened. Phase 2.x audit cleanup (thiserror migration, `#[forbid(unsafe_code)]` rollout, native boundary decision). | StoneSketch finishes migration |
+| Sprint 6+ | Platform-native text backends (CoreTextSystem, DirectWriteSystem behind the existing `PlatformTextSystem` trait) if Miky's app smoke surfaces pixel-mismatches that matter. Font/atlas pipeline polish. | App-store-grade text quality if needed |
 
 **Caveats:**
-- This roadmap is the **planning artifact**, not a commitment. Audit-driven planning per Sprint 1 retro Lesson 3 means each sprint re-runs the audit and re-derives its issue set. If Phase 2.8 (real wgpu renderer) turns out to take 2 sprints instead of 1, the catalog shifts by 1 sprint.
-- "Sprint N delivers" assumes the prior sprint's success criteria were met. If Sprint 2 doesn't close clippy red on `main`, Sprint 3 doesn't start.
-- The catalog phasing is *suggested* by `OPERATOR_CONSOLE_DESIGN.md`'s grouping (Atoms → Inputs → Structural → Data rows → Composites). Phases can reorder if specific Operator Console panels become higher priority — but the dependency direction (atoms before composites that use them) is fixed.
+- This roadmap is the **planning artifact**, not a commitment. Audit-driven planning per Sprint 1 retro Lesson 3 means each sprint re-runs the audit and re-derives its issue set.
+- "Sprint N delivers" assumes the prior sprint's success criteria were met. If Sprint 2 doesn't close CI green + paint real text, Sprint 3 doesn't start the structural work.
+- The Miky catalog count was **~30 components in the pre-revision framing**; per [`docs/components/miky-to-shadcn-mapping.md`](components/miky-to-shadcn-mapping.md) the actual first-class component count is **~17** (8 direct shadcn mappings + 9 Miky-specific) with 16 compositions/variants riding on those primitives. The roadmap above ships first-class components per sprint; compositions land alongside as UiBuilder methods.
+- The shadcn alignment is binding: where shadcn has an equivalent for a Miky-named component, mkui's canonical API uses the shadcn name + variants. Miky's design-language names are aliases. See the mapping doc.
+- The 3-week deadline depends on Sprint 2's renderer-extraction being substrate-tier (4-round budget) rather than novel-surface (4+ rounds with overrun risk). Per Sprint 7 retro's pattern, novel-surface PRs reliably need 4 rounds; if either render or text PR hits a 5th round, Sprint 2 extends rather than dropping scope.
 
 ---
 
@@ -114,4 +114,4 @@ These are the sprints where consumer needs and mkui capabilities synchronize:
 
 ---
 
-**Last updated:** 2026-05-21 (Sprint 1 close-out batch + correction note — created as an example future projects can copy from; not promoted as a separate skill until a third independent project surfaces the same need).
+**Last updated:** 2026-05-21 — created as an example future projects can copy from; not promoted as a separate skill until a third independent project surfaces the same need. Roadmap section revised same day to reflect Miky-deadline-driven re-prioritization (catalog work pulled forward from Sprint 4 to Sprint 2 via `stonesketch-render` extraction + `cosmic-text` integration).

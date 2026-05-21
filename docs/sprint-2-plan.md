@@ -1,240 +1,192 @@
-# Sprint 2 Plan — "Operational hygiene foundation"
+# Sprint 2 Plan — "Renderer foundations + first Miky atoms"
 
-**Window estimate:** 2026-05-21 → 2026-05-24 (3-4 day sprint per the mkui calibration in `mikbry/agent-skills#2`; file-dense workspace makes collision-surface dominate, not throughput)
+**Window estimate:** 2026-05-21 → 2026-05-24 (4-day sprint; reshape vs. original plan documented in §"Discipline notes")
 **Tag target:** `v0.4.0`
-**Batches:** 1 — `mkui-batch-3-phase-1-hygiene` (single batch, 5 file-independent PRs)
-**Capacity:** 5 active issues. All five are Phase 1 of `docs/audit-report.md`. File-independence per the audit's category-1 finding means parallel is safe.
+**Batches:** 2 — `mkui-batch-3-hygiene` (days 1-2) + `mkui-batch-4-renderer-and-atoms` (days 2-4, overlapping start)
+**Capacity:** 6 issues across 2 batches (3 + 3) — file-independence verified in §"Conflict surface analysis"
 
 ---
 
 ## Sprint goal (immutable)
 
-> **Land Phase 1 of the audit roadmap — make the workspace's operational hygiene match the architecture's quality.** Wire `.github/workflows/ci.yml`, fix `mkui-c`'s 11 soundness errors, fix `mkui-core`'s 8 std-trait-shadowing API bugs, declare MSRV, and rewrite the README. Exit criteria: `cargo clippy --workspace --exclude mkui-py --all-targets -- -D warnings` exits 0 against `main`; CI is green on a fresh PR.
+> **Paint real pixels on a wgpu surface with production-quality text, expose the first three Miky-aligned atoms, and gate everything behind CI.** Sprint 2 lands the load-bearing renderer + text plumbing the rest of the catalog will ride on, plus the minimum hygiene (CI + `mkui-core` clippy/API fixes) that makes downstream review honest. The audit's Phase 1 hygiene items not directly on the renderer's critical path (mkui-c safety, MSRV, README) are deferred to Sprint 4 with explicit rationale below.
 
 Three threads:
 
-1. **CI as ground truth** — `.github/workflows/ci.yml` is the load-bearing artifact. Without it, every Sprint 1 PR triaged "is this fmt issue NEW or pre-existing on main?" manually (~30 min/PR of operator attention). CI replaces that triage with a server-side gate.
-2. **Soundness + API correctness** — `mkui-c` shipping `pub extern "C" fn` without `unsafe` makes the FFI surface unsound by Rust's standards (11 hard `clippy::not_unsafe_ptr_arg_deref` errors). `mkui-core` shipping inherent `to_string` and conflicting `from_str` silently shadows std traits — a downstream consumer bringing `std::str::FromStr` into scope breaks. Both fixes are mechanical-to-substrate tier; both are blocking any "external consumer is the smoke" experiment.
-3. **Discoverability discipline** — README claims `mkui-native` is the WGPU backend (false post-PR #12), advertises v0.2.0 (workspace is at v0.3.0), and presents a Python build flow that doesn't work on Python 3.14. Issue #7 is the canonical fix; it lands in this sprint.
+1. **Renderer reality** — port `stonesketch-render`'s production HUD pipeline (surface management, MSAA picker, accumulator) into `mkui-wgpu`. Drop the 3D-specific passes (scene, shadow, AO, selection outline) that StoneSketch owns; keep the 2D HUD path. Replace the existing bitmap glyph fallback in `mkui-wgpu/src/tessellation.rs` with real text via a new `mkui-text` crate (cosmic-text + glyphon-shaped atlas, behind a `PlatformTextSystem` trait — see [`docs/research/mkui-text-state-of-the-art.md`](research/mkui-text-state-of-the-art.md)).
+2. **First Miky atoms in shadcn alignment** — ship `Badge` (covering Chip/RoleBadge/TierTag/LedgerChip as variants), `Dot` (Miky-specific status circle), and `StatePill` (Miky-specific 9-state agent encoding). All three are listed as required in `mikbry/miky-internal/DESIGN.md` lines 522-531; the shadcn↔Miky alignment is documented in [`docs/components/miky-to-shadcn-mapping.md`](components/miky-to-shadcn-mapping.md). Where shadcn has an equivalent (Badge → shadcn Badge), the shadcn API + variant naming is canonical.
+3. **CI as ground truth + mkui-core API correctness** — Sprint 1 retro's Lesson 2 (CI absence = pre-push gates are unenforceable theatre) closes in this sprint. CI gates fmt/clippy/test on every push. The 8 pre-existing `mkui-core` clippy errors (Default impls + std-trait shadowing) are real downstream-breaking API bugs and must land before any atom code rides on top — both because the renderer/atoms work consumes `mkui-core` types and because catalog work shouldn't carry the broken-`main` triage tax described in retro Lesson 2.
 
 ---
 
 ## Sprint 2 issue set
 
-| # | Title | Effort | Role |
+| # | Title | Effort | Tier | Role |
+|---|---|---|---|---|
+| **Batch 3 (hygiene)** | | | | |
+| new | `feat(common): add .github/workflows/ci.yml (fmt + clippy + test gates)` | small | template | server-side ground truth; gates everything after it lands |
+| new | `fix(core): mkui-core std-trait shadowing + Default impls + StyleClass::add rename` | medium | substrate | resolves 8 clippy errors + the std-trait ambiguity traps; workspace-wide call-site rename for `add` is in-scope |
+| **Batch 4 (renderer + atoms)** | | | | |
+| new | `feat(wgpu): port stonesketch-render's HUD pipeline into mkui-wgpu` | medium-large | substrate | wgpu::Surface, MSAA picker, swapchain config, accumulator, instanced sprite pipeline — extraction not greenfield (see Risk 1) |
+| new | `feat(text): mkui-text crate wrapping cosmic-text + glyphon-shaped atlas behind PlatformTextSystem trait` | medium-large | substrate | per `docs/research/mkui-text-state-of-the-art.md`. New crate. Codex-reviewable after the research doc + this PR. |
+| new | `feat(wgpu): first Miky atoms — Badge (with Chip/RoleBadge/TierTag aliases) + Dot + StatePill` | medium | template | per `docs/components/miky-to-shadcn-mapping.md`. Ships shadcn-aligned API where applicable. |
+| **Defaults — assumed in plan but not new issues** | | | | |
+| (carry) | `mkui-wgpu` consumers receive the new renderer through existing `Mkui`/`WgpuApp` types in `mkui-wgpu/src/high_level.rs` — no new issue, scope rider on the renderer PR |
+
+Six new issues filed before batch creation (5 above + 1 winit-integration if it doesn't fold into the renderer PR — decided at issue-filing time). The mkui calibration (3-4 per batch) is satisfied: 3 in each batch.
+
+---
+
+## Deferred from Sprint 2 → Sprint 4
+
+These items appear in the audit roadmap or in #7 but are pushed to Sprint 4 to make room for renderer + atom work that unblocks Miky's app:
+
+| Audit phase | Item | Why deferred | Sprint target |
 |---|---|---|---|
-| **Phase 1.4 (mechanical, ships first)** | | | |
-| new | Declare `rust-version = "1.74"` + workspace `lints` table | **small** | MSRV floor; unblocks every other PR's clippy enforcement |
-| **Phase 1.2 (template, ships second)** | | | |
-| new | Add `.github/workflows/ci.yml` (fmt + clippy + test gates) | **small** | server-side ground truth; once landed, every subsequent PR gates on it |
-| **Phase 1.1 (substrate, ships third)** | | | |
-| new | `mkui-c` FFI safety — declare `unsafe extern "C" fn` + `// SAFETY:` blocks | **medium** | resolves 11 clippy errors + the soundness gap audit's highest-priority finding |
-| **Phase 1.3 (substrate, ships fourth)** | | | |
-| new | Fix 8 pre-existing `mkui-core` clippy errors (Default impls, std-trait shadowing, `add` rename) | **medium** | resolves the std-trait ambiguity traps; API correctness, not style |
-| **Phase 1.5 (template, ships last)** | | | |
-| **#7** | README: position mkui as internal open framework, reflect v0.3.0 + `mkui-wgpu` presence | **medium** | absorbs everything else, lands last so it can cite the actual ci.yml + MSRV |
+| 1.1 | mkui-c FFI safety (11 `unsafe extern` declarations) | Not on Miky's path (Miky's app is Rust + macOS, not C/C++). CI lands in Batch 3 anyway, making the errors visible. | Sprint 4 |
+| 1.4 | Declare `rust-version = "1.74"` + workspace `lints` table | Trivial; no functional impact; fits cleanly with #7 README work. | Sprint 4 |
+| 1.5 / #7 | README rewrite to reflect v0.3.0 + mkui-wgpu + Python broken-on-3.14 disclaimer | Non-blocking; better written after Sprint 2 ships actual capability the README can describe accurately. | Sprint 4 |
 
-Five issues. mkui calibration table says 3-4 per batch; we're at 5 because the audit's Phase 1 has exactly 5 file-independent tasks and splitting would create artificial sprint boundaries. The dependency chain is **sequential merge order**, not file collision.
-
-**Issues to file before launch:** Phase 1.1, 1.2, 1.3, 1.4 are not yet GitHub issues. Phase 1.5 = existing #7.
+These deferrals **explicitly violate audit-strict sequencing** ("never feature on top of red clippy"). Justification: Miky's app deadline (~3 weeks to usable mkui) doesn't fit a hygiene-only Sprint 2. The audit's #1 finding (mkui-c soundness) stays unfixed for ~2 weeks longer. CI lands in Sprint 2 anyway, making the errors *visible* even when not yet fixed. This trade-off is logged here for Codex / future-retro review.
 
 ---
 
 ## Conflict surface analysis
 
-The audit's category-1 finding says all five Phase 1 tasks touch disjoint files. Verified here:
+### 1. `.github/workflows/ci.yml`
+Touched by Batch 3's CI issue only. Zero conflict.
 
-### 1. `Cargo.toml` (workspace package)
+### 2. `crates/mkui-core/src/{style.rs, theme.rs, headless/{button,text,toggle}.rs}`
+Touched by Batch 3's mkui-core clippy fixes only. The `StyleClass::add` rename is workspace-wide (mkui-web, mkui-console, mkui-wgpu, examples/ all call it) — **all rename call-sites land in the same PR** per Sprint 7 broader-scope rule.
 
-Touched by:
-- **Phase 1.4** — adds `rust-version = "1.74"` to `[workspace.package]`; adds workspace `[lints]` table
-- **Phase 1.3** — possibly removes the `derive_more` dep if the rename of `StyleClass::add` lets us drop a derive
+### 3. `crates/mkui-wgpu/src/{renderer.rs, app.rs, high_level.rs, lib.rs, Cargo.toml}`
+Touched by Batch 4's renderer PR — the largest surface in the sprint. Adds new dependencies (`wgpu`, `winit` on native target, `bytemuck`, `pollster` — see `stonesketch-render/Cargo.toml` for reference). Updates `mkui-wgpu/src/tessellation.rs` to delegate text glyph triangles to `mkui-text`.
 
-**Resolution:** Phase 1.4 lands first (no dep changes). Phase 1.3 layers on top — if it touches `Cargo.toml` at all, it's the `[workspace.dependencies]` block, disjoint from `[workspace.package]`'s MSRV line.
+### 4. `crates/mkui-text/` (new directory)
+Touched only by Batch 4's text PR. Zero conflict with other PRs (new crate). Adds `cosmic-text`, `swash`, `etagere`, `wgpu` deps. Workspace `Cargo.toml` adds `crates/mkui-text` to members.
 
-### 2. `.github/workflows/ci.yml`
+### 5. `crates/mkui-wgpu/src/components.rs` + new `badge.rs` / `dot.rs` / `state_pill.rs`
+Touched by Batch 4's atoms PR. **Depends on mkui-core's `StyleClass::add` rename landing first** — if atoms reference `StyleClass`, they must use the renamed API. Sequencing handled by merge order, not file-independence: Batch 3's mkui-core fix merges before Batch 4's atoms.
 
-Touched by:
-- **Phase 1.2** only — creates the file
-
-Zero conflict. Future Phase-1 PRs are gated by it once it merges.
-
-### 3. `crates/mkui-c/src/lib.rs`
-
-Touched by:
-- **Phase 1.1** only — declares every `pub extern "C" fn` as `pub unsafe extern "C" fn`, adds `// SAFETY:` blocks
-
-Zero conflict with any other Phase 1 task. The file is `mkui-c`-only.
-
-### 4. `crates/mkui-core/src/{style.rs, theme.rs, headless/{button,text,toggle}.rs}`
-
-Touched by:
-- **Phase 1.3** only — adds `Default` impls, replaces inherent `to_string` with `Display`, replaces conflicting `from_str` with `FromStr`, renames `StyleClass::add` to something non-conflicting
-
-Zero conflict with any other Phase 1 task. Phase 1.3's downstream churn (`StyleClass::add` rename will hit every call site in `mkui-web`/`mkui-console` that passes class names) is included in the same PR so the workspace stays green.
-
-### 5. `README.md`
-
-Touched by:
-- **Phase 1.5** only — rewrites sections 343-385 (Current Focus + Crate Layout), 144-194 (mkui-native vs mkui-wgpu), 271-300 (Python build flow)
-
-Zero conflict with any other Phase 1 task. README lands last so it can describe `ci.yml` + MSRV + the corrected `mkui-c` safety contract.
+### 6. `Cargo.toml` (workspace package)
+Touched by Batch 4's renderer PR (adds wgpu/winit deps) and Batch 4's text PR (adds cosmic-text/etagere/mkui-text crate to workspace members). Disjoint sections of the file. Sequential merge resolves any line-overlap trivially.
 
 ### Low-conflict / additive issues
-
-- All five PRs touch different roots: `Cargo.toml` vs `.github/` vs `mkui-c/` vs `mkui-core/` vs `README.md`. The only ambiguity is **`mkui-core/src/lib.rs`** if Phase 1.3 adds `#![forbid(unsafe_code)]` (which is actually Phase 2.4 work — keeping it out of Phase 1 for scope discipline).
+- All Batch 4 PRs touch new files (`mkui-text/`, atoms files) or distinct existing files. The renderer PR is the only one rewriting existing files (`mkui-wgpu/src/renderer.rs` + tessellation.rs).
+- Batch 3 PRs are file-independent from Batch 4 PRs. Batch 3 lands first; Batch 4 starts with `--no-launch` and rebases against post-Batch-3 main.
 
 ---
 
 ## Batch composition
 
-### mkui-batch-3-phase-1-hygiene (5 agents, sequential merges)
+### Batch 3 — `mkui-batch-3-hygiene` (2 agents, days 1-2)
 
-**Goal:** ship Phase 1's 5 tasks in dependency order. The order is dictated by what gates what:
+| # | Issue | Why this batch |
+|---|---|---|
+| ci | `feat(common): add .github/workflows/ci.yml` | unblocks every later PR; gates the renderer work |
+| core | `fix(core): mkui-core std-trait shadowing + Default impls + StyleClass::add rename` | atoms can't ship on top of `mkui-core` with broken std-trait shadowing |
 
-| # | Issue | Why this batch | Estimated PR size |
-|---|---|---|---|
-| Phase 1.4 | MSRV + lints table | unblocks every PR's clippy enforcement | small |
-| Phase 1.2 | `.github/workflows/ci.yml` | server-side gate; once landed, every later PR runs against it | small |
-| Phase 1.1 | `mkui-c` FFI safety | resolves 11 clippy errors; soundness gap | medium |
-| Phase 1.3 | `mkui-core` clippy fixes | resolves 8 clippy errors + std-trait shadowing | medium |
-| Phase 1.5 / #7 | README rewrite | absorbs everything; cites the now-merged ci.yml + MSRV | medium |
+**Why these two together:**
+- File-independent (different roots).
+- Both gate Batch 4: renderer needs CI to enforce gates honestly; atoms need `mkui-core` clean to consume types.
+- 2 agents in this batch + 3 in Batch 4 = 5 total active agents over the sprint, well within calibration.
 
-**Why these five together:**
-- All five are Phase 1 of the same audit roadmap; landing 4-of-5 leaves the workspace in an inconsistent half-fixed state.
-- All five are file-independent per the conflict-surface analysis above.
-- 5 agents == miky's batch cap but exactly matches Phase 1's structure. mkui's calibration (3-4 per batch) is exceeded by one — accepted because all five are sequenced (not truly parallel) and each PR is small-to-medium.
-- Sprint 1 retro's Lesson 1 (sequential rebases, not parallel) applies in full: each PR rebases sequentially as the prior one lands.
+**Tier projection:** template (1) + substrate (2) → ~3 rounds operator review attention.
 
-**Codex review required (per `feedback_route_pr_review.md` and the Sprint 7 Lesson 2 tier table):**
+### Batch 4 — `mkui-batch-4-renderer-and-atoms` (3 agents, days 2-4)
 
-- **Phase 1.4** — **no Codex / 1 round**. Single-line MSRV declaration + lints table. Tier: mechanical.
-- **Phase 1.2** — **1 round**. CI YAML file; can be copied from `mikbry/miky/.github/workflows/ci.yml` as the template. Tier: template.
-- **Phase 1.1** — **3 rounds**. Genuinely substrate — every `extern "C" fn` needs an `// SAFETY:` block describing the pointer-validity contract. Tier: substrate. Per Sprint 7 Lesson 2: 3 rounds, not 4, because the *pattern* is well-established (UnsafePtrArgDeref is canonical Rust).
-- **Phase 1.3** — **2 rounds**. Typed-primitive tier — adding `Default` impls and migrating to `FromStr`/`Display` traits is a standard refactor. Mid-batch churn (call-site renames for `StyleClass::add`) makes it borderline substrate; 2 rounds is honest.
-- **Phase 1.5 / #7** — **2 rounds**. README + maybe 2-3 ADR stubs in `docs/architecture/`. Template tier. Codex catches drift between claims and code.
+| # | Issue | Why this batch |
+|---|---|---|
+| render | `feat(wgpu): port stonesketch-render's HUD pipeline into mkui-wgpu` | headline; load-bearing for everything after |
+| text | `feat(text): mkui-text crate wrapping cosmic-text + atlas behind PlatformTextSystem trait` | text rendering — mandatory for any Miky-grade UI |
+| atoms | `feat(wgpu): first Miky atoms — Badge + Dot + StatePill` | first deliverable Miky's app team can render |
 
-Sprint-level Codex budget: **9 rounds total** (0 + 1 + 3 + 2 + 2 = 8, +1 buffer for Phase 1.1 if needed). At ~10 min/round of orchestrator-paste cycle, that's ~80 min of Codex routing across the sprint.
+**Why these three together:**
+- All three are downstream of Batch 3's CI + mkui-core fixes.
+- Atoms have a soft dependency on text (Badges contain labels) and a hard dependency on render (something has to paint them). But all three can develop in parallel — atoms can test against the existing bitmap text path while the text PR is in flight, then rebase onto cosmic-text.
+- 3 agents matches batch cap and Sprint 7 retro's "novel-surface 4-round" guidance (render + text are both substrate, atoms are template).
 
-**Note:** mkui doesn't currently run Codex in the loop. The tier classification is *forward-looking* — the same per-tier attention budget applies to *operator review attention* in the interim. Per-tier human-attention projection: 5 / 10 / 30 / 20 / 15 = **~80 min total operator review attention** across the sprint.
-
----
-
-## Sequencing within mkui-batch-3-phase-1-hygiene
-
-Strict merge order: **Phase 1.4 → 1.2 → 1.1 → 1.3 → 1.5**.
-
-### Phase A — Phase 1.4 lands first (Day 1, ~hour)
-
-Agent starts immediately. Single file edit (`Cargo.toml`). Adds `rust-version = "1.74"` + optional `[workspace.lints]` block. Verify with `cargo build --workspace --exclude mkui-py` (no MSRV error).
-
-After Phase 1.4 merges: `miky batch rebase mkui-batch-3-phase-1-hygiene --after-merge <PR>` — **sequential, not parallel** per Sprint 1 retro Lesson 1.
-
-### Phase B — Phase 1.2 lands second (Day 1, ~half-day)
-
-Agent creates `.github/workflows/ci.yml`. Template from `mikbry/miky` (Rust workspace with cargo fmt + clippy + test). Configure:
-- Trigger on `push` to `main` + `pull_request`
-- Jobs: `fmt` (cargo fmt --check), `clippy` (cargo clippy --workspace --exclude mkui-py --all-targets -- -D warnings), `test` (cargo test --workspace --exclude mkui-py)
-- Cache `~/.cargo` + `target/` per the standard `actions/cache@v4` pattern
-- Matrix: Linux + macOS at minimum; Windows optional (Sprint 1 retro flagged the cross-platform gap)
-
-After Phase 1.2 merges: every subsequent PR is gated by CI. The "manual gate triage" tax from Sprint 1 ends.
-
-### Phase C — Phase 1.1 lands third (Day 2, ~day)
-
-Agent works on `mkui-c/src/lib.rs`. Per the audit:
-- Re-declare every `pub extern "C" fn` as `pub unsafe extern "C" fn`
-- Add `// SAFETY:` block above each `unsafe { ... }` block (the audit lists every line number: 76, 92, 98, 121, 129, 135, 159, 167, 183, 204, 221)
-- Update `crates/mkui-c/include/mkui.h` (the cbindgen-generated header) if needed — likely auto-regenerated, verify
-- Document the pointer-validity contract in `crates/mkui-c/src/lib.rs:1-30` (crate-level doc-comment)
-- Update the C and C++ example files if any (`examples/`?) to reflect that callers are responsible for the contract
-
-Pre-push gates (now enforced by CI): `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace --exclude mkui-py`. **CI is the source of truth.**
-
-After Phase 1.1 merges: clippy on `main` drops from 19 errors to 8.
-
-### Phase D — Phase 1.3 lands fourth (Day 2-3, ~day)
-
-Agent works on `mkui-core/src/{style.rs, theme.rs, headless/}`:
-- Add `impl Default for ButtonBuilder { ... }` (`headless/button.rs`)
-- Add `impl Default for TextBuilder { ... }` (`headless/text.rs`)
-- Add `impl Default for ToggleBuilder { ... }` (`headless/toggle.rs`)
-- Remove inherent `Text::new(content) -> TextBuilder` (returns Self, fix elsewhere)
-- Replace inherent `StyleClass::to_string` with `impl Display for StyleClass`
-- Replace inherent `ColorTheme::from_str` with `impl FromStr for ColorTheme`
-- Rename `StyleClass::add` to `StyleClass::push` or `StyleClass::with_class` (avoid `std::ops::Add` confusion). Update **every** call site in `mkui-web`, `mkui-console`, `mkui-wgpu`, and `examples/` in the same PR — Sprint 7 retro Lesson 1's broader-scope rule.
-
-After Phase 1.3 merges: clippy on `main` drops from 8 errors to 0 (or the remaining count is documented in the PR description with rationale).
-
-### Phase E — Phase 1.5 / #7 lands last (Day 3, ~half-day)
-
-Agent rewrites README sections per the audit (`README.md:343-385, 144-194, 271-300`):
-- Drop the "Phase 1: Foundation (COMPLETED)" line claiming features that don't exist
-- Update "Current Focus" from v0.2.0 → v0.4.0 (this sprint's target tag)
-- Rewrite crate-layout section to mention `mkui-wgpu` (added PR #12), correctly describe `mkui-native` as a placeholder (tracked in #9)
-- Mark `mkui-py` build flow as broken on Python 3.14 (link to #5)
-- Add new "Recommended current use" section: `mkui-core` (stable), `mkui-web` (stable), `mkui-wgpu` (primitives stable, renderer experimental), `mkui-console` (stable)
-- Add (optional, if scope allows) `docs/architecture/0001-mkui-core-as-contract.md` ADR stub per audit recommendation 10.2
-
-Operator-witnessed: read the rendered README on GitHub after merge to confirm no claims are still wrong.
+**Tier projection:** substrate (4 rounds × 2) + template (2 rounds × 1) → ~10 rounds operator review attention. Sprint 7 retro flagged that 3 substrate PRs in one batch is the upper bound for operator attention; we're at 2 + 1, which fits.
 
 ---
 
-## Sprint 2 risks (from the planning view)
+## Sequencing within batches
 
-### Risk 1 — `StyleClass::add` rename has a wide call-site surface
+### Batch 3 (days 1-2)
+1. **CI lands first** (~half-day). YAML file copy from `mikbry/miky/.github/workflows/ci.yml` adapted for mkui's `cargo test --workspace --exclude mkui-py` invocation. Once merged, all later PRs are CI-gated.
+2. **mkui-core fixes land second** (~1 day). Workspace-wide `StyleClass::add` rename happens in this PR. CI catches any missed call-sites.
 
-The audit notes `StyleClass::add` is called from `mkui-web/src/components.rs` and elsewhere via `.class()` chains. Renaming will touch every example app + every backend. If the call sites aren't exhaustively updated in the same PR, the workspace fails to compile mid-Phase-1.3.
+### Batch 4 (days 2-4)
+Atoms agent + render agent + text agent all launch on day 2 against post-Batch-3 main. Three parallel iTerm sessions.
 
-**Mitigation:** the Phase 1.3 issue body must explicitly list "rename `StyleClass::add` workspace-wide" as part of the AC. The agent runs `grep -rn 'StyleClass::add\|\.add("' crates/ examples/` (or `cargo check` until clean) before pushing.
+1. **Text lands first** (day 3) — once cosmic-text wiring is verified, render's text-path can swap from bitmap to atlas.
+2. **Render lands second** (day 3-4) — biggest PR, includes the winit `ApplicationHandler` shell so downstream apps (Miky's app) can consume it.
+3. **Atoms land last** (day 4) — atoms rebase onto the merged render+text, swap their text emission from the bitmap fallback to the real atlas path.
 
-### Risk 2 — CI workflow has macOS-specific failures
+Merge order: text → render → atoms. Sequential rebases per Sprint 1 retro Lesson 1.
 
-`mkui-wgpu`'s scene primitives use no platform-specific code today, but `mkui-web` pulls in `wasm-bindgen`/`web-sys` and `mkui-console` uses `crossterm`. CI on Linux should pass for all non-wasm crates; the wasm builds need `cargo build --target wasm32-unknown-unknown`. First time wiring this — may take a re-spin.
+---
 
-**Mitigation:** Phase 1.2's agent runs the workflow locally first via `act` (or just runs the same shell commands). If wasm build needs special config (`wasm-pack`, target install), document in `ci.yml` comments.
+## Risks (from the planning view)
 
-### Risk 3 — Phase 1.1 `mkui-c` FFI safety has soundness subtleties
+### Risk 1 — Renderer PR is "porting" but the ported code is 2 854 lines
 
-Adding `// SAFETY:` blocks isn't just a formality — the contract for `mkui_app_add_button(*mut MkuiApp, *const c_char, *const c_char)` needs to specify: (a) `app` must point to a valid `MkuiApp` previously returned from `mkui_app_new()`, (b) both `*const c_char` pointers must be valid C strings (NUL-terminated, valid UTF-8 *or* the function documents it accepts non-UTF-8), (c) the strings must outlive the call. If the agent under-specifies, the safety comments are decorative.
+The render PR's framing is "extraction, not greenfield" — `stonesketch-render` is a working production wgpu renderer. But the actual code to extract is non-trivial: 788 lines of ambient occlusion (drop), 800 lines of selection outline (drop), 2054 lines of `lib.rs` mixing the HUD pipeline with the 3D scene pipeline. The HUD-extraction needs careful surgery so the 3D-specific structures don't leak into mkui-wgpu's interface.
 
-**Mitigation:** the Phase 1.1 issue body cites the Rust reference's FFI section + `std::ffi::CStr::from_ptr` safety docs as the contract template. Verify each block answers: pointer validity, lifetime, ownership transfer, NUL-termination guarantees.
+**Mitigation:** the renderer issue body must explicitly list "drop these passes: scene_pass, shadow_pass, ambient_occlusion_pass, selection_outline_pass — keep: surface management, MSAA picker, HUD pipeline, accumulator." Cite the relevant `stonesketch-render` line ranges. The agent reads `stonesketch-render/src/lib.rs` first and produces a "kept vs dropped" diff against it before writing any mkui-wgpu code.
 
-### Risk 4 — README rewrite drifts from reality during the sprint
+### Risk 2 — cosmic-text is ~40 transitive deps and ~2 MB binary delta
 
-Phase 1.5 lands last but writes claims about `ci.yml` (1.2), MSRV (1.4), `mkui-c` safety (1.1), and `mkui-core` correctness (1.3). If any of 1.1–1.4 land in a different shape than the issue body promised (e.g. MSRV picks 1.75 instead of 1.74), the README inherits the drift.
+Per the research doc, cosmic-text pulls swash + rustybuzz + fontdb + unicode-bidi + unicode-script. Total transitive count is significant. mkui-core stays clean (zero text deps), but `mkui-text` becomes the heaviest crate in the workspace.
 
-**Mitigation:** the Phase 1.5 agent's first step is to run `cargo --version && grep rust-version Cargo.toml && cat .github/workflows/ci.yml | head -30` and quote from the actual files, not from the audit's prescriptions.
+**Mitigation:** put cosmic-text in a separate `mkui-text` crate (already planned). Make `mkui-wgpu`'s text dependency optional behind a feature (`default = ["text"]`). StoneSketch and other future consumers who want their own font path set `default-features = false` and provide a `PlatformTextSystem` impl. This pattern matches the `glyphon`-style packaging Codex will recognize.
 
-### Risk 5 — Sprint 1's "novel-surface 4-round" pattern may apply to Phase 1.1
+### Risk 3 — Atoms PR has hidden dependency on text rendering for layout/measurement
 
-`mkui-c` FFI safety is technically a known-pattern fix (audit calls it "well-established"), but every `// SAFETY:` block in a Rust workspace is bespoke — there's no `cargo fix` for this. If the agent under-specifies, a second-round operator review surfaces it; if it over-specifies, comments are noise.
+`Badge` and `StatePill` measure their text label to compute width. If the text PR is in flight, atoms agent measures against the bitmap path which has different metrics than cosmic-text.
 
-**Mitigation:** budget 3 rounds explicitly. If a 4th round becomes necessary, that's a signal that the FFI surface needs deeper redesign (per Sprint 7 retro: 4-round PRs caught real bugs, not nits). Adjust sprint scope rather than crashing through.
+**Mitigation:** atoms PR uses `PlatformTextSystem::measure(...)` rather than hard-coding glyph dimensions. The trait shape (per the research doc §5) gives `measure → LayoutRun` cleanly. Atoms work against the trait, not the implementation; the cosmic-text vs bitmap difference is invisible to atom code. Verify this assumption in the atoms issue body — if the trait isn't shaped for measurement, file a sub-issue.
+
+### Risk 4 — Sprint 7 retro's "novel-surface 4-round Codex pattern" likely applies to render + text
+
+Both PRs are genuine novel surface for mkui. The render PR extracts from a working reference but the *integration into mkui's existing app/renderer/high_level shape* is new. The text PR is new wiring entirely. Sprint 7 retro Lesson 2 says novel-surface PRs reliably need 4 rounds.
+
+**Mitigation:** budget 4 rounds explicitly for render + text. The 4-day window assumes this. If either PR hits a 5th round (per Sprint 7 retro's reviewer-loop PR pattern), the sprint extends rather than skipping the round. **Honest budget + adjust mid-flight.**
+
+### Risk 5 — Miky's `DESIGN.md` text requirements (JetBrains Mono + SF Pro + tabular-nums) may surface gaps
+
+cosmic-text supports tabular numerals via OpenType `tnum` feature (passed through to swash). SF Pro and JetBrains Mono are both standard sfnt fonts. But Miky's design specifies very tight glyph metrics that may not match what cosmic-text produces (slightly different hinting vs CoreText).
+
+**Mitigation:** Sprint 2's atoms work uses cosmic-text. If Miky's app smoke-tests reveal pixel-mismatches that matter, Sprint 4 or 5 adds a `CoreTextSystem` impl behind the same trait. The research doc §9 engages this counterargument; it's accepted, not silently absorbed.
+
+### Risk 6 — winit ApplicationHandler shape for the App primitive
+
+`stonesketch/apps/native/main.rs` is 1 653 lines of winit + wgpu glue. Some of that is StoneSketch-specific. The mkui equivalent should be ~300-500 lines (Window-spawning, event loop wiring, surface acquisition, frame callback). If it grows beyond that, the abstraction is wrong.
+
+**Mitigation:** the renderer PR's scope explicitly includes a `mkui_wgpu::App` shell that downstream apps consume. Target: minimal viable winit `ApplicationHandler` that calls into the renderer per frame. If the renderer PR's diff exceeds ~1 500 lines, split the App shell into its own PR (would make Batch 4's count 4, not 3 — still in budget).
 
 ---
 
 ## Sprint 2 success criteria
 
-- [ ] **Sprint goal met:** `cargo clippy --workspace --exclude mkui-py --all-targets -- -D warnings` exits 0 against `main`; CI is green on a fresh PR
-- [ ] **All 5 active issues merged** (Phase 1.1, 1.2, 1.3, 1.4, 1.5/#7); no follow-ups deferred (any new discoveries get `parked` label, don't reshape the sprint)
-- [ ] **`v0.4.0` tagged** via `miky post-batch` (idempotent post-#176)
+- [ ] **Sprint goal met:** a `mkui_wgpu::App` example app launches a real winit window, paints Badge + Dot + StatePill via cosmic-text-rendered glyphs on a real wgpu surface.
+- [ ] **All 6 active issues merged** (3 per batch); follow-ups deferred only with explicit `parked` label + Sprint 3 sequencing rationale.
+- [ ] **`v0.4.0` tagged** via `miky post-batch`.
 - [ ] **Sprint 1 retro's binding lessons applied:**
-  - Lesson 1: every `miky batch rebase` call defaults to sequential (no `--merge parallel`)
-  - Lesson 2: pre-push gates are now CI-enforced (Phase 1.2 makes them real, not theatre)
-  - Lesson 3: audit-driven planning — this Sprint 2 plan's existence is one of two empirical instances (mkui + marabot) that motivated the single principle line landing in `sprint-and-batch-discipline.skill.md` per Miky's correction note on 2026-05-21. **Not** a promoted meta-skill; the plan-template-as-skill is deferred to a third-instance trigger.
-- [ ] **Audit refreshed** after Sprint 2 close (per #180 — staleness warning fires if not re-run)
-- [ ] **The 3 owed bug filings** from Sprint 1 retro land on `mikbry/miky`:
-  - `miky pr diff` subcommand missing
-  - `.claude-audit-instructions.md` not in default gitignore
-  - Rebase prompt assumes CI exists
-- [ ] **`docs/downstream-consumers.md`** lands as an example future projects can copy from. Per Miky's correction note on 2026-05-21, the gap is not promoted to a separate skill yet (Sandi Metz's rule of three — `project-self-description.skill.md` earns its keep only when a third project independently surfaces the need). Don't slim the file regardless.
-- [ ] **`docs/CONTRIBUTING.md`** lands (referenced by audit-staleness warning; closes the dangling reference)
-- [ ] **Sprint 2 retro filed** per the per-sprint discipline; includes:
-  - Did the 3-round Codex/operator-attention budget hold for Phase 1.1?
-  - Did CI catch any regressions that operator-side triage would have caught in Sprint 1 style?
-  - Did the README rewrite drift-vs-reality risk materialize?
-  - Did the calibration table (mkui = 3-4 issues/batch) feel right at 5? Bump down for Sprint 3?
+  - Lesson 1: every `miky batch rebase` defaults to sequential (memory `feedback_miky_rebase_sequential.md` in effect)
+  - Lesson 2: CI gates fmt/clippy/test on every PR push (Batch 3 lands this in PR 1)
+  - Lesson 3: this Sprint 2 plan's content was derived from the audit's roadmap + Miky's downstream needs + StoneSketch's existing code — not from operator vision
+- [ ] **Audit refreshed** at sprint close (per `mikbry/miky#180` staleness warning).
+- [ ] **3 cross-project bug filings on `mikbry/miky`** (deferred from Sprint 1's formal close):
+  - `miky pr diff` subcommand missing (#237 ✓ filed 2026-05-21)
+  - `.claude-audit-instructions.md` not in default gitignore template (#238 ✓ filed 2026-05-21)
+  - Rebase prompt assumes CI exists (#239 ✓ filed 2026-05-21)
+- [ ] **Codex review on the text decision** — `docs/research/mkui-text-state-of-the-art.md` and `docs/components/miky-to-shadcn-mapping.md` go through external review before the atom PR merges.
+- [ ] **Sprint 2 retro filed** with the standard 7-section shape; includes:
+  - Did the 4-round substrate budget hold for render + text?
+  - Did the cosmic-text choice produce production-quality text on macOS for Miky's design?
+  - Did Miky's app team actually consume the Sprint 2 deliverable end-to-end?
+  - Did the calibration table (mkui = 3-4 issues/batch, 4-day window) feel right at 3+3 across two batches?
 
 ---
 
@@ -243,57 +195,52 @@ Phase 1.5 lands last but writes claims about `ci.yml` (1.2), MSRV (1.4), `mkui-c
 The retro at Sprint 2 close will revisit:
 
 ### Promote Sprint 1 + Sprint 2 retro's deferred items
-- **`#[forbid(unsafe_code)]`** rollout — Phase 2.4 in the audit roadmap; small, Sprint 3 candidate.
-- **`thiserror::Error` migration** for `MkuiError` — Phase 2.3; medium, depends on the bridge `mkui/src/lib.rs` error conversion paths.
-- **`#[non_exhaustive]`** on the growing enum surface — Phase 2.5; mechanical, Sprint 3 candidate.
+- Phase 2.4 (`#[forbid(unsafe_code)]`) — small, Sprint 3 or 4.
+- Phase 2.3 (`thiserror::Error` migration for `MkuiError`) — medium, depends on the bridge.
 
-### Sprint 3 candidate themes
-- **Phase 2 of the audit** — issues #2 (full wgpu renderer), #9 (native boundary decision), #5 (PyO3 fix). These are the "renderer reality" issues I'd originally pitched for Sprint 2 before the audit landed; the audit's sequencing pushed them to Sprint 3.
-- **#2 is the headline** — novel-surface tier, 4-round Codex budget, dependency on Sprint 2's CI being green (so the wgpu work has a clean gate).
-- **#9 follows #2** — once the wgpu renderer is real, the native-boundary decision (fold mkui-native into mkui-wgpu, or vice versa) becomes obvious.
+### Sprint 3 candidate themes — "Window chrome + structural"
+- **Structural batch:** Window, Titlebar, Sidebar (shadcn-aligned), StatusBar, NeedsYouRail. Five issues, calibrated for the batch cap.
+- **Inputs + remaining atoms batch:** Button-variants (extend existing), SearchInput, FilterChip, Tabs, Kbd, Avatar.
+- Atoms still owed from the Miky catalog: RoleBadge (Badge variant), TierTag (Badge variant), LedgerChip (Badge with icon), Kbd, Avatar, SegmentedControl (ToggleGroup).
+- Per the audit's Phase 2: issue #2 is now (mostly) landed via Sprint 2 — confirm at retro whether the renderer is "complete" or whether residual work belongs in Sprint 3.
 
-### Continued substrate work
-- **Phase 3 of the audit** — `deny.toml` + `cargo audit`, per-item rustdoc, ADRs, criterion benches. Mostly Sprint 4 work.
-- **Miky catalog readiness** — once Sprint 3's renderer lands, Sprint 4 starts shipping the components Miky's `DESIGN.md` lists (Chip, Dot, StatePill, ...). Atomic + cheap once the renderer paints pixels.
+### Sprint 4 candidate themes — "Data rows + composites + deferred hygiene"
+- Data rows (PRRow, IssueRow, AgentCard, NeedsYouItem, AuditRow, SprintCard) — all compositions, all UiBuilder methods, not new components.
+- Composites (ClientBanner, Advisory, BatchHeader, GatesStrip).
+- Deferred hygiene catches up: mkui-c safety (audit 1.1), MSRV (audit 1.4), README rewrite (audit 1.5 / #7).
 
-The general shape of Sprint 3 is "the renderer becomes real." Sprint 2's job is to make Sprint 3 boringly executable: CI green, clippy clean, MSRV declared, README accurate, FFI sound.
+The general shape of Sprint 3 is "window chrome → first usable Miky app." Sprint 4 ships data rows + composites. Per `docs/downstream-consumers.md`, **Miky's app is usable end of Sprint 3 (~14 days from now)** and catalog-complete end of Sprint 4 (~21 days). The 3-week deadline holds.
+
+---
+
+## Discipline notes — what changed from the prior Sprint 2 plan
+
+This is the **second revision** of `docs/sprint-2-plan.md`. The first revision (committed in 53da01a) was audit-strict: 5 PRs of Phase 1 hygiene, no features. That plan ran into a downstream-consumer-deadline constraint surfaced in subsequent operator review:
+
+- Miky's macOS app needs usable mkui within ~3 weeks (3-4 mkui sprints).
+- At audit-strict pace, Sprint 2 = hygiene, Sprint 3 = renderer (#2), Sprint 4 = catalog atoms start. Total ~5-6 sprints before Miky's app has usable structural + atoms.
+- The deadline doesn't fit.
+
+The reshape:
+1. **Phase 1 hygiene trimmed** to CI (1.2) + mkui-core clippy (1.3). mkui-c safety (1.1), MSRV (1.4), README (1.5/#7) deferred to Sprint 4. This is **a deliberate audit-discipline trade-off** documented in §"Deferred from Sprint 2".
+2. **Sprint 2 now ships Issue #2 (real wgpu renderer)** — but reframed as extraction from `stonesketch-render`'s existing production code, not greenfield. Substrate tier, not novel-surface.
+3. **First-text and first-atoms land in Sprint 2** — cosmic-text via the new `mkui-text` crate (per the dedicated research doc) + shadcn-aligned atoms (per the dedicated mapping doc).
+4. **shadcn is the canonical naming + variant target** — where shadcn has an equivalent for a Miky component, the shadcn API wins. The Miky design language can keep its names (Chip, RoleBadge, etc.) but the implementation maps to `Badge` with variants.
+
+This revision is **the second canonical example of the audit-driven planning principle** captured in Sprint 1 retro Lesson 3 (the first canonical example being the v1 plan in 53da01a). The principle generalizes to: **"plans must integrate audit findings + downstream-consumer deadlines + existing-code reality + design-system alignment."** When any of those four inputs changes, the plan revises. They all changed between 2026-05-20 (v1 commit) and 2026-05-21 (this v2 commit):
+- Audit findings: same.
+- Downstream-consumer deadline: surfaced via operator review (3 weeks to usable mkui for Miky).
+- Existing-code reality: surfaced via reading `astoneer/stonesketch` (stonesketch-render is 2 854 lines of production wgpu; mkui doesn't need greenfield rendering).
+- Design-system alignment: surfaced via explicit shadcn-naming guidance from operator.
+
+The revision pattern is captured in the close-out commit message and will inform the Sprint 2 retro's "what we learned about planning" section.
 
 ---
 
 ## Carry-forward from Sprint 1
 
-`mkui-batch-2-backend-contract` named issues #3/#4/#6/#10 — all merged 2026-05-20. No epic-split carry-forward; each closes its own scope. The carry-overs to flag for Sprint 2:
-
-1. **`docs/audit-report.md`** committed in Sprint 1 close-out batch (so #180's staleness warning treats Sprint 1 as fresh). The Sprint 2 audit refresh is **not** required mid-sprint; only at sprint close.
-2. **`docs/CONTRIBUTING.md`** committed in Sprint 1 close-out batch — referenced by `miky post-batch` but didn't exist; this Sprint 2 plan inherits the document.
-3. **`docs/sprint-1-retro.md`** committed in Sprint 1 close-out batch as the source-of-truth for what binding behavior change is now in effect.
-
-The Sprint 1 close-out commit lands `audit + retro + this plan + downstream-consumers + CONTRIBUTING` as one cohesive `docs:` commit on `main`. Per `mikbry/agent-skills#2` (Miky's reply 2026-05-20): committing audit + retro + Sprint 2 plan **is** Sprint 1's formal close, satisfying all 8 Sprint-Done gate items per `docs/CONTRIBUTING.md` (post-#216) §"Sprint and batch discipline."
+`mkui-batch-2-backend-contract` named issues #3/#4/#6/#10 — all merged 2026-05-20. No carry-forward. The Sprint-Done gate items for Sprint 1 close were satisfied by commit 53da01a + ef16fdc (audit + retro + sprint-2 plan v1 + corrections); this revision (sprint-2 plan v2) extends rather than replaces the close-out per the audit-driven-planning principle above.
 
 ---
 
-## Discipline notes
-
-This is the **second non-miky sprint plan written to the depth of `mikbry/miky-internal/docs/sprint-7-plan.md`** (after `mikbry/marabot/.../sprint-2-plan.md`). Both surfaced cross-project gaps that informed `mikbry/agent-skills#2`:
-
-- **Marabot Sprint 2 plan:** sprint-plan-artifact gap — CONTRIBUTING described the invariants but didn't list this artifact as a required deliverable at sprint-creation time (temporal axis).
-- **mkui Sprint 2 plan (this doc):** audit-driven-planning gap — `miky project audit` should run *before* the first batch, not just before sprint close (operational axis).
-
-Per Miky's correction note on 2026-05-21, the actual scope landing in `mikbry/agent-skills#2` is **one principle line** in the existing `sprint-and-batch-discipline.skill.md` covering "ground in current-state evidence before planning or claim" across both axes — not a promoted standalone meta-skill. The 9-section sprint-plan template that this doc demonstrates is deferred to a third-instance trigger per Sandi Metz's rule of three; if a future independent project surfaces the same need, the template earns its keep then.
-
-This plan is, in honest framing, **a planning artifact for mkui** that happens to be the second empirical data point informing the principle line — not a canonical reference for an external skill.
-
-**What's different from Sprint 1's planning:**
-
-1. **Audit is the substrate.** Sprint 1 was planned from operator vision ("renderer reality"); Sprint 2 is planned from the audit's Phase 1 task table. The audit knew about `mkui-c` unsoundness in 8 minutes; operator vision would have missed it.
-2. **Goal sentence states the exit criterion in measurable terms.** Sprint 1's implicit goal was "lock the contract"; Sprint 2's explicit goal includes the literal cargo invocation that exits 0.
-3. **Conflict surface analysis happens BEFORE batch creation.** Sprint 1 hit a #3 vs #4 collision on `mkui-console/src/high_level.rs` mid-flight; Sprint 2 verifies file independence at plan time.
-4. **Sequential rebase is bound, not optional.** Sprint 1 retro Lesson 1 (memory `feedback_miky_rebase_sequential.md`) is now the default operator behavior; `--merge parallel` requires explicit user opt-in.
-5. **CI absence is named as the primary friction.** Sprint 1 ran without CI and absorbed ~3 hours of manual gate triage. Sprint 2's Phase 1.2 fixes this in the second PR of the batch; remaining 3 PRs are CI-gated.
-6. **Calibration table acknowledged.** Five issues exceeds mkui's calibrated 3-4/batch; the plan documents why (Phase 1 has exactly 5 file-independent tasks) and the Sprint 3 retro question explicitly asks if the bump felt right.
-
----
-
-**Sprint 2 starts here.**
-
-`v0.3.0` shipped; the backend contract is locked; the audit identifies the operational hygiene gap as the single biggest blocker to "external consumer is the smoke" experiments. Sprint 2's job: close that gap. Then Sprint 3 can be the renderer.
+**Sprint 2 starts here.** Two batches, six PRs, four days. Miky's app gets first usable mkui at end of Sprint 3 (~14 days from now); catalog-complete end of Sprint 4 (~21 days). The 3-week deadline holds.
