@@ -1,5 +1,6 @@
 use crate::renderer::WebRenderer;
 use mkui_core::theme::{ColorTheme, ThemeMode};
+use std::str::FromStr;
 use wasm_bindgen::prelude::*;
 
 pub struct WebApp {
@@ -161,7 +162,7 @@ impl WebApp {
 
             // Load color theme
             if let Ok(Some(theme_str)) = storage.get_item("mkui-color-theme") {
-                if let Some(color_theme) = ColorTheme::from_str(&theme_str) {
+                if let Ok(color_theme) = ColorTheme::from_str(&theme_str) {
                     self.color_theme = color_theme;
                 }
             }

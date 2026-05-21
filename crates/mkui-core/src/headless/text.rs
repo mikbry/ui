@@ -253,9 +253,8 @@ impl TextBuilder {
     }
 }
 
-// Convenience constructor
-impl Text {
-    pub fn new(content: impl Into<String>) -> TextBuilder {
-        TextBuilder::new().content(content)
+impl Default for TextBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
