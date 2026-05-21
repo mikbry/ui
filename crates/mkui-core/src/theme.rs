@@ -6,6 +6,9 @@
 //! classes, or terminal styles — those translations live in `mkui-web`,
 //! `mkui-console`, `mkui-native`, etc., never here.
 
+use std::fmt;
+use std::str::FromStr;
+
 /// Theme mode for applications.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -51,25 +54,6 @@ impl ColorTheme {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "default" => Some(ColorTheme::Default),
-            "blue" => Some(ColorTheme::Blue),
-            "green" => Some(ColorTheme::Green),
-            "amber" => Some(ColorTheme::Amber),
-            "rose" => Some(ColorTheme::Rose),
-            "purple" => Some(ColorTheme::Purple),
-            "orange" => Some(ColorTheme::Orange),
-            "teal" => Some(ColorTheme::Teal),
-            "mono" => Some(ColorTheme::Mono),
-            "scaled" => Some(ColorTheme::Scaled),
-            "red" => Some(ColorTheme::Red),
-            "yellow" => Some(ColorTheme::Yellow),
-            "violet" => Some(ColorTheme::Violet),
-            _ => None,
-        }
-    }
-
     pub fn all() -> Vec<ColorTheme> {
         vec![
             ColorTheme::Default,
@@ -86,6 +70,52 @@ impl ColorTheme {
             ColorTheme::Yellow,
             ColorTheme::Violet,
         ]
+    }
+}
+
+/// Error returned by [`<ColorTheme as FromStr>::from_str`] when the input does
+/// not match any known [`ColorTheme`] variant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParseColorThemeError {
+    input: String,
+}
+
+impl ParseColorThemeError {
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+}
+
+impl fmt::Display for ParseColorThemeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unknown color theme: {:?}", self.input)
+    }
+}
+
+impl std::error::Error for ParseColorThemeError {}
+
+impl FromStr for ColorTheme {
+    type Err = ParseColorThemeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" => Ok(ColorTheme::Default),
+            "blue" => Ok(ColorTheme::Blue),
+            "green" => Ok(ColorTheme::Green),
+            "amber" => Ok(ColorTheme::Amber),
+            "rose" => Ok(ColorTheme::Rose),
+            "purple" => Ok(ColorTheme::Purple),
+            "orange" => Ok(ColorTheme::Orange),
+            "teal" => Ok(ColorTheme::Teal),
+            "mono" => Ok(ColorTheme::Mono),
+            "scaled" => Ok(ColorTheme::Scaled),
+            "red" => Ok(ColorTheme::Red),
+            "yellow" => Ok(ColorTheme::Yellow),
+            "violet" => Ok(ColorTheme::Violet),
+            other => Err(ParseColorThemeError {
+                input: other.to_string(),
+            }),
+        }
     }
 }
 
@@ -117,13 +147,20 @@ impl Default for Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn color_theme_round_trips_through_string() {
         for theme in ColorTheme::all() {
             let s = theme.to_class().trim_start_matches("theme-");
-            assert_eq!(ColorTheme::from_str(s), Some(theme));
+            assert_eq!(ColorTheme::from_str(s), Ok(theme));
         }
+    }
+
+    #[test]
+    fn color_theme_from_str_rejects_unknown_input() {
+        let err = ColorTheme::from_str("not-a-real-theme").unwrap_err();
+        assert_eq!(err.input(), "not-a-real-theme");
     }
 
     #[test]
