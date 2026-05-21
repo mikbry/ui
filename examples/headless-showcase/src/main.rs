@@ -1,4 +1,4 @@
-use mkui_core::headless::{ToggleBuilder};
+use mkui_core::headless::ToggleBuilder;
 
 fn main() {
     // Example of using the headless toggle component
@@ -8,13 +8,13 @@ fn main() {
             println!("Toggle changed to: {}", checked);
         })
         .build();
-    
+
     println!("Initial state: {}", toggle.is_checked());
-    
+
     // Simulate user interaction
     toggle.toggle();
     println!("After toggle: {}", toggle.is_checked());
-    
+
     // Simulate keyboard interaction
     use mkui_core::headless::KeyboardInteractable;
     toggle.handle_key_down(" ");

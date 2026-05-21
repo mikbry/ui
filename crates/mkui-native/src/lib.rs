@@ -17,10 +17,23 @@ use mkui_core::theme::Theme;
 /// these records into draw calls without changing the contract crate.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SceneNode {
-    Container { class: String, depth: usize },
-    Text { content: String, class: String, depth: usize },
-    Button { label: String, class: String, depth: usize },
-    Unknown { depth: usize },
+    Container {
+        class: String,
+        depth: usize,
+    },
+    Text {
+        content: String,
+        class: String,
+        depth: usize,
+    },
+    Button {
+        label: String,
+        class: String,
+        depth: usize,
+    },
+    Unknown {
+        depth: usize,
+    },
 }
 
 /// Scene built from a `mkui-core` component tree.

@@ -8,7 +8,9 @@ pub struct StyleClass {
 
 impl StyleClass {
     pub fn new() -> Self {
-        Self { classes: Vec::new() }
+        Self {
+            classes: Vec::new(),
+        }
     }
 
     pub fn push_class(mut self, class: &str) -> Self {
