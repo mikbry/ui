@@ -26,19 +26,19 @@ impl MkuiError {
             kind,
         }
     }
-    
+
     pub fn initialization(message: impl Into<String>) -> Self {
         Self::new(MkuiErrorKind::Initialization, message)
     }
-    
+
     pub fn rendering(message: impl Into<String>) -> Self {
         Self::new(MkuiErrorKind::Rendering, message)
     }
-    
+
     pub fn io(message: impl Into<String>) -> Self {
         Self::new(MkuiErrorKind::Io, message)
     }
-    
+
     pub fn generic(message: impl Into<String>) -> Self {
         Self::new(MkuiErrorKind::Generic, message)
     }

@@ -1,6 +1,6 @@
-use super::traits::{HeadlessComponent, Focusable};
-use crate::state::State;
+use super::traits::{Focusable, HeadlessComponent};
 use crate::event::Event;
+use crate::state::State;
 
 /// State for a text component
 #[derive(Debug, Clone, Default)]
@@ -79,53 +79,53 @@ impl Text {
     pub fn builder() -> TextBuilder {
         TextBuilder::new()
     }
-    
+
     pub fn content(&self) -> &str {
         &self.content
     }
-    
+
     pub fn set_content(&mut self, content: impl Into<String>) {
         self.content = content.into();
     }
-    
+
     pub fn variant(&self) -> &TextVariant {
         &self.variant
     }
-    
+
     pub fn size(&self) -> &TextSize {
         &self.size
     }
-    
+
     pub fn weight(&self) -> &TextWeight {
         &self.weight
     }
-    
+
     pub fn align(&self) -> &TextAlign {
         &self.align
     }
-    
+
     pub fn color(&self) -> Option<&str> {
         self.color.as_deref()
     }
-    
+
     pub fn is_selectable(&self) -> bool {
         self.state.selectable
     }
-    
+
     pub fn set_selectable(&mut self, selectable: bool) {
         self.state.selectable = selectable;
     }
-    
+
     pub fn is_selected(&self) -> bool {
         self.state.selected
     }
-    
+
     pub fn select(&mut self) {
         if self.state.selectable {
             self.state.selected = true;
         }
     }
-    
+
     pub fn deselect(&mut self) {
         self.state.selected = false;
     }
@@ -134,7 +134,7 @@ impl Text {
 impl HeadlessComponent for Text {
     type State = TextState;
     type Event = TextEvent;
-    
+
     fn new() -> Self {
         Self {
             state: TextState::default(),
@@ -146,11 +146,11 @@ impl HeadlessComponent for Text {
             color: None,
         }
     }
-    
+
     fn state(&self) -> &Self::State {
         &self.state
     }
-    
+
     fn handle_event(&mut self, event: Self::Event) {
         match event {
             TextEvent::Focus => self.focus(),
@@ -167,11 +167,11 @@ impl Focusable for Text {
             self.state.focused = true;
         }
     }
-    
+
     fn blur(&mut self) {
         self.state.focused = false;
     }
-    
+
     fn is_focused(&self) -> bool {
         self.state.focused
     }
@@ -200,42 +200,42 @@ impl TextBuilder {
             selectable: false,
         }
     }
-    
+
     pub fn content(mut self, content: impl Into<String>) -> Self {
         self.content = content.into();
         self
     }
-    
+
     pub fn variant(mut self, variant: TextVariant) -> Self {
         self.variant = variant;
         self
     }
-    
+
     pub fn size(mut self, size: TextSize) -> Self {
         self.size = size;
         self
     }
-    
+
     pub fn weight(mut self, weight: TextWeight) -> Self {
         self.weight = weight;
         self
     }
-    
+
     pub fn align(mut self, align: TextAlign) -> Self {
         self.align = align;
         self
     }
-    
+
     pub fn color(mut self, color: impl Into<String>) -> Self {
         self.color = Some(color.into());
         self
     }
-    
+
     pub fn selectable(mut self, selectable: bool) -> Self {
         self.selectable = selectable;
         self
     }
-    
+
     pub fn build(self) -> Text {
         Text {
             state: TextState {

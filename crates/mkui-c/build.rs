@@ -18,9 +18,8 @@ fn main() {
 
 #endif /* MKUI_C_H_GENERATED */
 "#;
-    
-    std::fs::write(&output_file, manual_header)
-        .expect("Unable to write header file");
+
+    std::fs::write(&output_file, manual_header).expect("Unable to write header file");
 
     println!("cargo:rerun-if-changed=src/");
     println!("cargo:rerun-if-changed=build.rs");

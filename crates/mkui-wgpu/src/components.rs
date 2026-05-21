@@ -424,12 +424,10 @@ mod tests {
 
         assert!(scene.primitives.len() >= 4);
         assert!(matches!(scene.primitives[0], Primitive::Shadow(_)));
-        assert!(
-            scene
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Text(_)))
-        );
+        assert!(scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Text(_))));
     }
 
     #[test]
@@ -521,12 +519,10 @@ mod tests {
             theme.input(false),
         );
 
-        assert!(
-            scene
-                .primitives
-                .iter()
-                .any(|primitive| matches!(primitive, Primitive::Quad(_)))
-        );
+        assert!(scene
+            .primitives
+            .iter()
+            .any(|primitive| matches!(primitive, Primitive::Quad(_))));
         assert!(scene.primitives.iter().any(|primitive| matches!(
             primitive,
             Primitive::Text(text) if text.content == "1.20 m"
