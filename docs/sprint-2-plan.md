@@ -1,4 +1,4 @@
-# Sprint 2 Plan — "Renderer foundations + first Miky atoms"
+# Sprint 2 Plan — "Renderer foundations + first generic atoms"
 
 **Window estimate:** 2026-05-21 → 2026-05-24 (4-day sprint; reshape vs. original plan documented in §"Discipline notes")
 **Tag target:** `v0.4.0`
@@ -9,12 +9,12 @@
 
 ## Sprint goal (immutable)
 
-> **Paint real pixels on a wgpu surface with production-quality text, expose the first three Miky-aligned atoms, and gate everything behind CI.** Sprint 2 lands the load-bearing renderer + text plumbing the rest of the catalog will ride on, plus the minimum hygiene (CI + `mkui-core` clippy/API fixes) that makes downstream review honest. The audit's Phase 1 hygiene items not directly on the renderer's critical path (mkui-c safety, MSRV, README) are deferred to Sprint 4 with explicit rationale below.
+> **Paint real pixels on a wgpu surface with production-quality text, expose the first two shadcn-aligned generic atoms (Badge + Dot), and gate everything behind CI.** Sprint 2 lands the load-bearing renderer + text plumbing the rest of the catalog will ride on, plus the minimum hygiene (CI + `mkui-core` clippy/API fixes) that makes downstream review honest. The audit's Phase 1 hygiene items not directly on the renderer's critical path (mkui-c safety, MSRV, README) are deferred to Sprint 4 with explicit rationale below.
 
 Three threads:
 
 1. **Renderer reality** — port `stonesketch-render`'s production HUD pipeline (surface management, MSAA picker, accumulator) into `mkui-wgpu`. Drop the 3D-specific passes (scene, shadow, AO, selection outline) that StoneSketch owns; keep the 2D HUD path. Replace the existing bitmap glyph fallback in `mkui-wgpu/src/tessellation.rs` with real text via a new `mkui-text` crate (cosmic-text + glyphon-shaped atlas, behind a `PlatformTextSystem` trait — see [`docs/research/mkui-text-state-of-the-art.md`](research/mkui-text-state-of-the-art.md)).
-2. **First Miky atoms in shadcn alignment** — ship `Badge` (covering Chip/RoleBadge/TierTag/LedgerChip as variants), `Dot` (Miky-specific status circle), and `StatePill` (Miky-specific 9-state agent encoding). All three are listed as required in `mikbry/miky-internal/DESIGN.md` lines 522-531; the shadcn↔Miky alignment is documented in [`docs/components/miky-to-shadcn-mapping.md`](components/miky-to-shadcn-mapping.md). Where shadcn has an equivalent (Badge → shadcn Badge), the shadcn API + variant naming is canonical.
+2. **First generic mkui atoms in shadcn alignment** — ship `Badge` (shadcn `Badge` with the canonical 4 variants: `default | destructive | outline | secondary` — no product-specific variants on the generic enum, per the Codex review boundary discipline) and `Dot` (generic status circle, status-color tokens only — `ok | warn | danger | neutral`, with optional halo + animation modifiers). The shadcn↔mkui alignment is documented in [`docs/components/mkui-to-shadcn-mapping.md`](components/mkui-to-shadcn-mapping.md). Where shadcn has an equivalent (Badge → shadcn Badge), the shadcn API + variant naming is canonical. **Product-specific atoms** (Miky's StatePill, RoleBadge, TierTag, etc.) do NOT ship in mkui — they live in the consumer's downstream UI crate; for Miky specifically, [`mikbry/miky-internal#6`](https://github.com/mikbry/miky-internal/issues/6) tracks the Miky-side mapping work.
 3. **CI as ground truth + mkui-core API correctness** — Sprint 1 retro's Lesson 2 (CI absence = pre-push gates are unenforceable theatre) closes in this sprint. CI gates fmt/clippy/test on every push. The 8 pre-existing `mkui-core` clippy errors (Default impls + std-trait shadowing) are real downstream-breaking API bugs and must land before any atom code rides on top — both because the renderer/atoms work consumes `mkui-core` types and because catalog work shouldn't carry the broken-`main` triage tax described in retro Lesson 2.
 
 ---
@@ -29,7 +29,7 @@ Three threads:
 | **Batch 4 (renderer + atoms)** | | | | |
 | new | `feat(wgpu): port stonesketch-render's HUD pipeline into mkui-wgpu` | medium-large | substrate | wgpu::Surface, MSAA picker, swapchain config, accumulator, instanced sprite pipeline — extraction not greenfield (see Risk 1) |
 | new | `feat(text): mkui-text crate wrapping cosmic-text + glyphon-shaped atlas behind PlatformTextSystem trait` | medium-large | substrate | per `docs/research/mkui-text-state-of-the-art.md`. New crate. Codex-reviewable after the research doc + this PR. |
-| new | `feat(wgpu): first Miky atoms — Badge (with Chip/RoleBadge/TierTag aliases) + Dot + StatePill` | medium | template | per `docs/components/miky-to-shadcn-mapping.md`. Ships shadcn-aligned API where applicable. |
+| new | `feat(wgpu): first generic atoms — Badge + Dot` | medium | template | per [`docs/components/mkui-to-shadcn-mapping.md`](components/mkui-to-shadcn-mapping.md). Generic shadcn-aligned only — no product-specific variants. Product-specific atoms (Miky's StatePill, etc.) live downstream in consumer UI crates; see `mikbry/miky-internal#6`. |
 | **Defaults — assumed in plan but not new issues** | | | | |
 | (carry) | `mkui-wgpu` consumers receive the new renderer through existing `Mkui`/`WgpuApp` types in `mkui-wgpu/src/high_level.rs` — no new issue, scope rider on the renderer PR |
 
@@ -65,7 +65,7 @@ Touched by Batch 4's renderer PR — the largest surface in the sprint. Adds new
 ### 4. `crates/mkui-text/` (new directory)
 Touched only by Batch 4's text PR. Zero conflict with other PRs (new crate). Adds `cosmic-text`, `swash`, `etagere`, `wgpu` deps. Workspace `Cargo.toml` adds `crates/mkui-text` to members.
 
-### 5. `crates/mkui-wgpu/src/components.rs` + new `badge.rs` / `dot.rs` / `state_pill.rs`
+### 5. `crates/mkui-wgpu/src/components.rs` + new `badge.rs` / `dot.rs`
 Touched by Batch 4's atoms PR. **Depends on mkui-core's `StyleClass::add` rename landing first** — if atoms reference `StyleClass`, they must use the renamed API. Sequencing handled by merge order, not file-independence: Batch 3's mkui-core fix merges before Batch 4's atoms.
 
 ### 6. `Cargo.toml` (workspace package)
@@ -99,7 +99,7 @@ Touched by Batch 4's renderer PR (adds wgpu/winit deps) and Batch 4's text PR (a
 |---|---|---|
 | render | `feat(wgpu): port stonesketch-render's HUD pipeline into mkui-wgpu` | headline; load-bearing for everything after |
 | text | `feat(text): mkui-text crate wrapping cosmic-text + atlas behind PlatformTextSystem trait` | text rendering — mandatory for any Miky-grade UI |
-| atoms | `feat(wgpu): first Miky atoms — Badge + Dot + StatePill` | first deliverable Miky's app team can render |
+| atoms | `feat(wgpu): first generic atoms — Badge + Dot` | first deliverable consumers can render through mkui |
 
 **Why these three together:**
 - All three are downstream of Batch 3's CI + mkui-core fixes.
