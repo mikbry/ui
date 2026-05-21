@@ -462,8 +462,10 @@ mod tests {
 
     #[test]
     fn panel_layout_hit_prefers_later_region_on_overlap() {
-        let mut layout: PanelLayout<&'static str> = PanelLayout::default();
-        layout.panel_rect = Some(Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0)));
+        let mut layout = PanelLayout::<&'static str> {
+            panel_rect: Some(Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0))),
+            ..Default::default()
+        };
         layout.hit_regions.push(HitRegion {
             rect: Rect::new(Point::new(10.0, 10.0), Size::new(100.0, 100.0)),
             target: "background",
@@ -479,8 +481,10 @@ mod tests {
 
     #[test]
     fn panel_layout_contains_panel_only_inside_rect() {
-        let mut layout: PanelLayout<()> = PanelLayout::default();
-        layout.panel_rect = Some(Rect::new(Point::new(100.0, 50.0), Size::new(50.0, 40.0)));
+        let layout = PanelLayout::<()> {
+            panel_rect: Some(Rect::new(Point::new(100.0, 50.0), Size::new(50.0, 40.0))),
+            ..Default::default()
+        };
 
         assert!(layout.contains_panel(Point::new(120.0, 70.0)));
         assert!(!layout.contains_panel(Point::new(10.0, 10.0)));
