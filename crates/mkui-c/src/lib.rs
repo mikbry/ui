@@ -1,13 +1,13 @@
 //! C/C++ bindings for mkui UI library
-//! 
+//!
 //! This crate provides a C-compatible API for the mkui library,
 //! allowing C and C++ applications to create cross-platform UIs.
 
-use std::ffi::{CStr, CString, c_char, c_int};
-use std::ptr;
 use mkui::prelude::*;
-use mkui_core::components::{View, Text, Button};
+use mkui_core::components::{Button, Text, View};
 use mkui_core::headless::ButtonVariant;
+use std::ffi::{c_char, c_int, CStr, CString};
+use std::ptr;
 
 // Ensure we have the proper forward declaration for C
 #[repr(C)]
@@ -48,9 +48,8 @@ impl MkuiResult {
     }
 
     fn error(code: MkuiErrorCode, message: &str) -> Self {
-        let c_message = CString::new(message).unwrap_or_else(|_| {
-            CString::new("Failed to create error message").unwrap()
-        });
+        let c_message = CString::new(message)
+            .unwrap_or_else(|_| CString::new("Failed to create error message").unwrap());
         Self {
             code,
             message: c_message.into_raw(),
@@ -62,9 +61,7 @@ impl MkuiResult {
 #[no_mangle]
 pub extern "C" fn mkui_app_new() -> *mut MkuiApp {
     match Mkui::new() {
-        Ok(app) => {
-            Box::into_raw(Box::new(MkuiApp { inner: Some(app) }))
-        }
+        Ok(app) => Box::into_raw(Box::new(MkuiApp { inner: Some(app) })),
         Err(_) => ptr::null_mut(),
     }
 }
@@ -91,7 +88,9 @@ pub extern "C" fn mkui_app_add_view(app: *mut MkuiApp, class_name: *const c_char
     } else {
         match unsafe { CStr::from_ptr(class_name) }.to_str() {
             Ok(s) => s,
-            Err(_) => return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name"),
+            Err(_) => {
+                return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name")
+            }
         }
     };
 
@@ -110,9 +109,9 @@ pub extern "C" fn mkui_app_add_view(app: *mut MkuiApp, class_name: *const c_char
 /// Add a text component to the application
 #[no_mangle]
 pub extern "C" fn mkui_app_add_text(
-    app: *mut MkuiApp, 
-    content: *const c_char, 
-    class_name: *const c_char
+    app: *mut MkuiApp,
+    content: *const c_char,
+    class_name: *const c_char,
 ) -> MkuiResult {
     if app.is_null() || content.is_null() {
         return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid parameters");
@@ -128,7 +127,9 @@ pub extern "C" fn mkui_app_add_text(
     } else {
         match unsafe { CStr::from_ptr(class_name) }.to_str() {
             Ok(s) => s,
-            Err(_) => return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name"),
+            Err(_) => {
+                return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name")
+            }
         }
     };
 
@@ -166,7 +167,9 @@ pub extern "C" fn mkui_app_add_button(
     } else {
         match unsafe { CStr::from_ptr(class_name) }.to_str() {
             Ok(s) => s,
-            Err(_) => return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name"),
+            Err(_) => {
+                return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name")
+            }
         }
     };
 

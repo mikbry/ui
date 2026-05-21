@@ -595,12 +595,10 @@ mod tests {
                 .any(|p| matches!(p, Primitive::Quad(q) if q.fill == fill)),
             "selected list row should use card_selected fill"
         );
-        assert!(
-            scene
-                .primitives
-                .iter()
-                .any(|p| matches!(p, Primitive::Text(t) if t.content == "Wall #1"))
-        );
+        assert!(scene
+            .primitives
+            .iter()
+            .any(|p| matches!(p, Primitive::Text(t) if t.content == "Wall #1")));
         assert_eq!(layout.hit_regions.len(), 1);
         assert_eq!(layout.hit_regions[0].target, "wall-1");
     }

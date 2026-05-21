@@ -1,6 +1,6 @@
-use super::traits::{HeadlessComponent, Focusable, KeyboardInteractable};
-use crate::state::State;
+use super::traits::{Focusable, HeadlessComponent, KeyboardInteractable};
 use crate::event::Event;
+use crate::state::State;
 
 /// State for a toggle component
 #[derive(Debug, Clone, Default)]
@@ -35,16 +35,16 @@ impl Toggle {
     pub fn builder() -> ToggleBuilder {
         ToggleBuilder::new()
     }
-    
+
     pub fn is_checked(&self) -> bool {
         self.state.checked
     }
-    
+
     pub fn set_checked(&mut self, checked: bool) {
         if self.state.disabled {
             return;
         }
-        
+
         if self.state.checked != checked {
             self.state.checked = checked;
             if let Some(on_change) = &self.on_change {
@@ -52,15 +52,15 @@ impl Toggle {
             }
         }
     }
-    
+
     pub fn toggle(&mut self) {
         self.set_checked(!self.state.checked);
     }
-    
+
     pub fn is_disabled(&self) -> bool {
         self.state.disabled
     }
-    
+
     pub fn set_disabled(&mut self, disabled: bool) {
         self.state.disabled = disabled;
     }
@@ -69,18 +69,18 @@ impl Toggle {
 impl HeadlessComponent for Toggle {
     type State = ToggleState;
     type Event = ToggleEvent;
-    
+
     fn new() -> Self {
         Self {
             state: ToggleState::default(),
             on_change: None,
         }
     }
-    
+
     fn state(&self) -> &Self::State {
         &self.state
     }
-    
+
     fn handle_event(&mut self, event: Self::Event) {
         match event {
             ToggleEvent::Toggle => self.toggle(),
@@ -97,11 +97,11 @@ impl Focusable for Toggle {
     fn focus(&mut self) {
         self.state.focused = true;
     }
-    
+
     fn blur(&mut self) {
         self.state.focused = false;
     }
-    
+
     fn is_focused(&self) -> bool {
         self.state.focused
     }
@@ -112,13 +112,13 @@ impl KeyboardInteractable for Toggle {
         if self.state.disabled {
             return;
         }
-        
+
         match key {
             " " | "Enter" => self.toggle(),
             _ => {}
         }
     }
-    
+
     fn handle_key_up(&mut self, _key: &str) {
         // No-op for toggle
     }
@@ -139,22 +139,22 @@ impl ToggleBuilder {
             on_change: None,
         }
     }
-    
+
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
         self
     }
-    
+
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
-    
+
     pub fn on_change<F: Fn(bool) + 'static>(mut self, f: F) -> Self {
         self.on_change = Some(Box::new(f));
         self
     }
-    
+
     pub fn build(self) -> Toggle {
         Toggle {
             state: ToggleState {

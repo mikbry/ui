@@ -1,12 +1,12 @@
 //! Python bindings for mkui UI library
-//! 
+//!
 //! This crate provides Python bindings using PyO3, allowing Python applications
 //! to create cross-platform UIs with mkui.
 
-use pyo3::prelude::*;
 use mkui::prelude::*;
-use mkui_core::components::{View, Text, Button};
+use mkui_core::components::{Button, Text, View};
 use mkui_core::headless::ButtonVariant;
+use pyo3::prelude::*;
 
 /// Python wrapper for MkuiError
 #[pyclass]
@@ -28,7 +28,7 @@ impl PyMkuiError {
     fn __str__(&self) -> &str {
         &self.inner
     }
-    
+
     fn __repr__(&self) -> String {
         format!("MkuiError('{}')", self.inner)
     }
@@ -80,12 +80,13 @@ impl App {
     fn new() -> PyResult<Self> {
         match Mkui::new() {
             Ok(app) => Ok(Self { inner: Some(app) }),
-            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Failed to create mkui app: {}", e)
-            )),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to create mkui app: {}",
+                e
+            ))),
         }
     }
-    
+
     /// Add a view component to the application
     #[pyo3(signature = (class_name=None))]
     fn add_view(&mut self, class_name: Option<&str>) -> PyResult<()> {
@@ -95,11 +96,11 @@ impl App {
             Ok(())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "App is not initialized"
+                "App is not initialized",
             ))
         }
     }
-    
+
     /// Add a text component to the application
     #[pyo3(signature = (content, class_name=None))]
     fn add_text(&mut self, content: &str, class_name: Option<&str>) -> PyResult<()> {
@@ -109,18 +110,18 @@ impl App {
             Ok(())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "App is not initialized"
+                "App is not initialized",
             ))
         }
     }
-    
+
     /// Add a button component to the application
     #[pyo3(signature = (text, variant=None, class_name=None))]
     fn add_button(
-        &mut self, 
-        text: &str, 
-        variant: Option<PyButtonVariant>, 
-        class_name: Option<&str>
+        &mut self,
+        text: &str,
+        variant: Option<PyButtonVariant>,
+        class_name: Option<&str>,
     ) -> PyResult<()> {
         if let Some(app) = self.inner.take() {
             let button_variant = variant.unwrap_or(PyButtonVariant::Primary).into();
@@ -131,46 +132,47 @@ impl App {
             Ok(())
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "App is not initialized"
+                "App is not initialized",
             ))
         }
     }
-    
+
     /// Run the application (console mode)
     fn run_console(&mut self) -> PyResult<()> {
         if let Some(app) = self.inner.take() {
             match app.run() {
                 Ok(_) => Ok(()),
-                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    format!("App run failed: {}", e)
-                )),
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                    "App run failed: {}",
+                    e
+                ))),
             }
         } else {
             Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                "App is not initialized"
+                "App is not initialized",
             ))
         }
     }
-    
+
     /// Method chaining support - return self for fluent API
     #[pyo3(signature = (class_name=None))]
     fn view(&mut self, class_name: Option<&str>) -> PyResult<()> {
         self.add_view(class_name)
     }
-    
+
     /// Method chaining support - return self for fluent API
     #[pyo3(signature = (content, class_name=None))]
     fn text(&mut self, content: &str, class_name: Option<&str>) -> PyResult<()> {
         self.add_text(content, class_name)
     }
-    
+
     /// Method chaining support - return self for fluent API
     #[pyo3(signature = (text, variant=None, class_name=None))]
     fn button(
-        &mut self, 
-        text: &str, 
-        variant: Option<PyButtonVariant>, 
-        class_name: Option<&str>
+        &mut self,
+        text: &str,
+        variant: Option<PyButtonVariant>,
+        class_name: Option<&str>,
     ) -> PyResult<()> {
         self.add_button(text, variant, class_name)
     }
@@ -195,13 +197,15 @@ fn run_showcase() -> PyResult<()> {
     match showcase_common::create_showcase_ui() {
         Ok(app) => match app.run() {
             Ok(_) => Ok(()),
-            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                format!("Showcase run failed: {}", e)
-            )),
+            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Showcase run failed: {}",
+                e
+            ))),
         },
-        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            format!("Failed to create showcase: {}", e)
-        )),
+        Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+            "Failed to create showcase: {}",
+            e
+        ))),
     }
 }
 
@@ -214,7 +218,7 @@ fn mkui_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(create_app, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(run_showcase, m)?)?;
-    
+
     // Add button variant constants
     m.add("BUTTON_PRIMARY", PyButtonVariant::Primary)?;
     m.add("BUTTON_SECONDARY", PyButtonVariant::Secondary)?;
@@ -222,6 +226,6 @@ fn mkui_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BUTTON_OUTLINE", PyButtonVariant::Outline)?;
     m.add("BUTTON_GHOST", PyButtonVariant::Ghost)?;
     m.add("BUTTON_LINK", PyButtonVariant::Link)?;
-    
+
     Ok(())
 }

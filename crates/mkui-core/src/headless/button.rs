@@ -1,6 +1,6 @@
-use super::traits::{HeadlessComponent, Focusable, KeyboardInteractable};
-use crate::state::State;
+use super::traits::{Focusable, HeadlessComponent, KeyboardInteractable};
 use crate::event::Event;
+use crate::state::State;
 
 /// State for a button component
 #[derive(Debug, Clone, Default)]
@@ -59,56 +59,56 @@ impl Button {
     pub fn builder() -> ButtonBuilder {
         ButtonBuilder::new()
     }
-    
+
     pub fn text(&self) -> &str {
         &self.text
     }
-    
+
     pub fn variant(&self) -> &ButtonVariant {
         &self.variant
     }
-    
+
     pub fn size(&self) -> &ButtonSize {
         &self.size
     }
-    
+
     pub fn is_disabled(&self) -> bool {
         self.state.disabled
     }
-    
+
     pub fn set_disabled(&mut self, disabled: bool) {
         self.state.disabled = disabled;
     }
-    
+
     pub fn is_loading(&self) -> bool {
         self.state.loading
     }
-    
+
     pub fn set_loading(&mut self, loading: bool) {
         self.state.loading = loading;
     }
-    
+
     pub fn is_pressed(&self) -> bool {
         self.state.pressed
     }
-    
+
     pub fn click(&mut self) {
         if self.state.disabled || self.state.loading {
             return;
         }
-        
+
         if let Some(on_click) = &self.on_click {
             on_click();
         }
     }
-    
+
     pub fn press(&mut self) {
         if self.state.disabled || self.state.loading {
             return;
         }
         self.state.pressed = true;
     }
-    
+
     pub fn release(&mut self) {
         self.state.pressed = false;
         self.click();
@@ -118,7 +118,7 @@ impl Button {
 impl HeadlessComponent for Button {
     type State = ButtonState;
     type Event = ButtonEvent;
-    
+
     fn new() -> Self {
         Self {
             state: ButtonState::default(),
@@ -128,11 +128,11 @@ impl HeadlessComponent for Button {
             on_click: None,
         }
     }
-    
+
     fn state(&self) -> &Self::State {
         &self.state
     }
-    
+
     fn handle_event(&mut self, event: Self::Event) {
         match event {
             ButtonEvent::Click => self.click(),
@@ -150,11 +150,11 @@ impl Focusable for Button {
     fn focus(&mut self) {
         self.state.focused = true;
     }
-    
+
     fn blur(&mut self) {
         self.state.focused = false;
     }
-    
+
     fn is_focused(&self) -> bool {
         self.state.focused
     }
@@ -165,7 +165,7 @@ impl KeyboardInteractable for Button {
         if self.state.disabled || self.state.loading {
             return;
         }
-        
+
         match key {
             " " | "Enter" => {
                 self.press();
@@ -173,12 +173,12 @@ impl KeyboardInteractable for Button {
             _ => {}
         }
     }
-    
+
     fn handle_key_up(&mut self, key: &str) {
         if self.state.disabled || self.state.loading {
             return;
         }
-        
+
         match key {
             " " | "Enter" => {
                 self.release();
@@ -209,37 +209,37 @@ impl ButtonBuilder {
             on_click: None,
         }
     }
-    
+
     pub fn text(mut self, text: impl Into<String>) -> Self {
         self.text = text.into();
         self
     }
-    
+
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
         self
     }
-    
+
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.size = size;
         self
     }
-    
+
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
-    
+
     pub fn loading(mut self, loading: bool) -> Self {
         self.loading = loading;
         self
     }
-    
+
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.on_click = Some(Box::new(f));
         self
     }
-    
+
     pub fn build(self) -> Button {
         Button {
             state: ButtonState {

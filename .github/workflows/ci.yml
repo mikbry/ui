@@ -17,17 +17,15 @@ env:
 # Each TODO marker references the issue that uncomments it.
 
 jobs:
-  # BLOCKED-BY: #27 — workspace `cargo fmt --all` cleanup.
-  # Uncomment when #27 lands. Until then, fmt drift is silently accepted.
-  # fmt:
-  #   name: fmt
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #       with:
-  #         components: rustfmt
-  #     - run: cargo fmt --all -- --check
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
   # BLOCKED-BY: #18 (mkui-core std-trait shadowing + default impls + StyleClass::add rename),
   #             #25 (mkui-wgpu doc-overindent + field-reassign + too-many-args),

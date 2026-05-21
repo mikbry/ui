@@ -5,7 +5,7 @@ use crate::state::State;
 pub trait HeadlessComponent {
     type State: State;
     type Event: Event;
-    
+
     fn new() -> Self;
     fn state(&self) -> &Self::State;
     fn handle_event(&mut self, event: Self::Event);
