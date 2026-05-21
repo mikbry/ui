@@ -54,6 +54,8 @@ pub mod builder;
 pub mod components;
 pub mod high_level;
 pub mod prelude;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod render;
 pub mod renderer;
 pub mod theme;
 pub mod types;
@@ -62,6 +64,8 @@ mod tessellation;
 
 pub use app::WgpuApp;
 pub use high_level::Mkui;
+#[cfg(not(target_arch = "wasm32"))]
+pub use render::{RenderOutcome, Renderer};
 pub use renderer::WgpuRenderer;
 
 // Low-level types

@@ -1,0 +1,9 @@
+[package]
+name = "native-window"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-wgpu = { path = "../../crates/mkui-wgpu" }
