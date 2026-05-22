@@ -116,6 +116,7 @@ pub enum Primitive {
 /// `None` is the resting value — atoms only push an instance into
 /// [`Scene::animations`] when the kind is non-`None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum DotAnimation {
     #[default]
     None,

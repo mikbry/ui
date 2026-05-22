@@ -24,6 +24,7 @@ pub struct FontId(pub u64);
 /// follow logical-direction conventions (LTR locales: left/right; RTL would
 /// flip them) — the bitmap implementation only sees LTR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum TextAlign {
     #[default]
     Start,
@@ -36,6 +37,7 @@ pub enum TextAlign {
 /// The Sprint 2 bitmap path only emits `Alpha`; the other variants are
 /// reserved for subpixel-RGB and color-bitmap paths in later sprints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum GlyphFormat {
     #[default]
     Alpha,
@@ -49,6 +51,7 @@ pub enum GlyphFormat {
 /// pattern); the enum is part of the API so consumers can already key caches
 /// on the requested hint mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum HintingMode {
     #[default]
     None,
@@ -226,6 +229,7 @@ pub struct GlyphImage {
 /// The variants stay narrow on purpose; richer diagnostics belong in
 /// implementation-specific extensions rather than the shared contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TextError {
     /// Returned by implementations that do not parse external font bytes
     /// (the bitmap path, primarily).

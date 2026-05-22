@@ -19,6 +19,7 @@ pub enum ThemeMode {
 
 /// Color themes (matches the shadcn UI catalog).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ColorTheme {
     Default,
     Blue,

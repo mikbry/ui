@@ -139,6 +139,7 @@ impl WebApp {
                 ColorTheme::Red => "red",
                 ColorTheme::Yellow => "yellow",
                 ColorTheme::Violet => "violet",
+                _ => "default",
             };
 
             let _ = storage.set_item("mkui-theme-mode", theme_mode);

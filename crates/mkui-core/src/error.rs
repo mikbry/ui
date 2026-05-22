@@ -8,6 +8,7 @@ pub struct MkuiError {
 }
 
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MkuiErrorKind {
     /// Initialization error (e.g., failed to create UI context)
     Initialization,

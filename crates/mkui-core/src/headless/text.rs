@@ -25,6 +25,7 @@ impl Event for TextEvent {}
 
 /// Text variants for styling
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TextVariant {
     Body,
     Heading1,
@@ -37,6 +38,7 @@ pub enum TextVariant {
 
 /// Text sizes
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TextSize {
     ExtraSmall,
     Small,
@@ -47,6 +49,7 @@ pub enum TextSize {
 
 /// Text weight
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TextWeight {
     Light,
     Normal,
@@ -57,6 +60,7 @@ pub enum TextWeight {
 
 /// Text alignment
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum TextAlign {
     Left,
     Center,

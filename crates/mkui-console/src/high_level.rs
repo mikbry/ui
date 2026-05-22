@@ -187,6 +187,14 @@ impl Mkui {
                             (false, ButtonVariant::Link) => {
                                 renderer.print_styled(4, current_row, text.white().underlined())?
                             }
+                            (true, _) => renderer.print_styled(
+                                4,
+                                current_row,
+                                text.white().on_blue().bold(),
+                            )?,
+                            (false, _) => {
+                                renderer.print_styled(4, current_row, text.white().on_blue())?
+                            }
                         }
                         current_row += 1;
                     }
