@@ -50,8 +50,10 @@
 //! [`mkui_console`]: https://docs.rs/mkui-console
 
 pub mod app;
+pub mod badge;
 pub mod builder;
 pub mod components;
+pub mod dot;
 pub mod high_level;
 pub mod prelude;
 #[cfg(not(target_arch = "wasm32"))]
@@ -70,16 +72,17 @@ pub use renderer::WgpuRenderer;
 
 // Low-level types
 pub use types::{
-    rect_contains, AtlasRect, Axis, Color, Constraints, CornerRadii, Element, FontFaceId, GlyphKey,
-    GlyphPlacement, GuiTriangle, HitRegion, Icon, IconId, IconMask, Insets, PanelLayout, Point,
-    Primitive, Quad, RasterizedGlyph, Rect, Scene, Shadow, Size, StackCursor, StackStyle, Stroke,
-    Text, TextAlign, TextBuffer, TextStyle,
+    rect_contains, AtlasRect, Axis, Color, Constraints, CornerRadii, DotAnimation,
+    DotAnimationInstance, Element, FontFaceId, GlyphKey, GlyphPlacement, GuiTriangle, HitRegion,
+    Icon, IconId, IconMask, Insets, PanelLayout, Point, Primitive, Quad, RasterizedGlyph, Rect,
+    Scene, Shadow, Size, StackCursor, StackStyle, Stroke, Text, TextAlign, TextBuffer, TextStyle,
 };
 
 // Theme + cva-style variant system
 pub use theme::{
-    ButtonSize, ButtonState, ButtonStyle, ButtonVariant, CardStyle, HudTheme, InputStyle,
-    PanelStyle, ScrollbarStyle, ShadowStyle, SliderStyle, SwatchStyle, TextVariant, ThemeTokens,
+    BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
+    CardStyle, DotSize, DotStyle, DotVariant, HudTheme, InputStyle, PanelStyle, ScrollbarStyle,
+    ShadowStyle, SliderStyle, SwatchStyle, TextVariant, ThemeTokens,
 };
 
 // Components (shadcn / miklabs-ui aligned)

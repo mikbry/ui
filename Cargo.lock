@@ -762,6 +762,7 @@ version = "0.3.0"
 dependencies = [
  "mkui-core",
  "mkui-web",
+ "mkui-wgpu",
 ]
 
 [[package]]

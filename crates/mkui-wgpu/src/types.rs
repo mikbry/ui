@@ -108,10 +108,36 @@ pub enum Primitive {
     Icon(Icon),
 }
 
+/// Generic motion primitive emitted by atoms like `dot`. The renderer
+/// interprets the kind into per-frame animation behaviour (alpha pulse,
+/// rotation, …); the static [`Primitive`] list keeps a stationary
+/// representation so headless / golden-image tests stay stable.
+///
+/// `None` is the resting value — atoms only push an instance into
+/// [`Scene::animations`] when the kind is non-`None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DotAnimation {
+    #[default]
+    None,
+    Pulse,
+    PulseUrgent,
+    Spin,
+}
+
+/// One active animation in a [`Scene`]. The renderer keys per-frame motion
+/// off `kind`, anchored at `center` with `radius` for amplitude.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DotAnimationInstance {
+    pub center: Point,
+    pub radius: f32,
+    pub kind: DotAnimation,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     pub viewport: Size,
     pub primitives: Vec<Primitive>,
+    pub animations: Vec<DotAnimationInstance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -361,6 +387,7 @@ impl Scene {
         Self {
             viewport,
             primitives: Vec::new(),
+            animations: Vec::new(),
         }
     }
 
@@ -382,6 +409,16 @@ impl Scene {
 
     pub fn icon(&mut self, icon: Icon) {
         self.push(Primitive::Icon(icon));
+    }
+
+    /// Record a non-`None` animation. Atoms emit at most one instance per
+    /// call; `DotAnimation::None` is a no-op so callers can pass the value
+    /// straight through without an outer match.
+    pub fn animate(&mut self, instance: DotAnimationInstance) {
+        if matches!(instance.kind, DotAnimation::None) {
+            return;
+        }
+        self.animations.push(instance);
     }
 }
 
