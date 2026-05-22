@@ -456,6 +456,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-text"
+version = "0.3.0"
+dependencies = [
+ "mkui-core",
+]
+
+[[package]]
 name = "mkui-web"
 version = "0.3.0"
 dependencies = [
@@ -472,6 +479,7 @@ name = "mkui-wgpu"
 version = "0.3.0"
 dependencies = [
  "mkui-core",
+ "mkui-text",
 ]
 
 [[package]]
