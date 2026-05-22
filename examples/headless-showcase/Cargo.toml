@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 mkui-core = { path = "../../crates/mkui-core" }
 mkui-web = { path = "../../crates/mkui-web" }
+mkui-wgpu = { path = "../../crates/mkui-wgpu" }

@@ -62,6 +62,12 @@ pub struct ThemeTokens {
     pub border: Color,
     pub destructive: Color,
     pub destructive_foreground: Color,
+    pub secondary: Color,
+    pub secondary_foreground: Color,
+    pub success: Color,
+    pub success_foreground: Color,
+    pub warning: Color,
+    pub warning_foreground: Color,
     pub card_fill: Color,
     pub card_border: Color,
     pub shadow: ShadowStyle,
@@ -194,6 +200,79 @@ pub struct CardStyle {
     pub corner_radius: f32,
 }
 
+/// Badge look-and-feel variant, matching shadcn's six canonical
+/// non-interactive badge variants 1:1. Product-specific signals (state
+/// pills, role tags, tier markers) compose a badge in downstream crates;
+/// they do not extend this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeVariant {
+    Default,
+    Destructive,
+    Outline,
+    Secondary,
+    Ghost,
+    Link,
+}
+
+/// Badge size. `Default` is ~22px tall (paired with body text); `Sm` is
+/// ~14px for dense tables and list rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadgeSize {
+    Default,
+    Sm,
+}
+
+/// Concrete, resolved badge look-and-feel. Atoms (`components::badge`) take
+/// `(variant, size)` and resolve through [`HudTheme::badge_style`]; this
+/// struct is the cva-style output the atom paints from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BadgeStyle {
+    pub fill: Color,
+    pub stroke: Color,
+    pub stroke_width: f32,
+    pub label_color: Color,
+    pub corner_radius: f32,
+    pub padding: Insets,
+    pub label_style: TextStyle,
+}
+
+/// Dot status-color variant. Tokens only — application semantics (what
+/// "ok" means in a given product) are decided by the consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotVariant {
+    Ok,
+    Warn,
+    Danger,
+    Neutral,
+}
+
+/// Dot diameter. `Sm` = 6px, `Md` = 8px — the two sizes downstream rows and
+/// status pips need; larger pips compose with `Badge` instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotSize {
+    Sm,
+    Md,
+}
+
+impl DotSize {
+    pub fn diameter(self) -> f32 {
+        match self {
+            DotSize::Sm => 6.0,
+            DotSize::Md => 8.0,
+        }
+    }
+}
+
+/// Concrete, resolved dot look-and-feel. The halo alpha is pre-resolved
+/// here so the atom can decide whether to emit the ring without re-reading
+/// theme tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DotStyle {
+    pub fill: Color,
+    pub halo: Color,
+    pub diameter: f32,
+}
+
 impl Default for HudTheme {
     fn default() -> Self {
         let font = FontFaceId(0);
@@ -208,6 +287,12 @@ impl Default for HudTheme {
             border: Color::rgba(0.96, 0.93, 0.88, 0.16),
             destructive: Color::rgba(0.72, 0.28, 0.22, 0.92),
             destructive_foreground: Color::rgba(0.99, 0.93, 0.90, 1.0),
+            secondary: Color::rgba(0.20, 0.17, 0.14, 0.96),
+            secondary_foreground: Color::rgba(0.98, 0.94, 0.88, 0.96),
+            success: Color::rgba(0.36, 0.74, 0.45, 0.96),
+            success_foreground: Color::rgba(0.05, 0.18, 0.09, 1.0),
+            warning: Color::rgba(0.95, 0.74, 0.30, 0.96),
+            warning_foreground: Color::rgba(0.20, 0.13, 0.04, 1.0),
             card_fill: Color::rgba(0.12, 0.10, 0.09, 0.92),
             card_border: Color::rgba(0.96, 0.93, 0.88, 0.08),
             shadow: ShadowStyle {
@@ -426,6 +511,109 @@ impl HudTheme {
                 stroke_width: 0.0,
                 label_style,
             },
+        }
+    }
+
+    /// Resolve `(variant, size)` to a concrete [`BadgeStyle`]. Mirrors the
+    /// cva-style shape of [`Self::button_style`]: variant picks colour
+    /// tokens, size picks corner radius / padding / label text style.
+    pub fn badge_style(&self, variant: BadgeVariant, size: BadgeSize) -> BadgeStyle {
+        let (corner_radius, padding, label_text) = match size {
+            BadgeSize::Default => (
+                6.0,
+                Insets::symmetric(8.0, 2.0),
+                TextStyle {
+                    align: TextAlign::Center,
+                    ..self.body_style
+                },
+            ),
+            BadgeSize::Sm => (
+                4.0,
+                Insets::symmetric(6.0, 1.0),
+                TextStyle {
+                    font_size_px: 10.0,
+                    line_height_px: 12.0,
+                    align: TextAlign::Center,
+                    ..self.body_style
+                },
+            ),
+        };
+
+        match variant {
+            BadgeVariant::Default => BadgeStyle {
+                fill: self.tokens.primary,
+                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke_width: 0.0,
+                label_color: self.tokens.primary_foreground,
+                corner_radius,
+                padding,
+                label_style: label_text,
+            },
+            BadgeVariant::Destructive => BadgeStyle {
+                fill: self.tokens.destructive,
+                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke_width: 0.0,
+                label_color: self.tokens.destructive_foreground,
+                corner_radius,
+                padding,
+                label_style: label_text,
+            },
+            BadgeVariant::Outline => BadgeStyle {
+                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: self.tokens.border,
+                stroke_width: 1.0,
+                label_color: self.tokens.muted_foreground,
+                corner_radius,
+                padding,
+                label_style: label_text,
+            },
+            BadgeVariant::Secondary => BadgeStyle {
+                fill: self.tokens.secondary,
+                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke_width: 0.0,
+                label_color: self.tokens.secondary_foreground,
+                corner_radius,
+                padding,
+                label_style: label_text,
+            },
+            BadgeVariant::Ghost => BadgeStyle {
+                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke_width: 0.0,
+                label_color: self.tokens.muted_foreground,
+                corner_radius,
+                padding,
+                label_style: label_text,
+            },
+            // TODO: emit a hover-underline once the SDF text path lands (the
+            // current bitmap fallback in `tessellation.rs` has no underline
+            // primitive). Colours + structure match shadcn's Button Link.
+            BadgeVariant::Link => BadgeStyle {
+                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke_width: 0.0,
+                label_color: self.tokens.primary,
+                corner_radius: 0.0,
+                padding,
+                label_style: label_text,
+            },
+        }
+    }
+
+    /// Resolve `(variant, size)` to a concrete [`DotStyle`]. The halo
+    /// colour is the variant fill at reduced alpha so the optional ring
+    /// reads as the same semantic without a second token lookup.
+    pub fn dot_style(&self, variant: DotVariant, size: DotSize) -> DotStyle {
+        let fill = match variant {
+            DotVariant::Ok => self.tokens.success,
+            DotVariant::Warn => self.tokens.warning,
+            DotVariant::Danger => self.tokens.destructive,
+            DotVariant::Neutral => self.tokens.muted_foreground,
+        };
+        DotStyle {
+            fill,
+            halo: fill.multiply_alpha(0.35),
+            diameter: size.diameter(),
         }
     }
 

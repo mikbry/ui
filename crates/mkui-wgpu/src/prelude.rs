@@ -24,5 +24,10 @@ pub use crate::builder::{ListRow, NumberRow, UiBuilder};
 pub use crate::components;
 pub use crate::high_level::Mkui;
 pub use crate::renderer::WgpuRenderer;
-pub use crate::theme::{ButtonSize, ButtonState, ButtonVariant, HudTheme, PanelStyle, TextVariant};
-pub use crate::types::{Axis, Color, HitRegion, PanelLayout, Point, Rect, Scene, Size, TextStyle};
+pub use crate::theme::{
+    BadgeSize, BadgeVariant, ButtonSize, ButtonState, ButtonVariant, DotSize, DotVariant, HudTheme,
+    PanelStyle, TextVariant,
+};
+pub use crate::types::{
+    Axis, Color, DotAnimation, HitRegion, PanelLayout, Point, Rect, Scene, Size, TextStyle,
+};

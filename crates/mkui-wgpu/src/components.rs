@@ -33,6 +33,9 @@ use crate::types::{
     TextAlign, TextStyle,
 };
 
+pub use crate::badge::badge;
+pub use crate::dot::dot;
+
 // ---------- Primitive builders ----------
 
 /// Panel chrome (shadow + rounded fill + stroke). Returns the padded inner
