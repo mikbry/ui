@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # mkui-core — shared component contract for every mkui backend
 //!
 //! `mkui-core` is the *contract crate* of the mkui workspace. It owns the

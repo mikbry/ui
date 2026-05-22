@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # mkui — bridge crate selecting the right backend at compile time
 //!
 //! `mkui` is the *bridge crate* of the mkui workspace. End users depend on
