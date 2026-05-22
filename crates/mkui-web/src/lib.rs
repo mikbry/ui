@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # mkui-web — WebAssembly/DOM backend for mkui
 //!
 //! `mkui-web` is one of the *backend crates* of the mkui workspace. It

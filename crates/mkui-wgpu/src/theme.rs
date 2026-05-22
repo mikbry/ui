@@ -205,6 +205,7 @@ pub struct CardStyle {
 /// pills, role tags, tier markers) compose a badge in downstream crates;
 /// they do not extend this enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BadgeVariant {
     Default,
     Destructive,
@@ -239,6 +240,7 @@ pub struct BadgeStyle {
 /// Dot status-color variant. Tokens only — application semantics (what
 /// "ok" means in a given product) are decided by the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DotVariant {
     Ok,
     Warn,

@@ -71,6 +71,7 @@ const MSAA_SAMPLE_COUNT_PREF: u32 = 4;
 /// reference's contract so the event-loop shell knows when to reconfigure
 /// the surface vs. just drive another frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RenderOutcome {
     /// Frame was submitted and presented.
     Drawn,

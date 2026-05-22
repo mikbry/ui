@@ -8,7 +8,6 @@ description = "Shared component, event, state, theme, and layout contracts for m
 
 [dependencies]
 thiserror = { workspace = true }
-derive_more = { workspace = true }
 serde = { workspace = true, optional = true }
 
 [features]

@@ -73,6 +73,7 @@ pub fn walk_component(
             }
             TextVariant::Caption | TextVariant::Label => Line::Muted(content),
             TextVariant::Body | TextVariant::Code => Line::Body(content),
+            _ => Line::Body(content),
         };
         layout.push(line);
         layout.push(Line::Spacer);

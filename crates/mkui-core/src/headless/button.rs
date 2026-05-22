@@ -29,6 +29,7 @@ impl Event for ButtonEvent {}
 
 /// Button variants for styling
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ButtonVariant {
     Primary,
     Secondary,
@@ -40,6 +41,7 @@ pub enum ButtonVariant {
 
 /// Button sizes
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ButtonSize {
     Small,
     Medium,

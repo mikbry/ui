@@ -7,14 +7,18 @@ pub struct WebApp {
     renderer: WebRenderer,
     theme_mode: ThemeMode,
     color_theme: ColorTheme,
+    cached_theme_class: Option<String>,
 }
 
 impl WebApp {
     pub fn new(root_id: &str) -> Result<Self, JsValue> {
+        let color_theme = ColorTheme::Default;
+        let cached_theme_class = Some(color_theme.to_class().to_string());
         let mut app = Self {
             renderer: WebRenderer::new(root_id)?,
             theme_mode: ThemeMode::System,
-            color_theme: ColorTheme::Default,
+            color_theme,
+            cached_theme_class,
         };
 
         // Load saved theme preferences
@@ -43,7 +47,9 @@ impl WebApp {
     }
 
     pub fn set_color_theme(&mut self, theme: ColorTheme) -> Result<(), JsValue> {
+        self.cached_theme_class = None;
         self.color_theme = theme;
+        self.cached_theme_class = Some(self.color_theme.to_class().to_string());
         self.save_theme_preferences();
         self.apply_theme()
     }
@@ -72,8 +78,12 @@ impl WebApp {
             html_class_list.remove_1(theme.to_class())?;
         }
 
-        // Apply color theme to html element
-        html_class_list.add_1(self.color_theme.to_class())?;
+        // Apply color theme to html element (use cached class to avoid recomputing per render)
+        let active_class = self
+            .cached_theme_class
+            .as_deref()
+            .unwrap_or_else(|| self.color_theme.to_class());
+        html_class_list.add_1(active_class)?;
 
         // Apply dark mode to body if it exists
         if let Some(body) = document.body() {
@@ -139,6 +149,7 @@ impl WebApp {
                 ColorTheme::Red => "red",
                 ColorTheme::Yellow => "yellow",
                 ColorTheme::Violet => "violet",
+                _ => "default",
             };
 
             let _ = storage.set_item("mkui-theme-mode", theme_mode);
@@ -164,6 +175,7 @@ impl WebApp {
             if let Ok(Some(theme_str)) = storage.get_item("mkui-color-theme") {
                 if let Ok(color_theme) = ColorTheme::from_str(&theme_str) {
                     self.color_theme = color_theme;
+                    self.cached_theme_class = Some(self.color_theme.to_class().to_string());
                 }
             }
         }
