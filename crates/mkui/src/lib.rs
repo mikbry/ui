@@ -92,20 +92,14 @@ impl Mkui {
     pub fn new() -> Result<Self, MkuiError> {
         #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
         {
-            mkui_console::prelude::Mkui::new()
-                .map(|inner| Self { inner })
-                .map_err(|e| {
-                    MkuiError::initialization(format!("Console initialization failed: {}", e))
-                })
+            let inner = mkui_console::prelude::Mkui::new()?;
+            Ok(Self { inner })
         }
 
         #[cfg(all(feature = "web", not(feature = "console")))]
         {
-            mkui_web::prelude::Mkui::new()
-                .map(|inner| Self { inner })
-                .map_err(|e| {
-                    MkuiError::initialization(format!("Web initialization failed: {:?}", e))
-                })
+            let inner = mkui_web::prelude::Mkui::new().map_err(js_value_to_mkui_error)?;
+            Ok(Self { inner })
         }
 
         #[cfg(not(any(feature = "web", feature = "console")))]
@@ -139,22 +133,38 @@ impl Mkui {
     pub fn run(self) -> Result<(), MkuiError> {
         #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
         {
-            self.inner
-                .run()
-                .map_err(|e| MkuiError::io(format!("Console run failed: {}", e)))
+            self.inner.run()?;
+            Ok(())
         }
 
         #[cfg(all(feature = "web", not(feature = "console")))]
         {
-            self.inner
-                .run()
-                .map_err(|e| MkuiError::rendering(format!("Web run failed: {:?}", e)))
+            self.inner.run().map_err(js_value_to_mkui_error)
         }
 
         #[cfg(not(any(feature = "web", feature = "console")))]
         {
             Err(MkuiError::generic("No mkui backend feature enabled"))
         }
+    }
+}
+
+/// Convert a `JsValue` from the web backend into a typed `MkuiError`.
+///
+/// On `wasm32` this hits the `#[from]` impl on `MkuiError::JsValue`. On
+/// native (the workspace's CI target) the cfg-gated variant isn't available,
+/// so we fall back to a rendered string in `Rendering`. Either way, the
+/// bridge never re-stringifies via `format!("{:?}", e)` on user-reachable
+/// paths beyond this single translation layer.
+#[cfg(all(feature = "web", not(feature = "console")))]
+fn js_value_to_mkui_error(value: wasm_bindgen::JsValue) -> MkuiError {
+    #[cfg(target_arch = "wasm32")]
+    {
+        MkuiError::from(value)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        MkuiError::rendering(format!("web backend error: {value:?}"))
     }
 }
 

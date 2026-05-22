@@ -228,36 +228,21 @@ pub struct GlyphImage {
 ///
 /// The variants stay narrow on purpose; richer diagnostics belong in
 /// implementation-specific extensions rather than the shared contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum TextError {
     /// Returned by implementations that do not parse external font bytes
     /// (the bitmap path, primarily).
+    #[error("invalid font bytes")]
     InvalidFontBytes,
     /// The `font_id` carried by a cache key or layout spec is not known to
     /// this implementation.
+    #[error("unknown font: {0:?}")]
     UnknownFont(FontId),
     /// The `glyph_id` carried by a cache key cannot be rasterized by this
     /// implementation.
+    #[error("unknown glyph: {0}")]
     UnknownGlyph(u32),
-}
-
-impl std::fmt::Display for TextError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TextError::InvalidFontBytes => f.write_str("invalid font bytes"),
-            TextError::UnknownFont(id) => write!(f, "unknown font: {id:?}"),
-            TextError::UnknownGlyph(id) => write!(f, "unknown glyph: {id}"),
-        }
-    }
-}
-
-impl std::error::Error for TextError {}
-
-impl From<TextError> for mkui_core::error::MkuiError {
-    fn from(err: TextError) -> Self {
-        mkui_core::error::MkuiError::rendering(err.to_string())
-    }
 }
 
 /// Domain-neutral text-system interface. Renderers consume the trait so the
