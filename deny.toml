@@ -1,0 +1,70 @@
+# cargo-deny configuration
+#
+# Workspace policy:
+#   - License: MIT OR Apache-2.0 dual; ban copyleft (GPL / AGPL family)
+#   - Duplicates: warn on duplicate transitive deps (audit category 6 regression flag)
+#   - Yanked: warn on yanked crates
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+version = 2
+yanked = "warn"
+# Known-acceptable advisories, all confined to `mkui-py` / `mkui-c` —
+# the FFI binding crates currently excluded from CI build/test (see ci.yml).
+# Re-evaluate once mkui-py (PyO3 / Python 3.14 unblock) and mkui-c (Sprint 4
+# FFI audit) come back into the CI gate.
+ignore = [
+    # `atty` is unmaintained; pulled in by cbindgen 0.26 → clap 3 (mkui-c build-dep).
+    "RUSTSEC-2024-0375",
+    # `paste` is unmaintained; pulled in by safer-ffi (mkui-c).
+    "RUSTSEC-2024-0436",
+    # PyO3 0.22 PyString::from_object buffer-overflow risk; pulled in by mkui-py.
+    "RUSTSEC-2025-0020",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+]
+exceptions = []
+
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+deny = [
+    # Copyleft licenses we cannot ship under our MIT/Apache-2.0 dual licensing.
+    # cargo-deny enforces this via the [licenses] block above, but listing
+    # well-known copyleft crates here makes the intent explicit.
+]
+skip = []
+skip-tree = []
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
