@@ -145,24 +145,18 @@ button:
 mkui is organized around a single contract crate that every backend consumes.
 Backend-specific code never leaks into the contract.
 
-```
-crates/
-  mkui-core       ← shared contract: component model, headless logic,
-                    theme/layout/input/style/error contracts. Zero
-                    backend dependencies — does not pull in wasm-bindgen,
-                    crossterm, ratatui, wgpu, etc.
-  mkui-web        ← web/WASM backend. Translates the shared component
-                    tree into DOM elements via web-sys.
-  mkui-console    ← terminal backend. Translates the shared component
-                    tree into crossterm output.
-  mkui-native     ← native (WGPU) backend. Walks the shared component
-                    tree into draw records ready for a GPU scene.
-  mkui            ← bridge: re-exports the backend chosen by Cargo
-                    features and presents a single `Mkui` entry point.
-  mkui-rsx        ← RSX/JSX-like macro (in progress).
-  mkui-c          ← C/C++ FFI bindings over the `mkui` bridge.
-  mkui-py         ← Python bindings via PyO3.
-```
+| Crate         | Responsibility                                                                                                                  | Maturity                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `mkui-core`   | Shared contract: component model, headless logic, theme / layout / input / style / error. Zero backend deps.                    | Stable                                                        |
+| `mkui-text`   | Text-system trait + from-scratch bitmap prototype. No external text-stack deps (no cosmic-text / swash / freetype / fontdue).   | Experimental (bitmap prototype, trait stable)                 |
+| `mkui-wgpu`   | WGPU scene primitives + declarative builders + `winit` `ApplicationHandler` shell. Backs the HUD-style 2D pipeline.             | Experimental (shipping; Sprint 4+ extends rendering capabilities) |
+| `mkui-web`    | Web/WASM backend. Translates the shared component tree into DOM via `web-sys`.                                                  | Stable                                                        |
+| `mkui-console`| Terminal backend. Translates the shared component tree into `crossterm` output.                                                 | Stable                                                        |
+| `mkui-native` | Scene-walker contract for native backends — collects `mkui-core` component trees into draw records that `mkui-wgpu` can render. | Experimental                                                  |
+| `mkui`        | Bridge crate. Re-exports the backend chosen by Cargo features and presents a single `Mkui` entry point.                         | Stable                                                        |
+| `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
+| `mkui-c`      | C/C++ FFI bindings over the `mkui` bridge.                                                                                      | Experimental — known soundness issues, deferred to Sprint 4   |
+| `mkui-py`     | Python bindings via PyO3.                                                                                                       | ⚠ Broken on Python 3.14 (see [#5](https://github.com/mikbry/ui/issues/5)) — use Python 3.13 if needed |
 
 ### What lives in `mkui-core`
 
@@ -178,7 +172,8 @@ crates/
 
 - DOM construction, `web-sys` / `wasm-bindgen` types → `mkui-web`.
 - Terminal styles, crossterm/ratatui types → `mkui-console`.
-- WGPU pipelines, scene transforms → `mkui-native`.
+- WGPU pipelines, scene transforms, winit shell → `mkui-wgpu`.
+- Text layout / rasterization → `mkui-text`.
 
 ### Adding a new backend
 
@@ -200,14 +195,14 @@ If a contract change is needed (e.g. a new component type), it goes in
 * **Desktop**: Windows, macOS, Linux ✅
 * **Console**: Terminal UIs with crossterm ✅
 * **Web**: via WebAssembly ✅
+* **Native WGPU**: HUD-style 2D scene pipeline + `winit` `ApplicationHandler` shell shipped in `mkui-wgpu`. Bitmap-text fallback is the current default; the Sprint 4+ direction for richer text rendering is internal.
 * **Mobile**: iOS, iPadOS, Android 🚧 (planned)
-* **Embedded**: WGPU on Vulkan/GL ES devices 🚧 (planned)
 
 ### Language Support
 * **Rust**: Native support with full API ✅
-* **C**: Complete FFI bindings with manual memory management ✅
-* **C++**: Modern C++17 wrapper with RAII and exceptions ✅
-* **Python**: PyO3 bindings with method chaining and exception handling ✅
+* **C**: FFI bindings — experimental, known soundness issues deferred to Sprint 4
+* **C++**: Modern C++17 wrapper with RAII and exceptions — same caveat as `mkui-c`
+* **Python**: PyO3 bindings ⚠ broken on Python 3.14 (see [#5](https://github.com/mikbry/ui/issues/5)); use Python 3.13 if `mkui-py` is required
 * **JavaScript/TypeScript**: WASM bindings 🚧 (planned)
 
 ---
@@ -283,15 +278,29 @@ cd examples/cpp-example
 make run
 ```
 
+### Native Window Example
+
+**Native Window** — minimal `mkui-wgpu` smoke: opens a `winit` window via the
+`ApplicationHandler` shell and paints a clear color + a single quad through
+the HUD `Scene` API. Any visual regression in the HUD pipeline shows up here.
+
+```bash
+cargo run --example native-window
+```
+
 ### Python Example
 
-**Python Example** - PyO3 bindings with exception handling
+> ⚠ **`mkui-py` is broken on Python 3.14** — see [#5](https://github.com/mikbry/ui/issues/5)
+> (deferred to Sprint 4). Use Python 3.13 if you specifically need the Python
+> bindings; otherwise build the workspace with `--exclude mkui-py`.
+
+**Python Example** - PyO3 bindings with exception handling (Python 3.13)
 ```bash
 cd examples/python-example
 
 # Build the Python bindings first
 cd ../../crates/mkui-py
-uv venv && source .venv/bin/activate
+uv venv --python 3.13 && source .venv/bin/activate
 maturin develop --release
 
 # Run the Python example
@@ -311,18 +320,20 @@ python main.py
 
 ## 🧪 Local Verification
 
-Before opening a PR, run the workspace checks. The Python bindings need a
-local PyO3 / Python toolchain, so the everyday loop excludes `mkui-py` and
-only the full check brings it in.
+Before opening a PR, run the workspace checks. `mkui-py` needs a local
+PyO3 / Python 3.13 toolchain (it does not build on Python 3.14, see
+[#5](https://github.com/mikbry/ui/issues/5)) and `mkui-c` has known
+soundness issues deferred to Sprint 4 — the everyday loop excludes both.
 
 ```bash
-# Non-Python workspace (everyday loop — no PyO3 toolchain required)
-cargo build   --workspace --exclude mkui-py
-cargo test    --workspace --exclude mkui-py
-cargo clippy  --workspace --exclude mkui-py --all-targets -- -D warnings
+# Everyday loop (no PyO3 / C-FFI toolchain required)
+cargo build   --workspace --exclude mkui-py --exclude mkui-c
+cargo test    --workspace --exclude mkui-py --exclude mkui-c
+cargo clippy  --workspace --exclude mkui-py --exclude mkui-c --all-targets -- -D warnings
 cargo fmt     --all -- --check
 
-# Full workspace (requires Python + maturin set up for mkui-py)
+# Full workspace (requires Python 3.13 + maturin for mkui-py; mkui-c is
+# experimental — soundness work tracked for Sprint 4)
 cargo build   --workspace
 cargo test    --workspace
 ```
@@ -334,54 +345,63 @@ cargo test -p mkui                       # default: no backend, verifies init-er
 cargo test -p mkui --features console    # console backend smoke
 ```
 
+Native WGPU smoke (opens a winit window, paints a single quad via the HUD
+`Scene` API):
+
+```bash
+cargo run --example native-window
+```
+
 The web backend is exercised by `examples/web-showcase` via `wasm-pack`;
-the native `cargo test` runs cover the contract + dispatch surface only.
+the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
 
 ---
 
-## 🔮 Roadmap
+## 🔮 Current Capabilities & Direction
 
-### ✅ Phase 1: Foundation (COMPLETED)
-* ✅ **Multi-language Support** - Rust, C, C++, and Python APIs with unified interface
-* ✅ **Cross-platform Core** - Abstract error handling and component system  
-* ✅ **Builder API** - Fluent builder pattern with method chaining
-* ✅ **Bridge Architecture** - Unified `mkui` crate with feature-based platform switching
-* ✅ **Headless Components** - Platform-agnostic logic (state, variants, events)
-  * ✅ Button component with 6 variants and state management
-  * ✅ Text component with styling and content management  
-  * ✅ View component for layout and containers
-* ✅ **Console Renderer** - Terminal UI with crossterm (no ratatui dependency)
-* ✅ **Web Renderer** - DOM-based with WebAssembly support
-* ✅ **C/C++ Bindings** - Complete FFI layer with modern C++17 wrapper
-* ✅ **Python Bindings** - PyO3-based bindings with method chaining and exception handling
-* ✅ **Showcases** - Working examples across all supported languages and platforms
-* ✅ **Memory Management** - RAII for C++/Rust, manual cleanup for C
-* ✅ **Error Handling** - Unified abstract errors with platform-specific conversion
-* ✅ **Macro System** - `mkui::run!` macro for platform-agnostic application execution
+### ✅ Current capabilities (v0.4.0)
 
-### 🚧 Phase 2: Advanced Features (IN PROGRESS)
-* [ ] **RSX Macro** - JSX-like syntax for declarative UI construction
-* [ ] **Layout Engine** - Flexbox/CSS Grid-like layout with Taffy integration
-* [ ] **Advanced Components** - Input fields, Select, Dialog, Popover, Menu
-* [ ] **Accessibility** - Screen reader support, keyboard navigation, ARIA attributes  
-* [ ] **Theme System** - Live theme switching, custom color palettes
-* [ ] **Hot Reload** - Development-time live reloading for rapid iteration
-* [ ] **Testing Framework** - Component testing utilities and assertions
+- **Shared contract** — `mkui-core` component model (`View` / `Text` /
+  `Button`), headless state/variant logic, theme / layout / input contracts.
+- **Console backend** — `mkui-console`, crossterm-driven terminal UI.
+- **Web backend** — `mkui-web`, DOM construction via `web-sys` / WebAssembly.
+- **Native WGPU pipeline** — `mkui-wgpu` ships a HUD-style 2D scene API
+  (quads, panels, hit regions, theme-aware variant resolvers) plus a
+  `winit` `ApplicationHandler` shell so a native window is one call away.
+- **Text system** — `mkui-text` defines a `TextSystem` trait with a
+  from-scratch bitmap implementation (`BitmapTextSystem`). No external
+  text-stack dependencies. The bitmap path is the current default and
+  stays as the permanent debug-fallback / visual-regression oracle.
+- **First shadcn-aligned atoms** — `Badge` (6 variants) and `Dot` (status
+  variants + halo + animation modifiers) in `mkui-wgpu`.
+- **CI** — `fmt`, `clippy -D warnings`, `test`, and release build fully
+  gated.
 
-### 🔮 Phase 3: Platform Expansion (PLANNED)  
-* [ ] **Native Desktop** - WGPU backend for Windows, macOS, Linux
-* [ ] **Mobile Support** - iOS and Android with platform-specific integrations
-* [ ] **Language Bindings** - JavaScript/TypeScript (WASM), Go (CGO)
-* [ ] **IDE Integration** - Language servers, syntax highlighting, code completion
-* [ ] **Component Marketplace** - Shared component ecosystem and package manager
-* [ ] **Production Tools** - Profiling, debugging, performance analysis
+### 🚧 Active direction
 
-### 🎯 Current Focus (v0.2.0)
-1. **RSX Syntax** - Investigate proc macro for JSX-like syntax
-2. **Layout Engine** - Integrate Taffy for cross-platform layout
-3. **Component Library** - Expand beyond basic View/Text/Button  
-4. **Documentation** - Comprehensive guides and API references
-5. **Testing** - Unit tests, integration tests, example validation
+- **Component surface** — expand the shadcn-aligned atom set on top of
+  `mkui-wgpu`.
+- **Layout engine** — flexbox-style layout integration for the shared
+  contract.
+- **RSX macro** — `mkui-rsx` is a placeholder; JSX-like authoring is the
+  target.
+- **Native text rendering** — Sprint 4+ direction extends `mkui-text`
+  beyond the bitmap prototype. The specific approach is internal; the
+  trait surface is the public contract.
+- **FFI hardening** — `mkui-c` / `mkui-py` are experimental. `mkui-c` has
+  known soundness issues deferred to Sprint 4; `mkui-py` requires
+  Python 3.13 until [#5](https://github.com/mikbry/ui/issues/5) lands.
+
+### 🔮 Longer-horizon
+
+- Mobile (iOS / Android) backends.
+- JavaScript / TypeScript bindings.
+- Accessibility, theming polish, hot reload.
+
+mkui is an open UI framework that drives its own internal work first;
+public roadmap detail tracks shipped capabilities rather than aspirational
+plans. Sprint-by-sprint direction beyond what's in this list lives in
+project issues, not the README.
 
 ---
 
