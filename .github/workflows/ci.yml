@@ -9,7 +9,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# All four jobs (fmt, clippy, test, build-release) are active.
+# All jobs (fmt, clippy, test, test-doc, build-release, cargo-deny, cargo-audit) are active.
+#
+# `--locked` is enforced on every build/test/clippy invocation: CI fails loudly
+# if Cargo.lock is stale relative to manifests, instead of silently regenerating
+# mid-CI (Sprint 2 close — only the version-bump's lockfile-update saved main
+# from being shipped stale).
+#
+# `-D warnings` is scoped to the clippy command only; do NOT re-introduce
+# `RUSTFLAGS: -D warnings` at workflow scope (Sprint 2 retro Lesson 2).
 #
 # `mkui-py` is excluded from every job because of the open PyO3 / Python 3.14
 # build issue. Re-enable it once that lands.
@@ -47,7 +55,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --exclude mkui-py --exclude mkui-c --all-targets -- -D warnings
+      - run: cargo clippy --workspace --exclude mkui-py --exclude mkui-c --all-targets --locked -- -D warnings
 
   test:
     name: test
@@ -65,7 +73,25 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --exclude mkui-py
+      - run: cargo test --workspace --exclude mkui-py --locked
+
+  test-doc:
+    name: test-doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-doc-
+      - run: cargo test --workspace --exclude mkui-py --doc --locked
 
   build-release:
     name: build-release
@@ -83,4 +109,26 @@ jobs:
           key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
-      - run: cargo build --workspace --exclude mkui-py --exclude mkui-c --release
+      - run: cargo build --workspace --exclude mkui-py --exclude mkui-c --release --locked
+
+  cargo-deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+
+  cargo-audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `rustsec/audit-check` is the maintained successor to the archived
+      # `actions-rs/audit-check`. It reads `.cargo/audit.toml` for the
+      # ignore list (kept in sync with `deny.toml`'s `[advisories].ignore`).
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
