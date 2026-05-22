@@ -1,0 +1,24 @@
+# cargo-audit configuration
+#
+# Known-acceptable advisories, all confined to `mkui-py` / `mkui-c` —
+# the FFI binding crates currently excluded from CI build/test (see
+# .github/workflows/ci.yml). Re-evaluate once mkui-py (PyO3 / Python 3.14
+# unblock) and mkui-c (Sprint 4 FFI audit) come back into the CI gate.
+#
+# This mirrors the `[advisories].ignore` list in `deny.toml` and extends it
+# with `cargo audit`-only findings (transitive deps that cargo-deny does not
+# flag at the same severity).
+
+[advisories]
+ignore = [
+    # `atty` unmaintained — cbindgen 0.26 → clap 3 (mkui-c build-dep).
+    "RUSTSEC-2024-0375",
+    # `atty` potential unaligned read — same path as above.
+    "RUSTSEC-2021-0145",
+    # `paste` unmaintained — safer-ffi (mkui-c).
+    "RUSTSEC-2024-0436",
+    # PyO3 0.22 PyString::from_object buffer-overflow risk — mkui-py.
+    "RUSTSEC-2025-0020",
+    # `rand` 0.8 unsound with custom logger — safer-ffi → stabby (mkui-c).
+    "RUSTSEC-2026-0097",
+]
