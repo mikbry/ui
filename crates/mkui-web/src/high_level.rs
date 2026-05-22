@@ -191,7 +191,7 @@ impl WebRenderable for ThemeSelector {
         };
 
         for theme in ColorTheme::all() {
-            color_grid.append_child(&create_color_button(theme)?.into())?;
+            color_grid.append_child(&create_color_button(theme.clone())?.into())?;
         }
 
         color_section.append_child(&color_grid)?;

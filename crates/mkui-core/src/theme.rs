@@ -55,8 +55,8 @@ impl ColorTheme {
         }
     }
 
-    pub fn all() -> Vec<ColorTheme> {
-        vec![
+    pub fn all() -> &'static [ColorTheme] {
+        const ALL: &[ColorTheme] = &[
             ColorTheme::Default,
             ColorTheme::Blue,
             ColorTheme::Green,
@@ -70,7 +70,8 @@ impl ColorTheme {
             ColorTheme::Red,
             ColorTheme::Yellow,
             ColorTheme::Violet,
-        ]
+        ];
+        ALL
     }
 }
 
@@ -154,7 +155,7 @@ mod tests {
     fn color_theme_round_trips_through_string() {
         for theme in ColorTheme::all() {
             let s = theme.to_class().trim_start_matches("theme-");
-            assert_eq!(ColorTheme::from_str(s), Ok(theme));
+            assert_eq!(ColorTheme::from_str(s).as_ref(), Ok(theme));
         }
     }
 
