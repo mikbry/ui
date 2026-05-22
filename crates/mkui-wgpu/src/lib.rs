@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # mkui-wgpu — WGPU/scene backend for mkui
 //!
 //! Shared GUI primitives, theme, and backend scaffolding for mkui WGPU surfaces.

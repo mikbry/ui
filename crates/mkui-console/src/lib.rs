@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # mkui-console — terminal/TUI backend for mkui
 //!
 //! `mkui-console` is one of the *backend crates* of the mkui workspace. It

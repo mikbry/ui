@@ -130,6 +130,7 @@ impl WebButton {
             ButtonVariant::Outline => "btn-outline",
             ButtonVariant::Ghost => "btn-ghost",
             ButtonVariant::Link => "btn-link",
+            _ => "btn-primary",
         };
         classes.push(variant_class);
 
@@ -137,6 +138,7 @@ impl WebButton {
             ButtonSize::Small => classes.push("btn-sm"),
             ButtonSize::Medium => classes.push("btn-md"),
             ButtonSize::Large => classes.push("btn-lg"),
+            _ => classes.push("btn-md"),
         }
 
         self.element.set_class_name(&classes.join(" "));

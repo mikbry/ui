@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Native (WGPU) backend for mkui.
 //!
 //! The full WGPU scene layer is still being imported; what already exists is

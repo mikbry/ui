@@ -9,6 +9,7 @@
 ///
 /// Backends are expected to map their raw key codes into these variants.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Key {
     Char(char),
     Enter,
@@ -84,6 +85,7 @@ fn char_as_str(c: char) -> Option<&'static str> {
 
 /// Pointer / mouse button identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PointerButton {
     Primary,
     Secondary,
@@ -92,6 +94,7 @@ pub enum PointerButton {
 
 /// Shared input event. Backends emit these; headless components consume them.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum InputEvent {
     KeyDown(Key),
     KeyUp(Key),
