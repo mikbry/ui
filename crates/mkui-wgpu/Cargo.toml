@@ -10,3 +10,9 @@ description = "WGPU-oriented scene primitives and declarative builders for mkui"
 [dependencies]
 mkui-core = { path = "../mkui-core" }
 mkui-text = { path = "../mkui-text" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
