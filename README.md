@@ -422,6 +422,12 @@ project issues, not the README.
 
 ---
 
+## 📜 Releases
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
+---
+
 ## 💬 Community
 
 * Website: [miklabs.com/ui](https://miklabs.com/ui) (coming soon)
