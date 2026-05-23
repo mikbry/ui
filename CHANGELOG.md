@@ -17,9 +17,8 @@ breaking changes can land on minor bumps).
   `cargo deny check`, `cargo audit`, `rust-version = "1.84"` MSRV declaration (#36)
 - `#![forbid(unsafe_code)]` on 7 Rust-only crates (#37)
 - `#[non_exhaustive]` on 17 growing public enums across mkui-core, mkui-text, mkui-wgpu (#37)
-- `examples/atoms-on-wgpu` — visual integration showcase combining renderer + text + atoms (#43)
 - `docs/architecture/` with 4 ADRs documenting current architecture (#45)
-- `CHANGELOG.md` at the workspace root, retroactively covering v0.1.0 through v0.5.0 (#44)
+- `CHANGELOG.md` at the workspace root, retroactively covering v0.1.0 through v0.5.0 (#46)
 
 ### Changed
 - `MkuiError` migrated to `#[derive(thiserror::Error)]` with `#[from]` impls for
