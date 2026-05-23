@@ -8,7 +8,11 @@ description = "Shared component, event, state, theme, and layout contracts for m
 
 [dependencies]
 thiserror = { workspace = true }
+mkui-text = { path = "../mkui-text" }
 serde = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
 
 [features]
 default = []

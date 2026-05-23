@@ -1063,8 +1063,10 @@ dependencies = [
 name = "mkui-core"
 version = "0.4.0"
 dependencies = [
+ "mkui-text",
  "serde",
  "thiserror 1.0.69",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1098,7 +1100,7 @@ dependencies = [
 name = "mkui-text"
 version = "0.4.0"
 dependencies = [
- "mkui-core",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

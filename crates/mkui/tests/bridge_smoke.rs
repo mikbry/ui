@@ -24,11 +24,10 @@ fn without_a_backend_feature_init_reports_a_clear_error() {
         Ok(_) => panic!("no backend feature should fail to init"),
         Err(e) => e,
     };
-    assert!(matches!(err.kind, MkuiErrorKind::Initialization));
+    assert!(matches!(err, MkuiError::Initialization(_)));
     assert!(
-        err.message.contains("No mkui backend feature enabled"),
-        "error message should name the missing feature: {}",
-        err.message
+        err.to_string().contains("No mkui backend feature enabled"),
+        "error message should name the missing feature: {err}",
     );
 }
 
