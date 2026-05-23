@@ -74,6 +74,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-
       - run: cargo test --workspace --exclude mkui-py --locked
+      # Visual integration smoke for examples/atoms-on-wgpu. The example
+      # exits 0 from its headless path after asserting the scene contains
+      # the expected badge / dot / animation / title-text inventory — the
+      # winit window is skipped because CI has no display.
+      - run: HEADLESS=1 cargo run -p atoms-on-wgpu --locked
 
   test-doc:
     name: test-doc
