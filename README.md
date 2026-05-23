@@ -189,6 +189,23 @@ If a contract change is needed (e.g. a new component type), it goes in
 
 ---
 
+## 📐 Architecture
+
+The load-bearing architectural decisions behind the workspace shape above
+are documented as ADRs (Architecture Decision Records) under
+[`docs/architecture/`](docs/architecture/README.md):
+
+- [ADR 0001 — `mkui-core` as the contract crate](docs/architecture/0001-mkui-core-as-contract-crate.md)
+- [ADR 0002 — `mkui-text` owns the stack (no external Rust text crates)](docs/architecture/0002-mkui-text-own-the-stack.md)
+- [ADR 0003 — `mkui-web` registry-based extension](docs/architecture/0003-mkui-web-registry-based-extension.md)
+- [ADR 0004 — `mkui-wgpu` 2D HUD pipeline port](docs/architecture/0004-mkui-wgpu-2d-hud-pipeline-port.md)
+
+New contributors and reviewers should start with the
+[ADR index](docs/architecture/README.md) for the format conventions and
+one-sentence summaries.
+
+---
+
 ## 🌍 Target Platforms & Languages
 
 ### Platforms
