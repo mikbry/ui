@@ -53,7 +53,7 @@ pub mod prelude {
     };
 
     // Error handling
-    pub use crate::error::{MkuiError, MkuiErrorKind};
+    pub use crate::error::MkuiError;
 
     // Other modules
     pub use crate::event::*;

@@ -8,4 +8,4 @@ repository.workspace = true
 description = "Text-system trait + from-scratch bitmap prototype for mkui (no external text-stack deps)"
 
 [dependencies]
-mkui-core = { path = "../mkui-core" }
+thiserror = { workspace = true }
