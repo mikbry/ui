@@ -10,7 +10,7 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
-## [0.5.0] — 2026-05-23
+## [0.4.1] — 2026-05-23
 
 ### Added
 - CI hardening: `--locked` enforcement on every cargo invocation, `cargo test --doc`,
@@ -18,7 +18,7 @@ breaking changes can land on minor bumps).
 - `#![forbid(unsafe_code)]` on 7 Rust-only crates (#37)
 - `#[non_exhaustive]` on 17 growing public enums across mkui-core, mkui-text, mkui-wgpu (#37)
 - `docs/architecture/` with 4 ADRs documenting current architecture (#45)
-- `CHANGELOG.md` at the workspace root, retroactively covering v0.1.0 through v0.5.0 (#46)
+- `CHANGELOG.md` at the workspace root, retroactively covering v0.1.0 through v0.4.1 (#46)
 
 ### Changed
 - `MkuiError` migrated to `#[derive(thiserror::Error)]` with `#[from]` impls for
@@ -30,7 +30,7 @@ breaking changes can land on minor bumps).
 - `WebApp` caches the active theme class instead of recomputing per render (#37)
 - Bridge `mkui/src/lib.rs` error conversions use `?` + `#[from]` chains instead of
   lossy `format!("{:?}", e).into()` paths (#38)
-- README rewritten to reflect v0.4.0/v0.5.0 reality, including mkui-wgpu + mkui-text,
+- README rewritten to reflect v0.4.0/v0.4.1 reality, including mkui-wgpu + mkui-text,
   the wgpu HUD pipeline, broken-on-Python-3.14 disclaimer, and dropped v0.2.0 framing (#7)
 
 ### Removed
