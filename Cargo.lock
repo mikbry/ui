@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "console-showcase"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui",
  "showcase-common",
@@ -739,7 +739,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "headless-showcase"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui-core",
  "mkui-web",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "mkui"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui-console",
  "mkui-core",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "mkui-c"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cbindgen",
  "libc",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "mkui-console"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "crossterm",
  "mkui-core",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "mkui-core"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui-text",
  "serde",
@@ -1071,14 +1071,14 @@ dependencies = [
 
 [[package]]
 name = "mkui-native"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui-core",
 ]
 
 [[package]]
 name = "mkui-py"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui",
  "mkui-core",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "mkui-rsx"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1098,14 +1098,14 @@ dependencies = [
 
 [[package]]
 name = "mkui-text"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "mkui-web"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "console_error_panic_hook",
  "js-sys",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "mkui-wgpu"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytemuck",
  "mkui-core",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "native-window"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui-wgpu",
 ]
@@ -2022,7 +2022,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "showcase-common"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui",
  "mkui-core",
@@ -2598,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "web-showcase"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "mkui",
  "showcase-common",
