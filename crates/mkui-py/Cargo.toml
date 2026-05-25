@@ -20,21 +20,31 @@ mkui-runtime = { path = "../mkui-runtime", features = ["snapshot"] }
 mkui-console = { path = "../mkui-console", optional = true }
 showcase-common = { path = "../../examples/showcase-common" }
 
-# PyO3 for Python bindings
-pyo3 = { workspace = true, features = ["extension-module"] }
+# PyO3 — `extension-module` is a feature below, not unconditional, so
+# `cargo test --no-default-features` can disable it for the embedded-
+# Python test path.
+pyo3 = { workspace = true }
 
 [features]
-default = ["console"]
+# `extension-module` is on by default so `maturin develop` (production
+# path) builds the cdylib with the right link flags. `cargo test
+# --no-default-features --features "parity-test,console"` disables it
+# so the test binary can embed Python via `auto-initialize`.
+default = ["console", "extension-module"]
 web = ["mkui/web"]
 console = ["mkui/console", "dep:mkui-console"]
-# Enables the host-side parity test (`tests/parity.rs`). Tests link as
-# standalone binaries which on some platforms (macOS without
-# `-undefined dynamic_lookup`) cannot resolve libpython symbols. The
-# parity test itself does not call libpython — it only exercises App's
-# Rust impl — but the link step still pulls PyO3's static references.
-# Enable this when a working Python toolchain is on the host (CI Linux
-# images typically work out of the box).
-parity-test = []
+extension-module = ["pyo3/extension-module"]
+# Enables the host-side parity test (`tests/parity.rs`).
+#
+# `pyo3/auto-initialize` switches PyO3 from "extension-module loaded by
+# Python" mode to "Rust binary that embeds Python" mode: pyo3-build-config
+# emits `-l python3.X` plus the search path for `libpython3.X.so`. The two
+# modes are mutually exclusive, so `cargo test` callers MUST also disable
+# `extension-module` (`--no-default-features --features
+# "parity-test,console"`). Callers must also set `PYO3_PYTHON` (or have a
+# discoverable `python3` on PATH) so pyo3-build-config picks an
+# interpreter to bind against.
+parity-test = ["pyo3/auto-initialize"]
 
 [dev-dependencies]
 # Parity test reaches for `mkui_runtime::snapshot::TreeSnapshot` directly.

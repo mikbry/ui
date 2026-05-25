@@ -149,7 +149,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-py-parity-
       - name: Run mkui-py byte-identical parity test
-        run: cargo test -p mkui-py --features parity-test --test parity --locked
+        # `--no-default-features` turns off `extension-module` so PyO3
+        # links against libpython (the test binary EMBEDS Python). The
+        # `parity-test` feature pulls `pyo3/auto-initialize`; `console`
+        # is the only other default-features bit we still want active.
+        # `PYO3_PYTHON` tells pyo3-build-config which interpreter to bind
+        # against. Without it (or without `--no-default-features`) the
+        # round-8 CI fired `rust-lld: error: undefined symbol: PyExc_*`
+        # because `extension-module` deliberately skips libpython linkage.
+        env:
+          PYO3_PYTHON: python3
+        run: cargo test -p mkui-py --no-default-features --features "parity-test,console" --test parity --locked
 
   cbindgen-header-clean:
     # Codex round-8 P2 follow-up: prove the checked-in

@@ -1,15 +1,17 @@
 //! Byte-identical JSON snapshot parity between the Rust reference and
 //! the Python handle-based API.
 //!
-//! **Gated behind `feature = "parity-test"` AND `not(target_os = "macos")`**
-//! because the test binary statically references PyO3 symbols
-//! (`_Py_FalseStruct`, etc.) that on macOS only resolve at runtime when
-//! loaded by Python. CI Linux images resolve them at link time. On
-//! macOS, run the parity check through `maturin develop` + pytest.
+//! Gated behind `feature = "parity-test"` which enables
+//! `pyo3/auto-initialize`. That feature switches PyO3 from "loaded by
+//! Python" mode (where libpython provides symbols at runtime) to
+//! "embeds Python" mode (where `pyo3-build-config` emits real
+//! `-l python3.X` linker flags). The test binary then links against
+//! whatever interpreter `PYO3_PYTHON` (or auto-discovery from `PATH`)
+//! resolves to.
 //!
-//! On Linux CI (Sprint 5 mkui-py re-entry target), enable with
-//! `cargo test -p mkui-py --features parity-test`.
-#![cfg(all(feature = "parity-test", not(target_os = "macos")))]
+//! Run with `PYO3_PYTHON=$(which python3) cargo test -p mkui-py
+//! --features parity-test --test parity --locked`.
+#![cfg(feature = "parity-test")]
 
 //!
 //! Sprint 4 acceptance criterion #2 (byte-identical Rust/C/Py snapshots)
