@@ -123,7 +123,7 @@ struct PyCallback {
 #[pymethods]
 impl App {
     #[new]
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             tree: Rc::new(RefCell::new(AppTree::new())),
             callbacks: Rc::new(RefCell::new(Vec::new())),
@@ -132,27 +132,34 @@ impl App {
 
     /// Return the synthetic root id. Children must attach under this or a
     /// descendant of this.
-    fn root(&self) -> PyNodeId {
+    pub fn root(&self) -> PyNodeId {
         self.tree.borrow().root().into()
     }
 
     /// Append a `View` under `parent`. `class_name` is optional.
     #[pyo3(signature = (parent, class_name=""))]
-    fn view_child(&self, parent: PyNodeId, class_name: &str) -> PyResult<PyNodeId> {
+    pub fn view_child(&self, parent: PyNodeId, class_name: &str) -> PyResult<PyNodeId> {
         let style = StyleClass::from_str(class_name);
         style
             .parse()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let id = self
-            .tree
-            .borrow_mut()
-            .push_view_unchecked(parent.into(), style);
+        let mut tree = self.tree.borrow_mut();
+        // P1 guard (Codex round 8): refuse stale parent handles before
+        // reaching the runtime's `assert!`-on-invalid-parent path. PyO3
+        // catches panics but turns them into PanicException, which is a
+        // much worse diagnostic than a typed `PyValueError`.
+        if tree.get(parent.into()).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "stale or invalid parent NodeId",
+            ));
+        }
+        let id = tree.push_view_unchecked(parent.into(), style);
         Ok(id.into())
     }
 
     /// Append a `Text` under `parent`.
     #[pyo3(signature = (parent, content, variant, class_name=""))]
-    fn text_child(
+    pub fn text_child(
         &self,
         parent: PyNodeId,
         content: &str,
@@ -165,16 +172,20 @@ impl App {
         style
             .parse()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let id = self
-            .tree
-            .borrow_mut()
-            .push_text_unchecked(parent.into(), content, variant, style);
+        let mut tree = self.tree.borrow_mut();
+        // P1 guard — see `view_child`.
+        if tree.get(parent.into()).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "stale or invalid parent NodeId",
+            ));
+        }
+        let id = tree.push_text_unchecked(parent.into(), content, variant, style);
         Ok(id.into())
     }
 
     /// Append a `Button` under `parent`.
     #[pyo3(signature = (parent, label, variant, class_name="", on_press=None))]
-    fn button_child(
+    pub fn button_child(
         &self,
         parent: PyNodeId,
         label: &str,
@@ -189,20 +200,21 @@ impl App {
             .parse()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let action = on_press.map(|a| a.into());
-        let id = self.tree.borrow_mut().push_button_unchecked(
-            parent.into(),
-            label,
-            variant,
-            style,
-            action,
-        );
+        let mut tree = self.tree.borrow_mut();
+        // P1 guard — see `view_child`.
+        if tree.get(parent.into()).is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "stale or invalid parent NodeId",
+            ));
+        }
+        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
         Ok(id.into())
     }
 
     /// Register a Python callable as an action callback. Returns an
     /// `ActionId` the host passes to `button_child`. The callable is
     /// kept alive on the Rust side via `Py<PyAny>`.
-    fn register_callback(&self, func: Py<PyAny>) -> PyActionId {
+    pub fn register_callback(&self, func: Py<PyAny>) -> PyActionId {
         let id = self.tree.borrow_mut().actions_mut().register_remote();
         let idx = id.index() as usize;
         let mut callbacks = self.callbacks.borrow_mut();
@@ -218,7 +230,7 @@ impl App {
 
     /// Fire an action by id. Used in tests; production renderers fire on
     /// real user interaction.
-    fn fire_action(&self, py: Python<'_>, id: PyActionId) -> PyResult<()> {
+    pub fn fire_action(&self, py: Python<'_>, id: PyActionId) -> PyResult<()> {
         let callbacks = self.callbacks.borrow();
         let Some(slot) = callbacks.get(id.index as usize) else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -240,31 +252,77 @@ impl App {
     }
 
     /// Number of live nodes in the tree (includes the synthetic root).
-    fn node_count(&self) -> usize {
+    pub fn node_count(&self) -> usize {
         self.tree.borrow().len()
     }
 
     /// Canonical JSON snapshot. Identical to `mkui_app_snapshot_json` on the
     /// C side — the parity gate compares the two.
-    fn snapshot_json(&self) -> String {
+    pub fn snapshot_json(&self) -> String {
         let tree = self.tree.borrow();
         let snapshot = mkui_runtime::snapshot::TreeSnapshot::of(&tree);
         snapshot.to_json()
     }
 
-    /// Best-effort console run. Sprint 5+ will wire the console backend's
-    /// real interactive loop in once it consumes `AppTree` natively.
-    fn run_console(&self) -> PyResult<()> {
-        let tree = self.tree.borrow();
-        println!("mkui-py: app tree contains {} live node(s)", tree.len());
-        for node in tree.nodes() {
-            match &node.kind {
-                mkui_runtime::NodeKind::Text(t) => println!("  text: {}", t.content),
-                mkui_runtime::NodeKind::Button(b) => println!("  button: {}", b.label),
-                _ => {}
-            }
-        }
-        Ok(())
+    /// Run the application via the real console backend. Hands the
+    /// runtime `AppTree` to `mkui_console::Mkui::from_core` and invokes
+    /// its interactive loop. The Codex round-8 regression (Sprint 4
+    /// round-7 shipped a stub `println!` summary instead of the real
+    /// backend) is corrected here.
+    ///
+    /// Requires the `console` feature (default). Consumes the tree —
+    /// after a successful return, the `App` is empty and should be
+    /// dropped.
+    #[cfg(feature = "console")]
+    pub fn run_console(&self) -> PyResult<()> {
+        let tree = std::mem::replace(&mut *self.tree.borrow_mut(), AppTree::new());
+        let core = mkui_core::components::Mkui::with_tree(tree);
+        let console = mkui_console::Mkui::from_core(core).map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "console backend init failed: {e}"
+            ))
+        })?;
+        console.run().map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("console run failed: {e}"))
+        })
+    }
+
+    /// Fallback when the `console` feature is disabled.
+    #[cfg(not(feature = "console"))]
+    pub fn run_console(&self) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "mkui-py was built without the `console` feature",
+        ))
+    }
+}
+
+// Rust-only helpers — callable from integration tests in `tests/` that
+// run without a live Python interpreter. PyO3's `#[pymethods]` block
+// generates Python dispatchers; methods in a *plain* `impl App` block are
+// invisible to Python.
+impl App {
+    /// Construct an `App` without going through Python's `__new__`.
+    /// `App::new()` itself is already a plain Rust function (PyO3 marks
+    /// it `#[new]` but the body is callable from Rust); this alias exists
+    /// for clarity in test code.
+    pub fn new_for_test() -> Self {
+        Self::new()
+    }
+
+    /// Allocate an action id with no Python callback — used by the
+    /// byte-identical parity test in `tests/parity.rs`, which can't
+    /// construct a `Py<PyAny>` without a live interpreter.
+    ///
+    /// Behaves identically to [`Self::register_callback`] from the
+    /// runtime's perspective: it bumps the `ActionRegistry`'s
+    /// `register_remote` slot. The callback table on the Python side
+    /// stays empty for this id (firing it from Python would be a no-op).
+    pub fn register_remote_action_for_test(&self) -> PyActionId {
+        self.tree
+            .borrow_mut()
+            .actions_mut()
+            .register_remote()
+            .into()
     }
 }
 

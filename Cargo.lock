@@ -1054,6 +1054,7 @@ dependencies = [
  "cbindgen",
  "libc",
  "mkui",
+ "mkui-console",
  "mkui-core",
  "mkui-runtime",
  "safer-ffi",
@@ -1094,6 +1095,7 @@ name = "mkui-py"
 version = "0.4.1"
 dependencies = [
  "mkui",
+ "mkui-console",
  "mkui-core",
  "mkui-runtime",
  "pyo3",

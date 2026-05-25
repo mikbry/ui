@@ -35,6 +35,19 @@ impl Mkui {
         })
     }
 
+    /// Wrap an existing `mkui_core::Mkui` (and its `AppTree`) so the
+    /// console backend can run it. Used by `mkui-c` / `mkui-py` to hand
+    /// their already-built tree to the real interactive loop without
+    /// having to rebuild via `.child(...)`.
+    pub fn from_core(core: mkui_core::components::Mkui) -> std::io::Result<Self> {
+        Ok(Self {
+            app: ConsoleApp::new()?,
+            core,
+            layout: Vec::new(),
+            buttons: Vec::new(),
+        })
+    }
+
     /// Matches the web `Mkui` API: append a component to the tree.
     pub fn child(mut self, child: impl Component + 'static) -> Self {
         self.core = self.core.child(child);
@@ -74,11 +87,24 @@ impl Mkui {
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         if let Some(button) = self.buttons.get(self.app.selected_button()) {
                             if let Some(action_id) = button.on_press {
-                                // Fire through the tree's action registry —
-                                // any dirty signal the closure emits will
-                                // surface on the next frame's redraw path.
-                                self.core.tree_mut();
-                                self.core.tree().actions().fire(action_id);
+                                // Fire through the tree's action registry,
+                                // **capture** the returned `RuntimeCtx`,
+                                // and propagate its dirty bit to the tree.
+                                // Dropping the ctx (the Codex round-7
+                                // anti-pattern) means action-driven state
+                                // changes never trigger a redraw — the
+                                // console loop re-renders every iteration
+                                // so we'd survive, but the substrate's
+                                // contract is broken without this hop.
+                                let ctx = self.core.tree().actions().fire(action_id);
+                                if ctx.is_dirty() {
+                                    self.core.tree_mut().mark_dirty();
+                                }
+                                // Re-walk the tree so any structural changes
+                                // the action made (future scope — toggling
+                                // child visibility, etc.) surface immediately
+                                // rather than waiting for the next event.
+                                self.build_layout();
                             }
                         }
                     }

@@ -1,53 +1,54 @@
 #include <iostream>
 #include <memory>
 
-// Include the C++ wrapper
 #include "../../bindings/cpp/mkui.hpp"
 
 int main() {
     try {
         std::cout << "mkui C++ Example - Version: " << mkui::App::version() << std::endl;
-        
-        // Create application using RAII wrapper
+
         auto app = mkui::createApp();
-        
-        // Build the UI using method chaining
-        app->addView("flex-1")
-           // Header
-           .addView("border-b")
-           .addView("container mx-auto px-4 h-16 flex items-center justify-between")
-           .addText("miklabs/ui C++ Example", "text-xl font-semibold")
-           .addText("C++ bindings for mkui", "text-sm text-muted-foreground")
-           
-           // Main content
-           .addView("flex-1")
-           .addView("container mx-auto py-8 px-4 max-w-4xl space-y-8")
-           
-           // Hero section
-           .addView("text-center mb-12")
-           .addText("mkui C++ Bindings Demo", "text-4xl font-bold tracking-tight text-foreground mb-4")
-           .addText("Cross-platform UI library with modern C++ API", "text-xl text-muted-foreground")
-           
-           // Button showcase
-           .addView("rounded-lg border bg-card text-card-foreground shadow-sm p-6")
-           .addText("Button Components", "text-2xl font-semibold leading-none tracking-tight")
-           .addText("Various button styles and variants", "text-sm text-muted-foreground mt-2")
-           
-           // Buttons with different variants
-           .addView("flex flex-wrap gap-4")
-           .addButton("Primary", mkui::ButtonVariant::Primary)
-           .addButton("Secondary", mkui::ButtonVariant::Secondary)
-           .addButton("Destructive", mkui::ButtonVariant::Destructive)
-           .addButton("Outline", mkui::ButtonVariant::Outline)
-           .addButton("Ghost", mkui::ButtonVariant::Ghost)
-           .addButton("Link", mkui::ButtonVariant::Link);
-        
-        // Run the application
+        auto root = app->root();
+
+        // Header
+        auto header = app->viewChild(root, "border-b");
+        app->textChild(header, "miklabs/ui C++ Example",
+                       mkui::TextVariant::Heading2, "text-xl font-semibold");
+        app->textChild(header, "C++ bindings for mkui",
+                       mkui::TextVariant::Caption, "text-sm text-muted-foreground");
+
+        // Main content
+        auto content = app->viewChild(root, "flex-1");
+
+        // Hero
+        auto hero = app->viewChild(content, "text-center mb-12");
+        app->textChild(hero, "mkui C++ Bindings Demo",
+                       mkui::TextVariant::Heading1,
+                       "text-4xl font-bold tracking-tight text-foreground mb-4");
+        app->textChild(hero, "Cross-platform UI library with modern C++ API",
+                       mkui::TextVariant::Caption, "text-xl text-muted-foreground");
+
+        // Button showcase
+        auto card = app->viewChild(content, "rounded-lg border bg-card p-6");
+        app->textChild(card, "Button Components",
+                       mkui::TextVariant::Heading2,
+                       "text-2xl font-semibold leading-none tracking-tight");
+
+        auto button_row = app->viewChild(card, "flex flex-wrap gap-4");
+        auto on_primary = app->registerCallback([]() {
+            std::cout << "Primary clicked" << std::endl;
+        });
+        app->buttonChild(button_row, "Primary", mkui::ButtonVariant::Primary, "", on_primary);
+        app->buttonChild(button_row, "Secondary", mkui::ButtonVariant::Secondary);
+        app->buttonChild(button_row, "Destructive", mkui::ButtonVariant::Destructive);
+        app->buttonChild(button_row, "Outline", mkui::ButtonVariant::Outline);
+        app->buttonChild(button_row, "Ghost", mkui::ButtonVariant::Ghost);
+        app->buttonChild(button_row, "Link", mkui::ButtonVariant::Link);
+
         std::cout << "Starting mkui application..." << std::endl;
         app->runConsole();
-        
+
         std::cout << "mkui C++ Example completed successfully!" << std::endl;
-        
     } catch (const mkui::MkuiException& e) {
         std::cerr << "mkui Error: " << e.what() << " (code: " << e.code() << ")" << std::endl;
         return 1;
@@ -55,6 +56,6 @@ int main() {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
     }
-    
+
     return 0;
 }

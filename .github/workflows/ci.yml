@@ -19,10 +19,14 @@ env:
 # `-D warnings` is scoped to the clippy command only; do NOT re-introduce
 # `RUSTFLAGS: -D warnings` at workflow scope (Sprint 2 retro Lesson 2).
 #
-# `mkui-py` stays excluded from every job because the PyO3 0.28 bump still
-# needs Python 3.14 + interpreter wiring on the CI image (Sprint 4 §11 — gated
-# on Python 3.14 working end-to-end). Sprint 4 lands the PyO3 0.28.3 upgrade
-# itself; CI re-entry follows in a focused Sprint 5 issue.
+# `mkui-py` is excluded from the main workspace `clippy` / `test` /
+# `build-release` jobs because PyO3 0.28's `extension-module` cdylib needs
+# careful linkage (`pyo3-build-config`) that the main workspace jobs do not
+# provide. **A dedicated `mkui-py` job below** sets up Python on the
+# runner, installs the dev headers, and runs the byte-identical parity
+# snapshot test against the C/Rust reference (Codex round-8 P1 fix).
+# Tracking issue for re-merging mkui-py into the main jobs:
+# BLOCKED-BY mkui-py-ci-reentry-tracker (to be filed once Sprint 5 opens).
 #
 # `mkui-c` is now back in every job — the Sprint 4 handle-based rewrite
 # (#51) folds in `// SAFETY:` annotations on every `unsafe` block and clears
@@ -113,6 +117,70 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
       - run: cargo build --workspace --exclude mkui-py --release --locked
+
+  mkui-py-parity:
+    # Codex round-8 P1 #1 fix: byte-identical Rust/C/Py snapshot parity.
+    # The Rust and C halves run in the main `test` job (mkui-c parity test
+    # in `crates/mkui-c/tests/parity.rs`); the Py half lives in
+    # `crates/mkui-py/tests/parity.rs` and runs here against a real
+    # Python interpreter. The test asserts full string equality between
+    # the JSON snapshot built via `mkui_py::App` and the same tree built
+    # directly through `mkui_runtime::AppTree`.
+    #
+    # macOS is skipped via `#[cfg(not(target_os = "macos"))]` because
+    # PyO3 cdylib link on macOS hosts requires extra setup; CI is Linux,
+    # so the gate runs.
+    name: mkui-py-parity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-py-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-py-parity-
+      - name: Run mkui-py byte-identical parity test
+        run: cargo test -p mkui-py --features parity-test --test parity --locked
+
+  cbindgen-header-clean:
+    # Codex round-8 P2 follow-up: prove the checked-in
+    # `crates/mkui-c/include/mkui_c.h` matches what cbindgen would
+    # generate from source. If `build.rs` rewrites the header and
+    # `git diff` is non-empty, the FFI surface drifted and the diff
+    # surfaces it loudly instead of being noticed by a downstream
+    # consumer at link time.
+    name: cbindgen-header-clean
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-cbindgen-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cbindgen-
+      - name: Build mkui-c (regenerates include/mkui_c.h)
+        run: cargo build -p mkui-c --locked
+      - name: Assert mkui_c.h is up to date with cbindgen output
+        run: |
+          if ! git diff --exit-code crates/mkui-c/include/mkui_c.h; then
+            echo "::error::crates/mkui-c/include/mkui_c.h is out of date — run \`cargo build -p mkui-c\` locally and commit the regenerated header"
+            exit 1
+          fi
 
   cargo-deny:
     name: cargo-deny

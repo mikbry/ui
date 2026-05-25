@@ -98,14 +98,19 @@ impl From<MkuiActionId> for ActionId {
     }
 }
 
+/// Status codes returned through [`MkuiResult::code`].
+///
+/// Variant names are prefixed with `Mkui` in Rust so cbindgen's
+/// ScreamingSnakeCase rename emits them as the v0.4.x-stable
+/// `MKUI_SUCCESS` / `MKUI_INVALID_PARAMETER` / … C-header forms.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub enum MkuiErrorCode {
-    Success = 0,
-    InitializationFailed = 1,
-    InvalidParameter = 2,
-    RuntimeError = 3,
-    OutOfMemory = 4,
+    MkuiSuccess = 0,
+    MkuiInitializationFailed = 1,
+    MkuiInvalidParameter = 2,
+    MkuiRuntimeError = 3,
+    MkuiOutOfMemory = 4,
 }
 
 #[repr(C)]
@@ -117,7 +122,7 @@ pub struct MkuiResult {
 impl MkuiResult {
     fn success() -> Self {
         Self {
-            code: MkuiErrorCode::Success,
+            code: MkuiErrorCode::MkuiSuccess,
             message: ptr::null(),
         }
     }
@@ -202,22 +207,37 @@ unsafe fn read_class(class_name: *const c_char) -> Result<String, MkuiResult> {
     let cstr = unsafe { CStr::from_ptr(class_name) };
     cstr.to_str()
         .map(|s| s.to_string())
-        .map_err(|_| MkuiResult::error(MkuiErrorCode::InvalidParameter, "Invalid class name"))
+        .map_err(|_| MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Invalid class name"))
 }
 
 unsafe fn read_str(ptr: *const c_char, name: &str) -> Result<String, MkuiResult> {
     if ptr.is_null() {
         return Err(MkuiResult::error(
-            MkuiErrorCode::InvalidParameter,
+            MkuiErrorCode::MkuiInvalidParameter,
             &format!("{name} pointer is null"),
         ));
     }
     // SAFETY: caller guarantees `ptr` is a valid pointer to a NUL-terminated
     // C string that outlives this call.
     let cstr = unsafe { CStr::from_ptr(ptr) };
-    cstr.to_str()
-        .map(|s| s.to_string())
-        .map_err(|_| MkuiResult::error(MkuiErrorCode::InvalidParameter, &format!("Invalid {name}")))
+    cstr.to_str().map(|s| s.to_string()).map_err(|_| {
+        MkuiResult::error(
+            MkuiErrorCode::MkuiInvalidParameter,
+            &format!("Invalid {name}"),
+        )
+    })
+}
+
+/// Validate that `parent` references a live node in the tree. Returns
+/// `false` if the slot is empty or the generation counter is stale.
+///
+/// Every child constructor MUST call this before dispatching into the
+/// `_unchecked` push helpers — the runtime's `alloc_and_attach` asserts
+/// on invalid parents, and a panic across `extern "C"` is undefined
+/// behaviour. The generation counter is the entire reason `NodeId` is a
+/// pair instead of a bare `u32`; this is where the guard pays off.
+fn parent_is_live(tree: &AppTree, parent: MkuiNodeId) -> bool {
+    tree.get(parent.into()).is_some()
 }
 
 /// Append a `View` under `parent`. Returns the new node's id, or
@@ -241,10 +261,14 @@ pub unsafe extern "C" fn mkui_app_view_child(
     if style.parse().is_err() {
         return invalid_node();
     }
-    let id = app_ref
-        .tree
-        .borrow_mut()
-        .push_view_unchecked(parent.into(), style);
+    // P1 guard (Codex round 8): refuse stale or fabricated parent handles
+    // before reaching the runtime's `assert!`-on-invalid-parent path. A
+    // panic across `extern "C"` is undefined behaviour.
+    let mut tree = app_ref.tree.borrow_mut();
+    if !parent_is_live(&tree, parent) {
+        return invalid_node();
+    }
+    let id = tree.push_view_unchecked(parent.into(), style);
     id.into()
 }
 
@@ -278,10 +302,12 @@ pub unsafe extern "C" fn mkui_app_text_child(
     if style.parse().is_err() {
         return invalid_node();
     }
-    let id = app_ref
-        .tree
-        .borrow_mut()
-        .push_text_unchecked(parent.into(), content, variant, style);
+    // P1 guard (Codex round 8): see `mkui_app_view_child`.
+    let mut tree = app_ref.tree.borrow_mut();
+    if !parent_is_live(&tree, parent) {
+        return invalid_node();
+    }
+    let id = tree.push_text_unchecked(parent.into(), content, variant, style);
     id.into()
 }
 
@@ -322,13 +348,12 @@ pub unsafe extern "C" fn mkui_app_button_child(
     } else {
         Some(on_press.into())
     };
-    let id = app_ref.tree.borrow_mut().push_button_unchecked(
-        parent.into(),
-        label,
-        variant,
-        style,
-        action,
-    );
+    // P1 guard (Codex round 8): see `mkui_app_view_child`.
+    let mut tree = app_ref.tree.borrow_mut();
+    if !parent_is_live(&tree, parent) {
+        return invalid_node();
+    }
+    let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
     id.into()
 }
 
@@ -381,19 +406,19 @@ pub unsafe extern "C" fn mkui_app_register_callback(
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_fire_action(app: *mut MkuiApp, id: MkuiActionId) -> MkuiResult {
     if app.is_null() {
-        return MkuiResult::error(MkuiErrorCode::InvalidParameter, "App pointer is null");
+        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
     }
     // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
     let app_ref = unsafe { &*app };
     let callbacks = app_ref.callbacks.borrow();
     let Some(slot) = callbacks.get(id.index as usize) else {
-        return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Unknown action id");
+        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Unknown action id");
     };
     let Some(cb) = slot else {
-        return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Action id is empty");
+        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is empty");
     };
     if cb.generation != id.generation {
-        return MkuiResult::error(MkuiErrorCode::InvalidParameter, "Action id is stale");
+        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is stale");
     }
     (cb.func)(cb.user_data);
     MkuiResult::success()
@@ -403,30 +428,51 @@ pub unsafe extern "C" fn mkui_app_fire_action(app: *mut MkuiApp, id: MkuiActionI
 // Renderer entry — console
 // -------------------------------------------------------------------------
 
-/// Run the application via the console backend. The console backend takes a
-/// component tree, not an `AppTree`; for Sprint 4 we walk the tree and
-/// surface a non-interactive print so the C smoke build still completes
-/// without a TTY. Sprint 5+ will reroute this through the runtime walker
-/// once the console backend exposes a `from_tree` constructor.
+/// Run the application via the real console backend. Hands the runtime
+/// `AppTree` to `mkui_console::Mkui::from_core` and invokes its interactive
+/// loop. The Codex round-8 regression (Sprint 4 round-7 shipped a stub
+/// `println!` summary instead of the real backend) is corrected here.
+///
+/// Requires the `console` feature (default). Without it, returns
+/// `MkuiErrorCode::MkuiRuntimeError`.
+///
+/// Single function (not cfg-gated declaration) so cbindgen emits one
+/// prototype regardless of build features — duplicate prototypes are
+/// invalid C and the header would fail to compile downstream.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_run_console(app: *mut MkuiApp) -> MkuiResult {
     if app.is_null() {
-        return MkuiResult::error(MkuiErrorCode::InvalidParameter, "App pointer is null");
+        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
     }
-    // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
-    let app_ref = unsafe { &*app };
-    let tree = app_ref.tree.borrow();
-    // Best-effort terminal output without taking over the alt screen — keeps
-    // the C example smoke-testable in CI environments without a real TTY.
-    println!("mkui-c: app tree contains {} live node(s)", tree.len());
-    for node in tree.nodes() {
-        match &node.kind {
-            mkui_runtime::NodeKind::Text(t) => println!("  text: {}", t.content),
-            mkui_runtime::NodeKind::Button(b) => println!("  button: {}", b.label),
-            _ => {}
+    #[cfg(feature = "console")]
+    {
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+        let app_ref = unsafe { &mut *app };
+        // Move the tree out of the MkuiApp; the binding cannot be reused
+        // after a successful `run_console`, mirroring the v0.4.x
+        // semantics where `app.run()` consumed the Rust `Mkui`. The C
+        // host calls `mkui_app_free` after run returns.
+        let tree = std::mem::replace(&mut *app_ref.tree.borrow_mut(), AppTree::new());
+        let core = mkui_core::components::Mkui::with_tree(tree);
+        let console = match mkui_console::Mkui::from_core(core) {
+            Ok(m) => m,
+            Err(e) => {
+                return MkuiResult::error(MkuiErrorCode::MkuiInitializationFailed, &e.to_string());
+            }
+        };
+        match console.run() {
+            Ok(()) => MkuiResult::success(),
+            Err(e) => MkuiResult::error(MkuiErrorCode::MkuiRuntimeError, &e.to_string()),
         }
     }
-    MkuiResult::success()
+    #[cfg(not(feature = "console"))]
+    {
+        let _ = app;
+        MkuiResult::error(
+            MkuiErrorCode::MkuiRuntimeError,
+            "mkui-c was built without the `console` feature",
+        )
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -573,7 +619,7 @@ mod tests {
                 mkui_app_register_callback(app, Some(cb), (&counter) as *const _ as *mut c_void);
             assert_ne!(id, invalid_action());
             let result = mkui_app_fire_action(app, id);
-            assert!(matches!(result.code, MkuiErrorCode::Success));
+            assert!(matches!(result.code, MkuiErrorCode::MkuiSuccess));
             assert_eq!(counter.get(), 1);
 
             mkui_app_free(app);
@@ -593,6 +639,54 @@ mod tests {
                 invalid_node(),
                 "unknown utility must surface as invalid"
             );
+            mkui_app_free(app);
+        }
+    }
+
+    #[test]
+    fn stale_or_fabricated_parent_returns_invalid_not_panic() {
+        // Regression test for Codex round-8 P1: a fabricated parent
+        // `NodeId` reaching `push_*_unchecked` would `assert!` and abort
+        // across the FFI boundary. Every child constructor now validates
+        // the parent before mutating; this test exercises all three.
+        // SAFETY: single-threaded test.
+        unsafe {
+            let app = mkui_app_new();
+            let stale = MkuiNodeId {
+                index: u32::MAX - 1,
+                generation: 0,
+            };
+            let class = CString::new("").unwrap();
+            let content = CString::new("hi").unwrap();
+            let label = CString::new("ok").unwrap();
+
+            let v = mkui_app_view_child(app, stale, class.as_ptr());
+            assert_eq!(v, invalid_node(), "stale parent must surface as invalid");
+
+            let t =
+                mkui_app_text_child(app, stale, content.as_ptr(), MKUI_TEXT_BODY, class.as_ptr());
+            assert_eq!(t, invalid_node());
+
+            let b = mkui_app_button_child(
+                app,
+                stale,
+                label.as_ptr(),
+                MKUI_BUTTON_PRIMARY,
+                class.as_ptr(),
+                invalid_action(),
+            );
+            assert_eq!(b, invalid_node());
+
+            // Wrong-generation handle (real index, bumped generation) must
+            // also be rejected — the entire point of generation counters.
+            let root = mkui_app_root(app);
+            let wrong_gen = MkuiNodeId {
+                index: root.index,
+                generation: root.generation.wrapping_add(1),
+            };
+            let v2 = mkui_app_view_child(app, wrong_gen, class.as_ptr());
+            assert_eq!(v2, invalid_node());
+
             mkui_app_free(app);
         }
     }

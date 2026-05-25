@@ -140,6 +140,46 @@ fn class_parser_rejects_unknown_tier_3_token() {
 }
 
 #[test]
+fn fire_action_emits_dirty_and_request_redraw_signals() {
+    // Codex round-8 P1 regression test: actions must mark the tree dirty
+    // and emit `RequestRedraw`. The web + console dispatch sites used to
+    // drop the `RuntimeCtx`, which silently broke the substrate's redraw
+    // contract.
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let counter = Rc::new(Cell::new(0u32));
+    let counter_in = Rc::clone(&counter);
+
+    let mut tree = AppTree::new();
+    let action = tree.actions_mut().register_local(move |ctx| {
+        counter_in.set(counter_in.get() + 1);
+        ctx.mark_dirty();
+    });
+
+    assert!(!tree.is_dirty(), "freshly built tree must not be dirty");
+    let mut ctx = tree.actions().fire(action);
+
+    assert_eq!(counter.get(), 1, "closure must fire exactly once");
+    assert!(ctx.is_dirty(), "ctx must surface dirty");
+    let signals = ctx.drain_emitted();
+    assert!(
+        signals
+            .iter()
+            .any(|s| matches!(s, mkui_runtime::RuntimeSignal::RequestRedraw)),
+        "ctx must surface RequestRedraw, got: {signals:?}",
+    );
+
+    // The dispatch site (web/console high_level) is responsible for
+    // routing the ctx back to `tree.mark_dirty()`. Simulate the propagation
+    // and assert the bit transitions on the tree itself.
+    if ctx.is_dirty() {
+        tree.mark_dirty();
+    }
+    assert!(tree.is_dirty(), "post-propagation, tree's dirty bit is set");
+}
+
+#[test]
 fn snapshot_format_includes_resolved_field() {
     // Schema-level guard: the JSON shape must contain `resolved` for every
     // node so renderers consume the typed projection, not the raw class

@@ -8,12 +8,16 @@ description = "Python bindings for mkui UI library"
 
 [lib]
 name = "mkui_py"
-crate-type = ["cdylib"]
+# `rlib` added so integration tests in `tests/` can exercise the App's
+# Rust API directly without going through the Python interpreter. The
+# `cdylib` build path used by maturin still produces the Python wheel.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mkui = { path = "../mkui" }
 mkui-core = { path = "../mkui-core" }
 mkui-runtime = { path = "../mkui-runtime", features = ["snapshot"] }
+mkui-console = { path = "../mkui-console", optional = true }
 showcase-common = { path = "../../examples/showcase-common" }
 
 # PyO3 for Python bindings
@@ -22,7 +26,19 @@ pyo3 = { workspace = true, features = ["extension-module"] }
 [features]
 default = ["console"]
 web = ["mkui/web"]
-console = ["mkui/console"]
+console = ["mkui/console", "dep:mkui-console"]
+# Enables the host-side parity test (`tests/parity.rs`). Tests link as
+# standalone binaries which on some platforms (macOS without
+# `-undefined dynamic_lookup`) cannot resolve libpython symbols. The
+# parity test itself does not call libpython — it only exercises App's
+# Rust impl — but the link step still pulls PyO3's static references.
+# Enable this when a working Python toolchain is on the host (CI Linux
+# images typically work out of the box).
+parity-test = []
+
+[dev-dependencies]
+# Parity test reaches for `mkui_runtime::snapshot::TreeSnapshot` directly.
+mkui-runtime = { path = "../mkui-runtime", features = ["snapshot"] }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }

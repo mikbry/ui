@@ -185,6 +185,20 @@ impl Mkui {
         }
     }
 
+    /// Build a `Mkui` around a pre-existing [`AppTree`]. Used by FFI
+    /// bindings (`mkui-c`, `mkui-py`) that own their `AppTree` directly
+    /// and need to hand it to a backend's `run` loop without losing it
+    /// in the process.
+    ///
+    /// The lowering registry resets to defaults — any custom registrations
+    /// the caller wants must be re-applied via [`Mkui::register`].
+    pub fn with_tree(tree: AppTree) -> Self {
+        Self {
+            tree,
+            registry: LoweringRegistry::with_defaults(),
+        }
+    }
+
     /// Append a child. `.child()` panics on a class-parse error so the user-
     /// facing builder API stays infallible (matching the v0.4.1 surface). To
     /// catch parse errors programmatically, use [`Mkui::try_child`].
