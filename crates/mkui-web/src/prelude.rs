@@ -8,7 +8,7 @@
 pub use crate::app::WebApp;
 pub use crate::components::{WebButton, WebToggle};
 pub use crate::high_level::{Mkui, ThemeSelector};
-pub use crate::render::{WebRenderable, WebRendererRegistry};
+pub use crate::render::{CustomWebRenderable, WebRendererRegistry};
 pub use crate::renderer::WebRenderer;
 pub use crate::utils::*;
 pub use mkui_core::prelude::*;

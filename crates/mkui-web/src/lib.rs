@@ -59,5 +59,5 @@ pub mod utils;
 pub use app::WebApp;
 pub use components::{WebButton, WebToggle};
 pub use high_level::{Mkui, ThemeSelector};
-pub use render::{WebRenderable, WebRendererRegistry};
+pub use render::{CustomWebRenderable, WebRendererRegistry};
 pub use renderer::WebRenderer;

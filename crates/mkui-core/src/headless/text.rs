@@ -2,6 +2,11 @@ use super::traits::{Focusable, HeadlessComponent};
 use crate::event::Event;
 use crate::state::State;
 
+// `TextVariant` lives in `mkui-runtime` so every binding sees the same enum
+// without going through `mkui-core`. The re-export keeps the historical
+// `mkui_core::headless::TextVariant` path stable.
+pub use mkui_runtime::TextVariant;
+
 /// State for a text component
 #[derive(Debug, Clone, Default)]
 pub struct TextState {
@@ -22,19 +27,6 @@ pub enum TextEvent {
 }
 
 impl Event for TextEvent {}
-
-/// Text variants for styling
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum TextVariant {
-    Body,
-    Heading1,
-    Heading2,
-    Heading3,
-    Caption,
-    Label,
-    Code,
-}
 
 /// Text sizes
 #[derive(Debug, Clone, PartialEq)]

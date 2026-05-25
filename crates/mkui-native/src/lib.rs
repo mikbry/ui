@@ -1,16 +1,15 @@
 #![forbid(unsafe_code)]
 //! Native (WGPU) backend for mkui.
 //!
-//! The full WGPU scene layer is still being imported; what already exists is
-//! the contract this backend speaks against. Every node we render comes from
-//! the shared component model in [`mkui_core::components`], the same types
-//! consumed by `mkui-web` and `mkui-console`. This file documents that
-//! boundary and provides a minimal scene walker that future WGPU work can
-//! grow into without re-introducing backend-specific component contracts.
+//! Sprint 4 reshape: this backend now walks the shared `mkui_runtime::AppTree`
+//! produced by `mkui_core::Mkui` rather than the deprecated
+//! `Vec<Box<dyn Component>>` shape. The full WGPU declarative bridge is
+//! Sprint 5 scope; what already exists is the contract this backend speaks
+//! against.
 
-use mkui_core::components::{Button, Component, Text, View};
 use mkui_core::error::MkuiError;
 use mkui_core::theme::Theme;
+use mkui_runtime::{AppTree, Node, NodeKind};
 
 /// One drawable record produced by [`NativeScene::collect`].
 ///
@@ -37,7 +36,7 @@ pub enum SceneNode {
     },
 }
 
-/// Scene built from a `mkui-core` component tree.
+/// Scene built from a `mkui-runtime` AppTree.
 ///
 /// `NativeScene` is the entry point for the native backend. It holds a
 /// flattened list of drawable nodes plus the active theme, and exposes a
@@ -63,70 +62,78 @@ impl NativeScene {
         &self.nodes
     }
 
-    /// Walk a component tree rooted at `component` and append the visited
-    /// nodes to this scene. Unknown component types are recorded as
-    /// `SceneNode::Unknown` so user-defined components surface in renderer
-    /// dumps instead of being silently dropped.
-    pub fn collect(&mut self, component: &dyn Component) -> Result<(), MkuiError> {
-        self.collect_at(component, 0)
+    /// Walk an [`AppTree`] starting at its root and append visited nodes
+    /// to the scene. Unknown / custom node kinds surface as
+    /// `SceneNode::Unknown` so renderer dumps see them.
+    pub fn collect(&mut self, tree: &AppTree) -> Result<(), MkuiError> {
+        let root = tree
+            .get(tree.root())
+            .ok_or_else(|| MkuiError::rendering("AppTree root is missing — tree is corrupted"))?;
+        // Root itself is synthetic; walk its children at depth 0.
+        for child_id in &root.children {
+            if let Some(child) = tree.get(*child_id) {
+                self.collect_at(tree, child, 0);
+            }
+        }
+        Ok(())
     }
 
-    fn collect_at(&mut self, component: &dyn Component, depth: usize) -> Result<(), MkuiError> {
-        let any = component as &dyn std::any::Any;
-
-        if let Some(view) = any.downcast_ref::<View>() {
-            self.nodes.push(SceneNode::Container {
-                class: view.class_name().to_string(),
-                depth,
-            });
-            for child in view.children() {
-                self.collect_at(child.as_ref(), depth + 1)?;
+    fn collect_at(&mut self, tree: &AppTree, node: &Node, depth: usize) {
+        match &node.kind {
+            NodeKind::View(_) => {
+                self.nodes.push(SceneNode::Container {
+                    class: node.class.raw().to_string(),
+                    depth,
+                });
+                for child_id in &node.children {
+                    if let Some(child) = tree.get(*child_id) {
+                        self.collect_at(tree, child, depth + 1);
+                    }
+                }
             }
-        } else if let Some(text) = any.downcast_ref::<Text>() {
-            self.nodes.push(SceneNode::Text {
-                content: text.content().to_string(),
-                class: text.class_name().to_string(),
-                depth,
-            });
-        } else if let Some(button) = any.downcast_ref::<Button>() {
-            self.nodes.push(SceneNode::Button {
-                label: button.content().to_string(),
-                class: button.class_name().to_string(),
-                depth,
-            });
-        } else {
-            self.nodes.push(SceneNode::Unknown { depth });
+            NodeKind::Text(t) => {
+                self.nodes.push(SceneNode::Text {
+                    content: t.content.clone(),
+                    class: node.class.raw().to_string(),
+                    depth,
+                });
+            }
+            NodeKind::Button(b) => {
+                self.nodes.push(SceneNode::Button {
+                    label: b.label.clone(),
+                    class: node.class.raw().to_string(),
+                    depth,
+                });
+            }
+            NodeKind::Root | NodeKind::Custom { .. } => {
+                self.nodes.push(SceneNode::Unknown { depth });
+            }
         }
-
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkui_core::components::Mkui;
+    use mkui_core::components::{Button, Mkui, Text, View};
     use mkui_core::headless::ButtonVariant;
 
     #[test]
     fn scene_collects_the_same_component_tree_other_backends_consume() {
         let app = Mkui::new().child(
             View::new()
-                .class("root")
                 .child(Text::new("hello"))
                 .child(Button::new("ok").variant(ButtonVariant::Primary)),
         );
 
         let mut scene = NativeScene::new(Theme::default());
-        for child in app.children() {
-            scene.collect(child.as_ref()).expect("collect");
-        }
+        scene.collect(app.tree()).expect("collect");
 
         assert_eq!(
             scene.nodes(),
             &[
                 SceneNode::Container {
-                    class: "root".to_string(),
+                    class: String::new(),
                     depth: 0
                 },
                 SceneNode::Text {
@@ -141,16 +148,5 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn unknown_components_are_surfaced_not_dropped() {
-        struct Custom;
-        impl Component for Custom {}
-
-        let mut scene = NativeScene::new(Theme::default());
-        scene.collect(&Custom).expect("collect");
-
-        assert_eq!(scene.nodes(), &[SceneNode::Unknown { depth: 0 }]);
     }
 }

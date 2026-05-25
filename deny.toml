@@ -15,17 +15,19 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "warn"
-# Known-acceptable advisories, all confined to `mkui-py` / `mkui-c` —
-# the FFI binding crates currently excluded from CI build/test (see ci.yml).
-# Re-evaluate once mkui-py (PyO3 / Python 3.14 unblock) and mkui-c (Sprint 4
-# FFI audit) come back into the CI gate.
+# Sprint 4 (issue #51) cleared 3 of 4 prior ignores:
+#   - `atty` (RUSTSEC-2024-0375): cbindgen 0.26 → 0.29.2 bump dropped the
+#     `clap 3` → `atty` chain.
+#   - PyO3 0.22 `PyString::from_object` (RUSTSEC-2025-0020): PyO3 0.22 →
+#     0.28.3 bump.
+#   - The `clap 3` / `bitflags 1` / `syn 1` transitive duplicate cluster
+#     pruned by the same cbindgen bump (not advisory-tagged, but cleared
+#     by the dep graph collapse).
+# `paste` (RUSTSEC-2024-0436) remains until `safer-ffi` ships a revision
+# without it; tracked as a Sprint 5+ follow-up.
 ignore = [
-    # `atty` is unmaintained; pulled in by cbindgen 0.26 → clap 3 (mkui-c build-dep).
-    "RUSTSEC-2024-0375",
     # `paste` is unmaintained; pulled in by safer-ffi (mkui-c).
     "RUSTSEC-2024-0436",
-    # PyO3 0.22 PyString::from_object buffer-overflow risk; pulled in by mkui-py.
-    "RUSTSEC-2025-0020",
 ]
 
 [licenses]

@@ -19,12 +19,15 @@ env:
 # `-D warnings` is scoped to the clippy command only; do NOT re-introduce
 # `RUSTFLAGS: -D warnings` at workflow scope (Sprint 2 retro Lesson 2).
 #
-# `mkui-py` is excluded from every job because of the open PyO3 / Python 3.14
-# build issue. Re-enable it once that lands.
+# `mkui-py` stays excluded from every job because the PyO3 0.28 bump still
+# needs Python 3.14 + interpreter wiring on the CI image (Sprint 4 §11 — gated
+# on Python 3.14 working end-to-end). Sprint 4 lands the PyO3 0.28.3 upgrade
+# itself; CI re-entry follows in a focused Sprint 5 issue.
 #
-# `mkui-c` is excluded from clippy + build-release because of 11 outstanding
-# `clippy::not_unsafe_ptr_arg_deref` soundness errors deferred to Sprint 4
-# Phase 1.1 (FFI audit). Re-enable it once that lands.
+# `mkui-c` is now back in every job — the Sprint 4 handle-based rewrite
+# (#51) folds in `// SAFETY:` annotations on every `unsafe` block and clears
+# `clippy::not_unsafe_ptr_arg_deref` by design (opaque handles, no inline
+# pointer-deref).
 
 jobs:
   fmt:
@@ -55,7 +58,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --exclude mkui-py --exclude mkui-c --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --exclude mkui-py --all-targets --locked -- -D warnings
 
   test:
     name: test
@@ -109,7 +112,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
-      - run: cargo build --workspace --exclude mkui-py --exclude mkui-c --release --locked
+      - run: cargo build --workspace --exclude mkui-py --release --locked
 
   cargo-deny:
     name: cargo-deny

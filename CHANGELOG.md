@@ -10,6 +10,73 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+## [0.5.0] — 2026-05-25
+
+### Added
+- `mkui-runtime` crate — portable application-tree substrate (`AppTree`,
+  `NodeId`, `ActionId`, `NodeKind`, `ActionRegistry`, `RuntimeCtx`,
+  `RuntimeSignal`, `StyleClass`, `ResolvedStyle`, JSON snapshots).
+  Single arena every binding builds into; `(index, generation)` handles
+  guard against use-after-free. ADR 0005 documents the design (#51)
+- Runtime class parser owns `StyleClass` / `ResolvedStyle` for the
+  Tailwind-shaped utility-class strings used by the showcase. 43 Tier-1
+  tokens (the showcase set), 3 Tier-2 no-op patterns (`hover:*`, `sm:*`,
+  `transition-colors`), Tier 3 → parse error with a helpful message
+  naming the bad token and the tier system (#51)
+- Canonical JSON snapshots of the `AppTree` (feature `snapshot`) — the
+  parity gate that proves Rust / C / Python construction frontends
+  produce byte-identical trees (#51)
+- `mkui-runtime` `NodeKind::Custom { type_name, props }` extension slot
+  + Sprint 4 `TestWidget` extension proof in the parity test suite
+  (#51)
+
+### Changed
+- `mkui-core::Mkui` / `View` / `Text` / `Button` internals now lower into
+  an `mkui_runtime::AppTree` via the new `LoweringRegistry`. Public Rust
+  ergonomic API unchanged — `examples/showcase-common/src/lib.rs`
+  compiles byte-identical (#51)
+- `mkui-core::headless::ButtonVariant` and `TextVariant` are now
+  re-exports of the runtime types so every binding sees the same enum
+  without going through `mkui-core` (#51)
+- `mkui-web` consumes `AppTree` directly: built-in `View` / `Text` /
+  `Button` render through fixed paths in `render::render_tree`;
+  `WebRendererRegistry` keyed by `type_name` dispatches `NodeKind::Custom`
+  to downstream-registered `CustomWebRenderable` implementations (#51)
+- `mkui-console` walks `AppTree` instead of the legacy
+  `Vec<Box<dyn Component>>` shape. Actions fire through the runtime's
+  `ActionRegistry` by id rather than via `Rc<dyn Fn()>` pointers (#51)
+- `mkui-native` `NativeScene::collect` now takes an `&AppTree` so the
+  future wgpu bridge consumes the same shape as every other backend (#51)
+- **`mkui-c` full rewrite** — flat `add_view` / `add_text` / `add_button`
+  replaced by handle-based nested API: `mkui_app_view_child`,
+  `mkui_app_text_child`, `mkui_app_button_child`,
+  `mkui_app_register_callback`. New `MkuiNodeId` / `MkuiActionId` opaque
+  handles (each carries `index` + `generation`). Every `unsafe` block
+  carries a `// SAFETY:` annotation (audit Phase 1.1 fold-in) (#51)
+- **`mkui-py` full rewrite** — flat `add_view` / `add_text` /
+  `add_button` replaced by handle-based nested API on `App`:
+  `app.view_child(parent, class)`, `app.button_child(parent, label,
+  variant, class, callback_id)`. New `PyNodeId` / `PyActionId` classes (#51)
+- `pyo3` 0.22 → 0.28.3 (unblocks Python 3.14; audit Phase 5 Task 24).
+  Migrated to `Bound`-based API + `#[pyclass(unsendable)]` for the
+  single-threaded runtime invariant (#51)
+- `cbindgen` 0.26 → 0.29.2 (clears `atty` + `clap 3` + `bitflags 1` +
+  `syn 1` transitive duplicates from the workspace dep graph). Replaces
+  `mkui-c/build.rs`'s manual `cbindgen.toml` bypass with a real
+  `cbindgen::Builder` invocation (audit Phase 2 Task 9 fold-in) (#51)
+- `mkui-c` re-enters CI build-release + clippy gates — the handle-based
+  rewrite + `// SAFETY:` annotations clear `not_unsafe_ptr_arg_deref` by
+  design (#51)
+- ADR 0005 added to `docs/architecture/` documenting the runtime crate.
+  Does **not** supersede ADR 0001 — runtime is the contract-implementation
+  layer, `mkui-core` remains the contract crate (#51)
+
+### Tooling
+- `cbindgen 0.29.2` upgrade prunes 3 of 4 advisory ignores from
+  `deny.toml` / `.cargo/audit.toml` (`atty` / `paste` / `PyO3 0.22`
+  cluster) — only the safer-ffi-via-`paste` ignore remains until the
+  upstream releases an audit-clean revision (#51)
+
 ## [0.4.1] — 2026-05-23
 
 ### Added

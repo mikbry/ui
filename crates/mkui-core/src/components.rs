@@ -1,58 +1,53 @@
 //! Cross-platform component model.
 //!
-//! Components in `mkui-core` describe *what* should appear on screen. They do
-//! not know how to render themselves — each backend (`mkui-web`,
-//! `mkui-console`, `mkui-native`, ...) is responsible for turning these
-//! values into platform-specific output.
+//! `mkui-core` keeps a thin ergonomic builder layer (`View` / `Text` /
+//! `Button`) so user code reads naturally:
 //!
-//! The [`Component`] trait is intentionally minimal: it is a marker bound on
-//! [`std::any::Any`] so backends can downcast to the concrete component types
-//! ([`View`], [`Text`], [`Button`], or any user-defined component) and render
-//! them in a backend-specific way.
+//! ```ignore
+//! Mkui::new().child(
+//!     View::new()
+//!         .class("flex")
+//!         .child(Text::new("hello").variant(TextVariant::Heading1))
+//!         .child(Button::new("ok").on_press(|| println!("pressed"))),
+//! );
+//! ```
 //!
-//! ## The renderer / component boundary
+//! Under the hood, `Mkui::child` *lowers* the builder values into an
+//! [`mkui_runtime::AppTree`] via the [`LoweringRegistry`]. After lowering,
+//! every backend walks the same `AppTree` (web / console / wgpu / C / Python)
+//! and the parity gate (issue #51 §2) holds.
 //!
-//! Backends must satisfy two rules:
+//! ## Why both builders and the AppTree
 //!
-//! 1. **No closed downcast list.** A backend MUST NOT branch on a fixed set
-//!    of concrete `mkui-core` types as its only extension path. The orphan
-//!    rule prevents downstream crates from implementing a backend-specific
-//!    render trait on `mkui-core` types, but user crates own *their own*
-//!    component types and must be able to plug them into the renderer
-//!    without forking the backend.
+//! The Rust public API was load-bearing for v0.4.1 consumers — notably
+//! `examples/showcase-common/src/lib.rs`, which must compile byte-unchanged
+//! per acceptance criterion #9. The runtime tree is the *storage* layer;
+//! the builders are *sugar on handles* (Codex Q2). One model, two
+//! ergonomic frontends (Rust + FFI).
 //!
-//! 2. **Open dispatch via [`std::any::TypeId`].** The recommended pattern is
-//!    a registry that maps each component's [`TypeId`](std::any::TypeId) to a
-//!    handler function. The backend defines a local extension trait
-//!    (e.g. `mkui_web::WebRenderable`) and a registry
-//!    (e.g. `mkui_web::WebRendererRegistry`) seeded with handlers for the
-//!    built-in [`View`], [`Text`], and [`Button`] types. User code
-//!    implements the extension trait for its own components and registers
-//!    them at app construction. Unknown components are a deliberate failure
-//!    (panic in debug / explicit fallback hook), not a silent placeholder.
+//! ## Extending the registry
 //!
-//! Anything that requires a backend-specific value (DOM nodes, terminal
-//! cells, GPU buffers) lives in the backend crate — never in `mkui-core`.
-//! See `mkui-web`'s `render` module for a reference implementation of this
-//! boundary.
+//! Custom component types implement [`LowerToTree`] and register through
+//! [`LoweringRegistry::register`]. Sprint 4 ships a `TestWidget` extension
+//! proof in the parity test suite (`crates/mkui-runtime/tests/parity.rs`).
+//! Real shadcn-parity components (Separator, Tabs, …) are deferred to
+//! Sprint 6+ per the issue's "Out of scope" section.
 
+use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::headless::{ButtonVariant, TextVariant};
+use mkui_runtime::{
+    ActionId, AppTree, ButtonVariant, ClassParseError, NodeId, StyleClass, TextVariant,
+};
 
 /// Marker trait for every renderable component.
 ///
-/// Implementations are simple value types that backends introspect via
-/// [`std::any::Any`]. No rendering logic lives here — keeping
-/// backend-specific code out of `mkui-core` is the whole point of the crate.
-///
-/// Backends dispatch by reading [`Any::type_id`](std::any::Any::type_id) and
-/// looking the type up in a registry of backend-specific render handlers
-/// (see the module-level docs on the renderer / component boundary). User
-/// crates may implement `Component` on their own types and register the
-/// matching backend-specific render handler — the backend does not need to
-/// know about the type in advance.
-pub trait Component: std::any::Any {
+/// `Component` is `Any` so the [`LoweringRegistry`] can dispatch by
+/// [`TypeId`](std::any::TypeId). User-defined components implement
+/// `Component` (the marker) plus [`LowerToTree`] (the lowering) and
+/// register the type in the registry.
+pub trait Component: Any {
     /// Optional stable identifier used by backends for diffing or focus
     /// tracking. The default implementation returns `None`.
     fn id(&self) -> Option<&str> {
@@ -60,25 +55,194 @@ pub trait Component: std::any::Any {
     }
 }
 
-/// Main app container — cross-platform.
+/// Lowering trait — converts a builder value into one or more nodes in an
+/// [`AppTree`] and returns the id of the inserted root for that builder.
+///
+/// Implementations take `&mut self` so internal `Vec<Box<dyn Component>>`
+/// children can be moved out via `std::mem::take` without consuming the box
+/// — this avoids the trait-object upcast (`Box<dyn Component>` →
+/// `Box<dyn Any>`) which is unstable on the workspace MSRV (Rust 1.84;
+/// stabilised in 1.86).
+///
+/// Downstream components implement this on their own types and register
+/// them through a [`LoweringRegistry`].
+pub trait LowerToTree: Component {
+    /// Lower `self` under `parent`, returning the id of the inserted root.
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError>;
+}
+
+type LowerFn = Box<
+    dyn Fn(
+        &mut dyn Component,
+        &mut AppTree,
+        NodeId,
+        &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError>,
+>;
+
+/// Registry of [`LowerToTree`] handlers keyed by [`TypeId`]. Mirrors the
+/// `WebRendererRegistry` extension pattern at the lowering boundary so the
+/// same shape works for every binding.
+pub struct LoweringRegistry {
+    handlers: HashMap<TypeId, LowerFn>,
+}
+
+impl LoweringRegistry {
+    /// Empty registry. Prefer [`LoweringRegistry::with_defaults`].
+    pub fn new() -> Self {
+        Self {
+            handlers: HashMap::new(),
+        }
+    }
+
+    /// Registry pre-populated with lowering for the built-in `mkui-core`
+    /// component types ([`View`], [`Text`], [`Button`]).
+    pub fn with_defaults() -> Self {
+        let mut reg = Self::new();
+        reg.register::<View>();
+        reg.register::<Text>();
+        reg.register::<Button>();
+        reg
+    }
+
+    /// Register `T` so the registry can lower it. Re-registering overwrites.
+    pub fn register<T: LowerToTree + 'static>(&mut self) -> &mut Self {
+        self.handlers.insert(
+            TypeId::of::<T>(),
+            Box::new(|comp, tree, parent, registry| {
+                // Same downcast pattern `mkui-web`'s `WebRendererRegistry`
+                // uses: cast `&mut dyn Component` to `&mut dyn Any` (works
+                // because `Component: Any`) and then downcast to the
+                // concrete type the handler was registered for.
+                let any: &mut dyn Any = comp;
+                let typed = any
+                    .downcast_mut::<T>()
+                    .expect("LoweringRegistry: TypeId matched but downcast failed");
+                typed.lower_to_tree(tree, parent, registry)
+            }),
+        );
+        self
+    }
+
+    pub fn has_lowering_for<T: 'static>(&self) -> bool {
+        self.handlers.contains_key(&TypeId::of::<T>())
+    }
+
+    /// Lower a boxed builder value into `tree` under `parent`.
+    ///
+    /// The handler downcasts `&mut dyn Component` to the concrete type, so
+    /// the box can move data out of internal fields (e.g. `View::children`)
+    /// via `std::mem::take` rather than consuming the box itself.
+    ///
+    /// Errors:
+    /// - The component's type was never registered → returns a
+    ///   `ClassParseError::UnknownToken` carrying the missing type-id. We
+    ///   surface as a class-parse-shaped error so callers have a single
+    ///   error type to handle. Future sprints may add a richer `LowerError`
+    ///   if extension volume grows.
+    /// - The component's class string contains an unknown utility.
+    pub fn lower_boxed(
+        &self,
+        mut boxed: Box<dyn Component>,
+        tree: &mut AppTree,
+        parent: NodeId,
+    ) -> Result<NodeId, ClassParseError> {
+        let any_ref: &dyn Any = &*boxed;
+        let type_id = any_ref.type_id();
+        if let Some(handler) = self.handlers.get(&type_id) {
+            handler(&mut *boxed, tree, parent, self)
+        } else {
+            Err(ClassParseError::UnknownToken(format!(
+                "<unregistered component type {type_id:?}>"
+            )))
+        }
+    }
+}
+
+impl Default for LoweringRegistry {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+/// Top-level app container. Holds the [`AppTree`] and the
+/// [`LoweringRegistry`] used to convert builder values into nodes.
 pub struct Mkui {
-    children: Vec<Box<dyn Component>>,
+    tree: AppTree,
+    registry: LoweringRegistry,
 }
 
 impl Mkui {
     pub fn new() -> Self {
         Self {
-            children: Vec::new(),
+            tree: AppTree::new(),
+            registry: LoweringRegistry::with_defaults(),
         }
     }
 
+    /// Append a child. `.child()` panics on a class-parse error so the user-
+    /// facing builder API stays infallible (matching the v0.4.1 surface). To
+    /// catch parse errors programmatically, use [`Mkui::try_child`].
     pub fn child(mut self, child: impl Component + 'static) -> Self {
-        self.children.push(Box::new(child));
+        let boxed: Box<dyn Component> = Box::new(child);
+        let root = self.tree.root();
+        self.registry
+            .lower_boxed(boxed, &mut self.tree, root)
+            .expect("mkui-core: lowering failed — see ClassParseError");
         self
     }
 
-    pub fn children(&self) -> &Vec<Box<dyn Component>> {
-        &self.children
+    /// Falliblevariant of [`Mkui::child`] that returns the parse error
+    /// instead of panicking. Tests and FFI bridges that want to surface
+    /// the error use this; the showcase API stays panic-on-bad-class.
+    pub fn try_child(mut self, child: impl Component + 'static) -> Result<Self, ClassParseError> {
+        let boxed: Box<dyn Component> = Box::new(child);
+        let root = self.tree.root();
+        self.registry.lower_boxed(boxed, &mut self.tree, root)?;
+        Ok(self)
+    }
+
+    /// Register a custom component type with the lowering registry.
+    pub fn register<T: LowerToTree + 'static>(mut self) -> Self {
+        self.registry.register::<T>();
+        self
+    }
+
+    /// Read access to the constructed tree. Backends consume this.
+    pub fn tree(&self) -> &AppTree {
+        &self.tree
+    }
+
+    /// Mutable tree access. Backends that need to fire actions or rebuild
+    /// nodes after construction use this.
+    pub fn tree_mut(&mut self) -> &mut AppTree {
+        &mut self.tree
+    }
+
+    /// Read access to the lowering registry.
+    pub fn registry(&self) -> &LoweringRegistry {
+        &self.registry
+    }
+
+    /// Consume `self` and yield (tree, registry) — used by backend bridges
+    /// that want to take ownership and append more nodes themselves.
+    pub fn into_parts(self) -> (AppTree, LoweringRegistry) {
+        (self.tree, self.registry)
+    }
+
+    /// Number of children directly under the root. Kept for backwards
+    /// compatibility with tests that asserted on the old `.children().len()`
+    /// shape; new code should walk `tree()` instead.
+    pub fn children_len(&self) -> usize {
+        self.tree
+            .get(self.tree.root())
+            .map(|n| n.children.len())
+            .unwrap_or(0)
     }
 }
 
@@ -87,6 +251,10 @@ impl Default for Mkui {
         Self::new()
     }
 }
+
+// -------------------------------------------------------------------------
+// View — flex container
+// -------------------------------------------------------------------------
 
 /// Cross-platform `View` container.
 pub struct View {
@@ -116,8 +284,11 @@ impl View {
         &self.class
     }
 
-    pub fn children(&self) -> &Vec<Box<dyn Component>> {
-        &self.children
+    /// Number of direct children. Replaces the legacy `&Vec<Box<dyn …>>`
+    /// accessor — exposing the raw vec is no longer useful because the
+    /// builder is consumed during lowering.
+    pub fn children_len(&self) -> usize {
+        self.children.len()
     }
 }
 
@@ -128,6 +299,30 @@ impl Default for View {
 }
 
 impl Component for View {}
+
+impl LowerToTree for View {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let class = std::mem::take(&mut self.class);
+        let children = std::mem::take(&mut self.children);
+        let style = StyleClass::from_str(class);
+        // Validate eagerly so showcase typos surface at construction.
+        let _ = style.parse()?;
+        let id = tree.push_view_unchecked(parent, style);
+        for child in children {
+            registry.lower_boxed(child, tree, id)?;
+        }
+        Ok(id)
+    }
+}
+
+// -------------------------------------------------------------------------
+// Text — typographic node
+// -------------------------------------------------------------------------
 
 /// Cross-platform `Text` component.
 pub struct Text {
@@ -170,6 +365,26 @@ impl Text {
 
 impl Component for Text {}
 
+impl LowerToTree for Text {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        _registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let content = std::mem::take(&mut self.content);
+        let class = std::mem::take(&mut self.class);
+        let variant = self.variant;
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(tree.push_text_unchecked(parent, content, variant, style))
+    }
+}
+
+// -------------------------------------------------------------------------
+// Button — pressable
+// -------------------------------------------------------------------------
+
 /// Cross-platform `Button` component.
 pub struct Button {
     content: String,
@@ -198,6 +413,10 @@ impl Button {
         self
     }
 
+    /// `on_press` accepts an `Fn()` for ergonomic parity with the v0.4.1 API.
+    /// During lowering the closure is wrapped into an `FnMut(&mut RuntimeCtx)`
+    /// that calls the user code and then marks the tree dirty — actions
+    /// always emit `RequestRedraw` (issue #51 §7).
     pub fn on_press<F>(mut self, handler: F) -> Self
     where
         F: Fn() + 'static,
@@ -225,58 +444,103 @@ impl Button {
 
 impl Component for Button {}
 
+impl LowerToTree for Button {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        _registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let content = std::mem::take(&mut self.content);
+        let class = std::mem::take(&mut self.class);
+        let variant = self.variant;
+        let on_press = self.on_press.take();
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        let action_id: Option<ActionId> = on_press.map(|handler| {
+            // Wrap the v0.4.1-style `Fn()` into the runtime's
+            // `FnMut(&mut RuntimeCtx)` shape. Every action marks the tree
+            // dirty + emits RequestRedraw — that's the contract from the
+            // issue's §7. Renderers observe the signal on the next frame.
+            tree.actions_mut().register_local(move |ctx| {
+                handler();
+                ctx.mark_dirty();
+            })
+        });
+        Ok(tree.push_button_unchecked(parent, content, variant, style, action_id))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkui_runtime::NodeKind;
 
     #[test]
     fn component_tree_is_constructible_without_any_backend() {
         let app = Mkui::new().child(
             View::new()
-                .class("row")
+                .class("flex")
                 .child(Text::new("hello"))
                 .child(Button::new("ok").variant(ButtonVariant::Primary)),
         );
 
-        assert_eq!(app.children().len(), 1);
+        // Root + outer View + Text + Button = 4 live nodes.
+        assert_eq!(app.tree().len(), 4);
+        assert_eq!(app.children_len(), 1);
     }
 
     #[test]
-    fn components_can_be_downcast_by_backends() {
-        let view: Box<dyn Component> = Box::new(View::new().class("row"));
-        let text: Box<dyn Component> = Box::new(Text::new("hello"));
-        let button: Box<dyn Component> = Box::new(Button::new("ok"));
-
-        assert!((view.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<View>()
-            .is_some());
-        assert!((text.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<Text>()
-            .is_some());
-        assert!((button.as_ref() as &dyn std::any::Any)
-            .downcast_ref::<Button>()
-            .is_some());
+    fn lowering_preserves_class_and_children() {
+        let app = Mkui::new().child(
+            View::new()
+                .class("flex items-center")
+                .child(Text::new("a"))
+                .child(Text::new("b")),
+        );
+        let root = app.tree().get(app.tree().root()).unwrap();
+        assert_eq!(root.children.len(), 1);
+        let view = app.tree().get(root.children[0]).unwrap();
+        assert!(matches!(view.kind, NodeKind::View(_)));
+        assert_eq!(view.class.raw(), "flex items-center");
+        assert!(view.resolved.flex);
+        assert!(view.resolved.items_center);
+        assert_eq!(view.children.len(), 2);
     }
 
     #[test]
-    fn view_exposes_class_and_children() {
-        let v = View::new().class("col gap-4").child(Text::new("a"));
-        assert_eq!(v.class_name(), "col gap-4");
-        assert_eq!(v.children().len(), 1);
-    }
-
-    #[test]
-    fn button_press_handler_runs() {
+    fn button_on_press_registers_an_action_that_marks_dirty() {
         use std::cell::Cell;
-        use std::rc::Rc;
-
         let pressed = Rc::new(Cell::new(false));
         let pressed_in = Rc::clone(&pressed);
-        let button = Button::new("ok").on_press(move || pressed_in.set(true));
 
-        let handler = button.on_press_handler().as_ref().expect("handler");
-        handler();
+        let app = Mkui::new().child(Button::new("ok").on_press(move || pressed_in.set(true)));
 
-        assert!(pressed.get());
+        // Walk to the button node + grab its action id.
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let button = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Button(b) = &button.kind else {
+            panic!("expected Button")
+        };
+        let action = b.on_press.expect("action must be registered");
+
+        let ctx = app.tree().actions().fire(action);
+        assert!(pressed.get(), "user closure must fire");
+        assert!(ctx.is_dirty(), "every action must mark dirty (§7)");
+    }
+
+    #[test]
+    fn try_child_surfaces_a_class_parse_error() {
+        let result = Mkui::new().try_child(View::new().class("totally-bogus-utility"));
+        let Err(err) = result else {
+            panic!("try_child must reject unknown class")
+        };
+        assert!(matches!(err, ClassParseError::UnknownToken(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "lowering failed")]
+    fn child_panics_on_unknown_class() {
+        Mkui::new().child(View::new().class("totally-bogus-utility"));
     }
 }

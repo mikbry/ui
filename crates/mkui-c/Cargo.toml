@@ -13,6 +13,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 mkui = { path = "../mkui" }
 mkui-core = { path = "../mkui-core" }
+mkui-runtime = { path = "../mkui-runtime", features = ["snapshot"] }
 
 # For C string handling
 libc = { workspace = true }

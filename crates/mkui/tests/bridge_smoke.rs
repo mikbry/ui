@@ -37,9 +37,13 @@ fn console_backend_accepts_a_component_tree() {
     let app = Mkui::new().expect("console init should succeed without a real TTY");
     // Building a small tree must not panic on either downcast or on the
     // `child(...)` dispatch in the bridge's cfg-gated impl.
+    // `row` is not in the Tier 1 token set; the runtime parser would reject
+    // it. The bridge smoke test uses `flex` instead — a real T1 token — so
+    // the build path exercises the lowering registry as well as the
+    // class-parser gate.
     let _app = app
         .child(Text::new("hello"))
-        .child(View::new().class("row").child(Button::new("ok")));
+        .child(View::new().class("flex").child(Button::new("ok")));
 }
 
 #[test]
