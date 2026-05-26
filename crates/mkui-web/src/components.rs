@@ -62,7 +62,7 @@ impl WebButton {
     pub fn size(mut self, size: ButtonSize) -> Self {
         self.inner = ButtonBuilder::new()
             .text(self.inner.text())
-            .variant(self.inner.variant().clone())
+            .variant(*self.inner.variant())
             .size(size)
             .build();
         self.update_classes();
@@ -72,7 +72,7 @@ impl WebButton {
     pub fn on_click<F: Fn() + 'static>(mut self, f: F) -> Self {
         self.inner = ButtonBuilder::new()
             .text(self.inner.text())
-            .variant(self.inner.variant().clone())
+            .variant(*self.inner.variant())
             .size(self.inner.size().clone())
             .on_click(f)
             .build();

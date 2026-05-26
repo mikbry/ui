@@ -7,4 +7,5 @@ license.workspace = true
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
+mkui-runtime = { path = "../mkui-runtime" }
 # Future: wgpu and rendering dependencies

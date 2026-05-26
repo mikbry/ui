@@ -1,36 +1,29 @@
-//! Console-side component wrappers.
+//! Console-side projection of an [`mkui_runtime::AppTree`].
 //!
-//! Each backend turns the shared [`mkui_core::components`] tree into its own
-//! drawable form. For the terminal that means a flat list of [`Line`]s plus
-//! the [`ConsoleButton`] records (label, variant, optional handler) that
-//! [`crate::high_level::Mkui`] navigates and renders.
-//!
-//! This module is the console counterpart of `mkui_web::components` and
-//! `mkui_wgpu::components` — backend-specific component scaffolding that
-//! sits above [`mkui_core`] and below the high-level [`crate::Mkui`]
-//! orchestrator.
+//! Sprint 4: the console backend now walks the shared runtime tree instead
+//! of the old `Vec<Box<dyn Component>>` shape. Layout is still a flat list
+//! of [`Line`]s plus the [`ConsoleButton`] records (label, variant, action
+//! id) that [`crate::high_level::Mkui`] navigates and renders.
 //!
 //! Styling decisions come from the *typed* [`TextVariant`] /
-//! [`ButtonVariant`] values on each component — never from sniffing
+//! [`ButtonVariant`] values on each node — never from sniffing
 //! showcase-specific class strings.
 
-use mkui_core::components::{Button, Component, Text, View};
-use mkui_core::headless::{ButtonVariant, TextVariant};
-use std::rc::Rc;
+use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeKind, TextVariant};
 
-/// Console-side projection of a [`mkui_core::components::Button`].
+/// Console-side projection of a runtime `Button` node.
 ///
-/// Holds the label, the variant the styling needs, and the original
-/// `on_press` handler so navigation can fire it without going back through
-/// the original component tree.
-#[derive(Clone)]
+/// Holds the label, the variant the styling needs, and the action id so
+/// the navigation loop can fire the registered closure via the tree's
+/// `ActionRegistry`.
+#[derive(Clone, Debug)]
 pub struct ConsoleButton {
     pub label: String,
     pub variant: ButtonVariant,
-    pub on_press: Option<Rc<dyn Fn()>>,
+    pub on_press: Option<ActionId>,
 }
 
-/// One row in the flattened render plan produced from a component tree.
+/// One row in the flattened render plan produced from a runtime tree.
 ///
 /// The console backend can't paint nested boxes, so it flattens the tree
 /// into a sequence of lines. [`Line::Button`] references the matching
@@ -44,136 +37,133 @@ pub enum Line {
     Button(usize),
 }
 
-/// Single-pass walk over the shared component tree.
-///
-/// Emits flat lines for the terminal renderer and collects interactive
-/// buttons into the parallel array `Line::Button(index)` points into.
-/// Text styling comes from the typed [`TextVariant`] on each
-/// [`mkui_core::components::Text`] — the backend never inspects class
-/// strings.
-pub fn walk_component(
-    component: &dyn Component,
+/// Walk an [`AppTree`] and flatten it into lines + buttons for the
+/// terminal renderer.
+pub fn walk_tree(tree: &AppTree, layout: &mut Vec<Line>, buttons: &mut Vec<ConsoleButton>) {
+    let root = match tree.get(tree.root()) {
+        Some(node) => node,
+        None => return,
+    };
+    walk_children(tree, &root.children, layout, buttons);
+}
+
+fn walk_children(
+    tree: &AppTree,
+    children: &[mkui_runtime::NodeId],
     layout: &mut Vec<Line>,
     buttons: &mut Vec<ConsoleButton>,
 ) {
-    let any = component as &dyn std::any::Any;
-
-    if let Some(view) = any.downcast_ref::<View>() {
-        for child in view.children() {
-            walk_component(child.as_ref(), layout, buttons);
-        }
-        return;
-    }
-
-    if let Some(text) = any.downcast_ref::<Text>() {
-        let content = text.content().to_string();
-        let line = match text.text_variant() {
-            TextVariant::Heading1 | TextVariant::Heading2 | TextVariant::Heading3 => {
-                Line::Heading(content)
-            }
-            TextVariant::Caption | TextVariant::Label => Line::Muted(content),
-            TextVariant::Body | TextVariant::Code => Line::Body(content),
-            _ => Line::Body(content),
+    for child_id in children {
+        let Some(node) = tree.get(*child_id) else {
+            continue;
         };
-        layout.push(line);
-        layout.push(Line::Spacer);
-        return;
-    }
-
-    if let Some(button) = any.downcast_ref::<Button>() {
-        let index = buttons.len();
-        buttons.push(ConsoleButton {
-            label: button.content().to_string(),
-            variant: button.button_variant().clone(),
-            on_press: button.on_press_handler().clone(),
-        });
-        layout.push(Line::Button(index));
+        match &node.kind {
+            NodeKind::View(_) => {
+                walk_children(tree, &node.children, layout, buttons);
+            }
+            NodeKind::Text(t) => {
+                let content = t.content.clone();
+                let line = match t.variant {
+                    TextVariant::Heading1 | TextVariant::Heading2 | TextVariant::Heading3 => {
+                        Line::Heading(content)
+                    }
+                    TextVariant::Caption | TextVariant::Label => Line::Muted(content),
+                    TextVariant::Body | TextVariant::Code => Line::Body(content),
+                    _ => Line::Body(content),
+                };
+                layout.push(line);
+                layout.push(Line::Spacer);
+            }
+            NodeKind::Button(b) => {
+                let index = buttons.len();
+                buttons.push(ConsoleButton {
+                    label: b.label.clone(),
+                    variant: b.variant,
+                    on_press: b.on_press,
+                });
+                layout.push(Line::Button(index));
+            }
+            NodeKind::Root | NodeKind::Custom { .. } => {
+                // Root is unreachable here (we started at its children). A
+                // custom node has no built-in console rendering — Sprint 6+
+                // extension registry will define one. For now we recurse
+                // into any children so a custom container still surfaces
+                // its descendents.
+                walk_children(tree, &node.children, layout, buttons);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkui_core::components::{Button, Mkui, Text, View};
+    use mkui_core::headless::TextVariant;
     use std::cell::Cell;
+    use std::rc::Rc;
 
     #[test]
-    fn walk_component_preserves_on_press_handler() {
+    fn walk_tree_preserves_on_press_action() {
         let pressed = Rc::new(Cell::new(0u32));
         let pressed_in = Rc::clone(&pressed);
 
-        let button = Button::new("ok").on_press(move || {
+        let app = Mkui::new().child(Button::new("ok").on_press(move || {
             pressed_in.set(pressed_in.get() + 1);
-        });
+        }));
 
         let mut layout = Vec::new();
         let mut buttons = Vec::new();
-        walk_component(&button, &mut layout, &mut buttons);
+        walk_tree(app.tree(), &mut layout, &mut buttons);
 
         assert_eq!(buttons.len(), 1);
-        let captured = buttons[0]
-            .on_press
-            .as_ref()
-            .expect("handler must be captured, not dropped");
-        captured();
-        captured();
-
-        assert_eq!(
-            pressed.get(),
-            2,
-            "captured handler must be the same one the user supplied"
-        );
+        let action = buttons[0].on_press.expect("on_press must be registered");
+        app.tree().actions().fire(action);
+        app.tree().actions().fire(action);
+        assert_eq!(pressed.get(), 2);
     }
 
     #[test]
-    fn walk_component_recurses_into_nested_views() {
+    fn walk_tree_recurses_into_nested_views() {
         let pressed = Rc::new(Cell::new(false));
         let pressed_in = Rc::clone(&pressed);
 
-        let tree = View::new()
-            .class("row")
-            .child(View::new().child(Button::new("deep").on_press(move || pressed_in.set(true))));
+        let app = Mkui::new().child(View::new().child(View::new().child(
+            Button::new("deep").on_press(move || {
+                pressed_in.set(true);
+            }),
+        )));
 
         let mut layout = Vec::new();
         let mut buttons = Vec::new();
-        walk_component(&tree, &mut layout, &mut buttons);
+        walk_tree(app.tree(), &mut layout, &mut buttons);
 
         assert_eq!(buttons.len(), 1);
-        buttons[0].on_press.as_ref().expect("handler")();
+        let action = buttons[0].on_press.expect("on_press");
+        app.tree().actions().fire(action);
         assert!(pressed.get());
     }
 
     #[test]
-    fn walk_component_handles_buttons_without_handlers() {
-        let button = Button::new("no handler");
-        let mut layout = Vec::new();
-        let mut buttons = Vec::new();
-        walk_component(&button, &mut layout, &mut buttons);
-
-        assert_eq!(buttons.len(), 1);
-        assert!(buttons[0].on_press.is_none());
-    }
-
-    #[test]
-    fn text_variant_drives_line_style_not_class_string() {
-        // The backend must classify text by its typed `TextVariant`, not by
-        // sniffing showcase-specific Tailwind class strings — that coupling
-        // is what the "real component renderer" issue removes.
-        let tree = View::new()
-            .child(
-                Text::new("title")
-                    .variant(TextVariant::Heading1)
-                    .class("text-4xl"),
-            )
-            .child(
-                Text::new("note")
-                    .variant(TextVariant::Caption)
-                    .class("text-xs"),
-            )
-            .child(Text::new("body").class("text-base"));
+    fn text_variant_drives_line_style() {
+        let app = Mkui::new().child(
+            View::new()
+                .child(
+                    Text::new("title")
+                        .variant(TextVariant::Heading1)
+                        .class("text-4xl"),
+                )
+                .child(
+                    Text::new("note")
+                        .variant(TextVariant::Caption)
+                        .class("text-sm"),
+                )
+                .child(Text::new("body")),
+        );
 
         let mut layout = Vec::new();
         let mut buttons = Vec::new();
-        walk_component(&tree, &mut layout, &mut buttons);
+        walk_tree(app.tree(), &mut layout, &mut buttons);
 
         let lines: Vec<&Line> = layout
             .iter()

@@ -58,6 +58,12 @@ pub mod utils;
 
 pub use app::WebApp;
 pub use components::{WebButton, WebToggle};
-pub use high_level::{Mkui, ThemeSelector};
-pub use render::{WebRenderable, WebRendererRegistry};
+pub use high_level::Mkui;
+// `ThemeSelector` was removed in Sprint 4 (issue #51) — the v0.4.x version
+// implemented `WebRenderable` directly, which the runtime substrate
+// rewrite obsoleted. Restoring it as a real component that lowers through
+// `NodeKind::Custom` is Sprint 6+ scope alongside the shadcn theme picker.
+// Downstream users depending on the type should pin to v0.4.1 or migrate
+// to building their own theme-picker via `View` + `Button` + an action.
+pub use render::{CustomWebRenderable, WebRendererRegistry};
 pub use renderer::WebRenderer;

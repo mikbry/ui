@@ -10,6 +10,146 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+## [0.5.0] — 2026-05-25
+
+### Added
+- `mkui-runtime` crate — portable application-tree substrate (`AppTree`,
+  `NodeId`, `ActionId`, `NodeKind`, `ActionRegistry`, `RuntimeCtx`,
+  `RuntimeSignal`, `StyleClass`, `ResolvedStyle`, JSON snapshots).
+  Single arena every binding builds into; `(index, generation)` handles
+  guard against use-after-free. ADR 0005 documents the design (#51)
+- Runtime class parser owns `StyleClass` / `ResolvedStyle` for the
+  Tailwind-shaped utility-class strings used by the showcase. 43 Tier-1
+  tokens (the showcase set), 3 Tier-2 no-op patterns (`hover:*`, `sm:*`,
+  `transition-colors`), Tier 3 → parse error with a helpful message
+  naming the bad token and the tier system (#51)
+- Canonical JSON snapshots of the `AppTree` (feature `snapshot`) — the
+  parity gate that proves Rust / C / Python construction frontends
+  produce byte-identical trees (#51)
+- `mkui-runtime` `NodeKind::Custom { type_name, props }` extension slot
+  + Sprint 4 `TestWidget` extension proof in the parity test suite
+  (#51)
+- **Byte-identical parity tests for Rust ↔ C ↔ Python** —
+  `crates/mkui-c/tests/parity.rs` and `crates/mkui-py/tests/parity.rs`
+  build the same non-trivial tree (nested View + Text + Button + class
+  strings + action) through each binding's public surface and
+  `assert_eq!` on the full canonical JSON string (Codex round-8 P1
+  fix; the round-7 PR only did `contains(...)` substring matching on
+  the C side and had no Python coverage at all) (#51)
+- **`mkui-py-parity` CI job** — dedicated Linux job that builds mkui-py
+  with PyO3 0.28.3 + sets up a real Python interpreter and runs the
+  parity test. macOS hosts skip via `#[cfg(not(target_os = "macos"))]`
+  because PyO3 cdylib link on macOS needs `maturin develop` (#51)
+- **`cbindgen-header-clean` CI job** — runs `cargo build -p mkui-c`
+  and asserts `git diff` on `crates/mkui-c/include/mkui_c.h` is empty.
+  The checked-in header is the cbindgen output; drift between source
+  and generated form is now a build failure instead of a silent
+  problem caught downstream at link time (Codex round-8 P2 follow-up
+  on audit Phase 2 Task 9) (#51)
+
+### Changed
+- `mkui-core::Mkui` / `View` / `Text` / `Button` internals now lower into
+  an `mkui_runtime::AppTree` via the new `LoweringRegistry`. Public Rust
+  ergonomic API unchanged — `examples/showcase-common/src/lib.rs`
+  compiles byte-identical (#51)
+- `mkui-core::components::Mkui::with_tree(tree)` constructor added so
+  FFI bindings can hand a pre-built `AppTree` to a backend's `run` loop
+  without rebuilding via `.child(...)` (#51)
+- `mkui-console::Mkui::from_core(core)` constructor added — mkui-c and
+  mkui-py route their `run_console` through this to invoke the real
+  interactive backend (Codex round-8 P2: the round-7 PR shipped a stub
+  `println!` summary in both bindings, dropping the v0.4.x capability)
+  (#51)
+- `mkui-core::headless::ButtonVariant` and `TextVariant` are now
+  re-exports of the runtime types so every binding sees the same enum
+  without going through `mkui-core` (#51)
+- `mkui-web` consumes `AppTree` directly: built-in `View` / `Text` /
+  `Button` render through fixed paths in `render::render_tree`;
+  `WebRendererRegistry` keyed by `type_name` dispatches `NodeKind::Custom`
+  to downstream-registered `CustomWebRenderable` implementations (#51)
+- `mkui-web::high_level::fire_action_global` now **captures** the
+  `RuntimeCtx` returned by `ActionRegistry::fire` and routes its
+  `dirty` bit + `RequestRedraw` signals back to the tree (Codex
+  round-8 P1: the round-7 PR dropped the ctx, silently breaking the
+  substrate's redraw contract) (#51)
+- `mkui-console` walks `AppTree` instead of the legacy
+  `Vec<Box<dyn Component>>` shape. Actions fire through the runtime's
+  `ActionRegistry` by id rather than via `Rc<dyn Fn()>` pointers, and
+  the Enter/Space handler propagates the resulting `RuntimeCtx` dirty
+  bit to the tree + rebuilds the layout so structural changes surface
+  immediately (Codex round-8 P1 fix mirrors web's) (#51)
+- `mkui-native` `NativeScene::collect` takes an `&AppTree` so the
+  future wgpu bridge consumes the same shape as every other backend.
+  Scope: this is the same one-line API rewire applied to every backend
+  (web/console/wgpu); the broader `mkui-native` cleanup Codex round-7
+  Q8 deferred is **not** touched here (#51)
+- **`mkui-c` full rewrite** — flat `add_view` / `add_text` / `add_button`
+  replaced by handle-based nested API: `mkui_app_view_child`,
+  `mkui_app_text_child`, `mkui_app_button_child`,
+  `mkui_app_register_callback`. New `MkuiNodeId` / `MkuiActionId` opaque
+  handles (each carries `index` + `generation`). Every `unsafe` block
+  carries a `// SAFETY:` annotation (audit Phase 1.1 fold-in). Each
+  child constructor now validates `tree.get(parent).is_some()` before
+  the runtime's `assert!`-on-invalid-parent path — a panic across
+  `extern "C"` is undefined behaviour (Codex round-8 P1 fix) (#51)
+- **`mkui-py` full rewrite** — flat `add_view` / `add_text` /
+  `add_button` replaced by handle-based nested API on `App`:
+  `app.view_child(parent, class)`, `app.button_child(parent, label,
+  variant, class, callback_id)`. New `PyNodeId` / `PyActionId` classes.
+  Stale parent handles surface as `PyValueError` instead of panicking
+  across the PyO3 boundary (Codex round-8 P1 fix) (#51)
+- `mkui-c/build.rs` now writes the cbindgen output to the **checked-in**
+  `crates/mkui-c/include/mkui_c.h` (not just `target/include/...`), and
+  cbindgen generation failure is fatal — drift between source and
+  generated header surfaces at build time, not at downstream link time.
+  Local-dev `MKUI_C_SKIP_CBINDGEN=1` and `DOCS_RS=1` opt-outs documented
+  (Codex round-8 P2 follow-up on audit Phase 2 Task 9) (#51)
+- `pyo3` 0.22 → 0.28.3 (unblocks Python 3.14; audit Phase 5 Task 24).
+  Migrated to `Bound`-based API + `#[pyclass(unsendable)]` for the
+  single-threaded runtime invariant (#51)
+- `cbindgen` 0.26 → 0.29.2 (clears `atty` + `clap 3` + `bitflags 1` +
+  `syn 1` transitive duplicates from the workspace dep graph). Replaces
+  `mkui-c/build.rs`'s manual `cbindgen.toml` bypass with a real
+  `cbindgen::Builder` invocation (audit Phase 2 Task 9 fold-in) (#51)
+- `mkui-c` re-enters CI build-release + clippy gates — the handle-based
+  rewrite + `// SAFETY:` annotations clear `not_unsafe_ptr_arg_deref` by
+  design (#51)
+- C and C++ examples + `bindings/cpp/mkui.hpp` rewritten for the new
+  handle-based API. The C++ wrapper now includes the cbindgen-generated
+  `mkui_c.h` directly (rather than hand-maintaining its own forward
+  declarations, which drifted in v0.4.x and was Codex round-8 P2). New
+  `mkui::App::registerCallback(std::function<void()>)` wraps the C
+  callback table in a typed C++ surface (#51)
+- README.md / bindings/README.md / per-example READMEs updated to show
+  the new handle-based API in every quick-start snippet. The pre-Sprint-4
+  flat `mkui_app_add_*` / `addView` / `addText` shapes are documented
+  as removed; v0.4.x is the last release to ship them (#51)
+- ADR 0005 added to `docs/architecture/` documenting the runtime crate.
+  Does **not** supersede ADR 0001 — runtime is the contract-implementation
+  layer, `mkui-core` remains the contract crate (#51)
+
+### Removed
+- **Breaking**: `mkui_web::ThemeSelector` re-export removed. The v0.4.x
+  type implemented `WebRenderable` directly, which the substrate
+  rewrite obsoleted. Restoring it as a real component lowering through
+  `NodeKind::Custom` is Sprint 6+ scope alongside the shadcn theme
+  picker. Downstream code should pin to v0.4.1 or build its own theme
+  picker via `View` + `Button` + an action (#51)
+
+### Tooling
+- `cbindgen 0.29.2` upgrade prunes 3 of 4 advisory ignores from
+  `deny.toml` / `.cargo/audit.toml` (`atty` / `paste` / `PyO3 0.22`
+  cluster) — only the safer-ffi-via-`paste` ignore remains until the
+  upstream releases an audit-clean revision (#51)
+- `mkui-py` CI status: the main workspace `clippy` / `test` /
+  `build-release` jobs still exclude `mkui-py`. The dedicated
+  `mkui-py-parity` job covers the load-bearing snapshot equality
+  assertion; full re-merge into the main jobs (rmkui-py participating
+  in `cargo clippy --workspace`) is tracked as a Sprint 5
+  follow-up — link-time PyO3 wiring on the macOS+Windows matrix
+  needs `maturin develop` -shaped setup the workspace jobs do not
+  provide today (#51)
+
 ## [0.4.1] — 2026-05-23
 
 ### Added

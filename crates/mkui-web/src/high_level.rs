@@ -1,22 +1,76 @@
+//! High-level [`Mkui`] entry point for the web backend.
+//!
+//! Sprint 4: holds the `mkui_core::Mkui` (and thus the runtime
+//! `AppTree`) plus the [`WebRendererRegistry`] used to dispatch custom
+//! components. `run` walks the tree and produces DOM via
+//! [`crate::render::render_tree`].
+//!
+//! ## Action dispatch and the redraw flag
+//!
+//! `wasm_bindgen` closures must own their captures (`'static`), so we
+//! can't borrow `&AppTree` into each button's onclick. The active tree is
+//! installed in a `thread_local!` while `run()` is on the stack;
+//! [`fire_action_global`] looks the id up and fires through the tree's
+//! `ActionRegistry`. **Crucially we capture the returned `RuntimeCtx`** —
+//! `ActionRegistry::fire` produces `dirty` + `RuntimeSignal::RequestRedraw`
+//! on the way out, and dropping that context (the round-7 anti-pattern)
+//! means the renderer never knows when to redraw. We mark the tree dirty
+//! and emit a debug log per `RequestRedraw`; full re-render is a Sprint 5+
+//! follow-up (the substrate carries the signal correctly now).
+
 use crate::app::WebApp;
-use crate::render::{WebRenderable, WebRendererRegistry};
-use mkui_core::components::*;
-use mkui_core::headless::ButtonVariant;
-use mkui_core::theme::{ColorTheme, ThemeMode};
+use crate::render::{render_tree, WebRendererRegistry};
+use mkui_core::components::Component;
+use mkui_runtime::RuntimeSignal;
 use std::cell::RefCell;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
-use web_sys::{Document, Element};
+
+thread_local! {
+    /// Pointer to the live tree set by [`Mkui::run`] before mount.
+    static ACTIVE_TREE: RefCell<Option<Rc<RefCell<mkui_runtime::AppTree>>>> = const { RefCell::new(None) };
+}
+
+fn set_global_tree(tree: Rc<RefCell<mkui_runtime::AppTree>>) {
+    ACTIVE_TREE.with(|cell| *cell.borrow_mut() = Some(tree));
+}
+
+/// Fire an action by `(index, generation)` and propagate its
+/// [`mkui_runtime::RuntimeCtx`] signals to the tree.
+///
+/// Called from button onclick closures that the renderer installs in
+/// [`crate::render`]. Returns `true` if the action fired and produced a
+/// `RequestRedraw`; the caller may use this for diagnostics, though the
+/// dirty flag on the tree is the canonical signal.
+pub fn fire_action_global(index: u32, generation: u32) -> bool {
+    ACTIVE_TREE.with(|cell| {
+        if let Some(tree) = cell.borrow().as_ref() {
+            let id = mkui_runtime::ActionId::from_raw(index, generation);
+            // Fire on an immutable borrow (the registry only needs `&self`),
+            // then re-borrow mutably to propagate the dirty bit if needed.
+            // Splitting the borrows keeps `RefCell` happy without holding a
+            // mutable borrow across `fire`.
+            let mut ctx = tree.borrow().actions().fire(id);
+            if ctx.is_dirty() {
+                tree.borrow_mut().mark_dirty();
+            }
+            // Drain the signal list so a future re-entry doesn't see stale
+            // emissions; today we only ack `RequestRedraw`, but the runtime
+            // is set up for additional signals (text input, focus moves).
+            let requested_redraw = ctx
+                .drain_emitted()
+                .iter()
+                .any(|s| matches!(s, RuntimeSignal::RequestRedraw));
+            return requested_redraw;
+        }
+        false
+    })
+}
 
 /// High-level web app entry point.
-///
-/// `Mkui` holds the component tree plus the [`WebRendererRegistry`] that
-/// turns each component into DOM. The registry starts with renderers for
-/// the built-in `mkui-core` components and can be extended for product
-/// components via [`Mkui::register`] without editing `mkui-web` itself.
 pub struct Mkui {
     app: Rc<RefCell<WebApp>>,
-    children: Vec<Box<dyn Component>>,
+    core: mkui_core::components::Mkui,
     registry: WebRendererRegistry,
 }
 
@@ -25,30 +79,32 @@ impl Mkui {
         let app = Rc::new(RefCell::new(WebApp::new("app")?));
         Ok(Self {
             app,
-            children: Vec::new(),
+            core: mkui_core::components::Mkui::new(),
             registry: WebRendererRegistry::with_defaults(),
         })
     }
 
     pub fn child(mut self, child: impl Component + 'static) -> Self {
-        self.children.push(Box::new(child));
+        self.core = self.core.child(child);
         self
     }
 
-    /// Register a custom component type with the underlying
-    /// [`WebRendererRegistry`]. The type must implement [`WebRenderable`].
-    pub fn register<T: WebRenderable + 'static>(mut self) -> Self {
-        self.registry.register::<T>();
+    /// Register a custom component for the web renderer. The Sprint 4 minimum
+    /// has no built-in custom components; user code may still plug in its
+    /// own via the runtime's `NodeKind::Custom` extension slot.
+    pub fn register<T: crate::render::CustomWebRenderable>(mut self, component: T) -> Self {
+        self.registry.register(component);
         self
     }
 
-    /// Install a deliberate fallback handler invoked when a component
-    /// reaches the renderer without a registered handler. Without a
-    /// fallback, missing handlers panic in debug builds and return a
-    /// `JsValue` error in release.
     pub fn fallback<F>(mut self, f: F) -> Self
     where
-        F: Fn(&dyn Component, &Document, &WebRendererRegistry) -> Result<Element, JsValue>
+        F: Fn(
+                &web_sys::Document,
+                &serde_json::Value,
+                &WebRendererRegistry,
+                &mkui_runtime::AppTree,
+            ) -> Result<web_sys::Element, JsValue>
             + 'static,
     {
         self.registry.set_fallback(f);
@@ -62,141 +118,22 @@ impl Mkui {
         self.app.borrow().mount()?;
 
         let document = crate::utils::document();
+        let (tree, _registry_unused) = self.core.into_parts();
+        let tree_rc = Rc::new(RefCell::new(tree));
+        set_global_tree(Rc::clone(&tree_rc));
 
-        // Create main wrapper
-        let wrapper = document.create_element("div")?;
-        wrapper.set_class_name("min-h-screen flex flex-col bg-background text-foreground");
+        let wrapper = {
+            let tree_ref = tree_rc.borrow();
+            render_tree(
+                &tree_ref,
+                &document,
+                &self.registry,
+                "min-h-screen flex flex-col bg-background text-foreground",
+            )?
+        };
 
-        for child in &self.children {
-            let element = self.registry.render(child.as_ref(), &document)?;
-            wrapper.append_child(&element)?;
-        }
-
-        // Append to app root
         self.app.borrow().renderer().append_child(&wrapper)?;
 
         Ok(())
-    }
-}
-
-/// Theme selector component shipped with mkui-web. Implemented as a
-/// [`WebRenderable`] so it dispatches through the same registry path as
-/// user-defined components.
-pub struct ThemeSelector {
-    app: Rc<RefCell<WebApp>>,
-}
-
-impl ThemeSelector {
-    pub fn new(app: Rc<RefCell<WebApp>>) -> Self {
-        Self { app }
-    }
-}
-
-impl Component for ThemeSelector {}
-
-impl WebRenderable for ThemeSelector {
-    fn render_web(
-        &self,
-        document: &Document,
-        registry: &WebRendererRegistry,
-    ) -> Result<Element, JsValue> {
-        let section = document.create_element("div")?;
-        section.set_class_name("rounded-lg border bg-card text-card-foreground shadow-sm p-6");
-
-        // Header
-        let header = document.create_element("div")?;
-        header.set_class_name("mb-6");
-
-        let title = document.create_element("h2")?;
-        title.set_class_name("text-2xl font-semibold leading-none tracking-tight");
-        title.set_text_content(Some("Theme Customization"));
-        header.append_child(&title)?;
-
-        let desc = document.create_element("p")?;
-        desc.set_class_name("text-sm text-muted-foreground mt-2");
-        desc.set_text_content(Some("Choose your preferred theme mode and color scheme"));
-        header.append_child(&desc)?;
-
-        section.append_child(&header)?;
-
-        // Theme mode section
-        let mode_section = document.create_element("div")?;
-        mode_section.set_class_name("space-y-2 mb-6");
-
-        let mode_label = document.create_element("label")?;
-        mode_label.set_class_name("text-sm font-medium leading-none");
-        mode_label.set_text_content(Some("Theme Mode"));
-        mode_section.append_child(&mode_label)?;
-
-        let mode_container = document.create_element("div")?;
-        mode_container.set_class_name("flex flex-wrap gap-4");
-
-        let create_mode_button = |text: &str, mode: ThemeMode| -> Result<Element, JsValue> {
-            let is_active = self.app.borrow().get_theme_mode() == mode;
-            let variant = if is_active {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            };
-
-            let app_clone = Rc::clone(&self.app);
-            let button = Button::new(text)
-                .variant(variant)
-                .class("h-9 px-4 py-2")
-                .on_press(move || {
-                    let _ = app_clone.borrow_mut().set_theme_mode(mode);
-                    web_sys::window().unwrap().location().reload().ok();
-                });
-
-            registry.render(&button, document)
-        };
-
-        mode_container.append_child(&create_mode_button("Light", ThemeMode::Light)?.into())?;
-        mode_container.append_child(&create_mode_button("Dark", ThemeMode::Dark)?.into())?;
-        mode_container.append_child(&create_mode_button("System", ThemeMode::System)?.into())?;
-        mode_section.append_child(&mode_container)?;
-        section.append_child(&mode_section)?;
-
-        // Color theme section
-        let color_section = document.create_element("div")?;
-        color_section.set_class_name("space-y-2");
-
-        let color_label = document.create_element("label")?;
-        color_label.set_class_name("text-sm font-medium leading-none");
-        color_label.set_text_content(Some("Color Theme"));
-        color_section.append_child(&color_label)?;
-
-        let color_grid = document.create_element("div")?;
-        color_grid.set_class_name("grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4");
-
-        let create_color_button = |theme: ColorTheme| -> Result<Element, JsValue> {
-            let theme_name = format!("{:?}", theme);
-            let is_active = self.app.borrow().get_color_theme() == &theme;
-            let variant = if is_active {
-                ButtonVariant::Primary
-            } else {
-                ButtonVariant::Outline
-            };
-
-            let app_clone = Rc::clone(&self.app);
-            let button = Button::new(&theme_name)
-                .variant(variant)
-                .class("h-6 px-3 py-1 text-xs m-1")
-                .on_press(move || {
-                    let _ = app_clone.borrow_mut().set_color_theme(theme.clone());
-                    web_sys::window().unwrap().location().reload().ok();
-                });
-
-            registry.render(&button, document)
-        };
-
-        for theme in ColorTheme::all() {
-            color_grid.append_child(&create_color_button(theme.clone())?.into())?;
-        }
-
-        color_section.append_child(&color_grid)?;
-        section.append_child(&color_section)?;
-
-        Ok(section)
     }
 }

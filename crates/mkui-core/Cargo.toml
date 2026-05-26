@@ -9,7 +9,15 @@ description = "Shared component, event, state, theme, and layout contracts for m
 [dependencies]
 thiserror = { workspace = true }
 mkui-text = { path = "../mkui-text" }
+mkui-runtime = { path = "../mkui-runtime" }
 serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+# Parity tests need the runtime snapshot feature and serde_json to compare
+# the canonical JSON across construction frontends. Snapshot is opt-in for
+# production builds (see ADR 0005); the dev-dep flips it on for tests.
+mkui-runtime = { path = "../mkui-runtime", features = ["snapshot"] }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

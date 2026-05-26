@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
+mkui-runtime = { path = "../mkui-runtime" }
+serde_json = { workspace = true }
 wasm-bindgen = { workspace = true }
 web-sys = { workspace = true, features = [
     "Document", 

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/mkui-runtime",     # Portable AppTree substrate (Sprint 4)
     "crates/mkui-core",        # Core types, traits, and headless logic
     "crates/mkui-text",        # Text-system trait + from-scratch bitmap prototype
     "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
@@ -52,8 +53,8 @@ pollster = "0.4.0"
 # C/C++ bindings
 libc = "0.2"
 safer-ffi = "0.1"
-cbindgen = "0.26"
+cbindgen = "0.29.2"
 
 # Python bindings
-pyo3 = "0.22"
-pyo3-build-config = "0.22"
+pyo3 = "0.28.3"
+pyo3-build-config = "0.28.3"

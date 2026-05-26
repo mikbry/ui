@@ -1,35 +1,19 @@
-use std::fmt;
+//! Style-class re-exports.
+//!
+//! The canonical `StyleClass` + parser live in `mkui-runtime` (ADR 0005) so
+//! every binding sees the same parse without depending on `mkui-core`. This
+//! module preserves the historical `mkui_core::style::StyleClass` path for
+//! downstream callers while the canonical type itself moved one crate
+//! deeper.
 
-/// Style classes and utilities (Tailwind-like)
-#[derive(Debug, Clone, Default)]
-pub struct StyleClass {
-    classes: Vec<String>,
-}
+pub use mkui_runtime::{ClassParseError, ResolvedStyle, StyleClass};
 
-impl StyleClass {
-    pub fn new() -> Self {
-        Self {
-            classes: Vec::new(),
-        }
-    }
-
-    pub fn push_class(mut self, class: &str) -> Self {
-        self.classes.push(class.to_string());
-        self
-    }
-}
-
-impl fmt::Display for StyleClass {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.classes.join(" "))
-    }
-}
-
-/// Builder pattern for styles
+/// Builder helper retained for source compatibility with v0.4.x callers
+/// that wrote `Style::class("flex")`.
 pub struct Style;
 
 impl Style {
     pub fn class(class: &str) -> StyleClass {
-        StyleClass::new().push_class(class)
+        StyleClass::from_str(class)
     }
 }

@@ -7,5 +7,6 @@ license.workspace = true
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
+mkui-runtime = { path = "../mkui-runtime" }
 crossterm = { workspace = true }
 thiserror = { workspace = true }

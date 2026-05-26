@@ -1,10 +1,12 @@
 # mkui Python Example
 
-This example demonstrates how to use mkui from Python to create cross-platform console applications.
+This example demonstrates how to use mkui from Python to create
+cross-platform console applications using the Sprint 4 handle-based
+runtime API.
 
 ## Prerequisites
 
-- Python 3.8 or higher
+- Python 3.10 or higher (PyO3 0.28.3 requires modern Python)
 - Rust toolchain (for building the bindings)
 - maturin (install with `pip install maturin`)
 
@@ -26,33 +28,44 @@ This example demonstrates how to use mkui from Python to create cross-platform c
 
 ## Features Demonstrated
 
-- **Method chaining API**: Build UIs using fluent interface patterns
-- **Exception handling**: Proper error propagation with Python exceptions  
-- **Button variants**: All 6 button styles (Primary, Secondary, Destructive, Outline, Ghost, Link)
-- **Multiple API styles**: Both method chaining and step-by-step approaches
-- **Showcase integration**: Access to common showcase components
+- **Handle-based nested API**: every constructor takes an explicit parent
+  `NodeId` and returns a child id. No fluent chaining — the tree is
+  explicit and matches the C/Rust APIs byte-for-byte.
+- **Action callbacks**: `app.register_callback(fn)` returns a stable
+  `ActionId`, which `button_child(..., on_press=action)` consumes.
+- **Variant constants**: `BUTTON_PRIMARY`, `TEXT_HEADING_1`, etc.
 
-## API Examples
+## API Example
 
-### Method Chaining (Pythonic)
 ```python
-app = mkui_py.create_app()
-(app.view("flex-1")
-    .text("Hello World!", "text-xl font-bold")
-    .button("Click me", mkui_py.BUTTON_PRIMARY)
-    .run_console())
+import mkui_py
+
+def main():
+    app = mkui_py.App()
+    root = app.root()
+
+    container = app.view_child(root, "flex-1")
+    app.text_child(container, "Hello World!",
+                   mkui_py.TEXT_HEADING_1, "text-xl font-bold")
+
+    on_click = app.register_callback(lambda: print("Clicked"))
+    app.button_child(container, "Click me",
+                     mkui_py.BUTTON_PRIMARY, "", on_click)
+
+    app.run_console()
+
+if __name__ == "__main__":
+    main()
 ```
 
-### Step-by-Step
-```python
-app = mkui_py.App()
-app.add_view("container mx-auto p-4")
-app.add_text("Step-by-step Example", "text-2xl font-bold")
-app.add_button("Click me!", mkui_py.BUTTON_PRIMARY)
-app.run_console()
-```
+The pre-Sprint-4 fluent `app.view(...).text(...).button(...)` shape was
+removed when the runtime substrate landed (#51) — the new handle-based
+shape matches every other binding (`mkui_app_view_child` in C,
+`viewChild` in C++).
 
-### Showcase
-```python
-mkui_py.run_showcase()  # Runs the common showcase
-```
+## CI status
+
+`mkui-py` is currently excluded from CI build/test jobs while the PyO3
+0.28.3 + Python 3.14 link path on the CI image is sorted out (tracked
+as a Sprint 5 follow-up). Local development with `maturin develop` works
+on Python 3.10+ Linux/macOS hosts.
