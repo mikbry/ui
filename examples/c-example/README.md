@@ -77,21 +77,27 @@ void check_result(MkuiResult result, const char* operation) {
 }
 ```
 
-### Component Creation
+### Component Creation (Sprint 4 handle-based API)
+
+The pre-Sprint-4 flat `mkui_app_add_*` shape (returning `MkuiResult` with no
+nesting) was replaced by the nested handle API: every constructor takes a
+parent `MkuiNodeId` and returns the new child's id. See `main.c` for the
+full example.
 
 ```c
-// Add a view (container/layout)
-result = mkui_app_add_view(app, "flex-1 container mx-auto");
-check_result(result, "adding main container");
+MkuiNodeId root = mkui_app_root(app);
+MkuiNodeId container = mkui_app_view_child(app, root, "flex-1 container mx-auto");
+mkui_app_text_child(app, container, "Hello, World!",
+                    MKUI_TEXT_HEADING_1, "text-xl font-bold");
 
-// Add text content
-result = mkui_app_add_text(app, "Hello, World!", "text-xl font-bold");
-check_result(result, "adding title text");
-
-// Add interactive button
-result = mkui_app_add_button(app, "Click me!", "", MKUI_BUTTON_PRIMARY);
-check_result(result, "adding primary button");
+MkuiActionId on_click = mkui_app_register_callback(app, &on_button_press, NULL);
+mkui_app_button_child(app, container, "Click me!", MKUI_BUTTON_PRIMARY, "", on_click);
 ```
+
+The returned `MkuiNodeId` carries an `(index, generation)` pair — passing a
+stale or fabricated handle to a later `*_child` call returns
+`MkuiNodeId{UINT32_MAX, UINT32_MAX}` (the `invalid_node` sentinel) instead
+of aborting across the FFI boundary.
 
 ### Resource Management
 

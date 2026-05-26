@@ -49,12 +49,12 @@ fn main() -> Result<(), MkuiError> {
 int main() {
     try {
         auto app = mkui::createApp();
-        
-        app->addView("flex-1 items-center justify-center")
-           .addText("Hello World!", "text-xl font-bold")
-           .addButton("Press me", mkui::ButtonVariant::Primary)
-           .runConsole();
-           
+        auto root = app->root();
+        auto container = app->viewChild(root, "flex-1 items-center justify-center");
+        app->textChild(container, "Hello World!",
+                       mkui::TextVariant::Heading1, "text-xl font-bold");
+        app->buttonChild(container, "Press me", mkui::ButtonVariant::Primary);
+        app->runConsole();
     } catch (const mkui::MkuiException& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
@@ -71,14 +71,18 @@ int main() {
 int main() {
     MkuiApp* app = mkui_app_new();
     if (!app) return 1;
-    
-    mkui_app_add_view(app, "flex-1 items-center justify-center");
-    mkui_app_add_text(app, "Hello World!", "text-xl font-bold");
-    mkui_app_add_button(app, "Press me", "", MKUI_BUTTON_PRIMARY);
-    
+
+    MkuiNodeId root = mkui_app_root(app);
+    MkuiNodeId container = mkui_app_view_child(app, root,
+                                               "flex-1 items-center justify-center");
+    mkui_app_text_child(app, container, "Hello World!",
+                        MKUI_TEXT_HEADING_1, "text-xl font-bold");
+    mkui_app_button_child(app, container, "Press me", MKUI_BUTTON_PRIMARY, "",
+                          (MkuiActionId){UINT32_MAX, UINT32_MAX});
+
     MkuiResult result = mkui_app_run_console(app);
     mkui_app_free(app);
-    
+
     return result.code == MKUI_SUCCESS ? 0 : 1;
 }
 ```
@@ -90,15 +94,13 @@ import mkui_py
 
 def main():
     try:
-        # Create application using the high-level API
-        app = mkui_py.create_app()
-        
-        # Build UI using method chaining
-        (app.view("flex-1 items-center justify-center")
-            .text("Hello World!", "text-xl font-bold")
-            .button("Press me", mkui_py.BUTTON_PRIMARY)
-            .run_console())
-            
+        app = mkui_py.App()
+        root = app.root()
+        container = app.view_child(root, "flex-1 items-center justify-center")
+        app.text_child(container, "Hello World!",
+                       mkui_py.TEXT_HEADING_1, "text-xl font-bold")
+        app.button_child(container, "Press me", mkui_py.BUTTON_PRIMARY)
+        app.run_console()
     except Exception as e:
         print(f"Error: {e}")
         return 1
@@ -155,8 +157,9 @@ Backend-specific code never leaks into the contract.
 | `mkui-native` | Scene-walker contract for native backends — collects `mkui-core` component trees into draw records that `mkui-wgpu` can render. | Experimental                                                  |
 | `mkui`        | Bridge crate. Re-exports the backend chosen by Cargo features and presents a single `Mkui` entry point.                         | Stable                                                        |
 | `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
-| `mkui-c`      | C/C++ FFI bindings over the `mkui` bridge.                                                                                      | Experimental — known soundness issues, deferred to Sprint 4   |
-| `mkui-py`     | Python bindings via PyO3.                                                                                                       | ⚠ Broken on Python 3.14 (see [#5](https://github.com/mikbry/ui/issues/5)) — use Python 3.13 if needed |
+| `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |
+| `mkui-c`      | C/C++ FFI bindings — handle-based nested API over `mkui-runtime`'s `AppTree`. CI builds + clippy gates active.                  | Stable (Sprint 4)                                             |
+| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API.                                                                       | CI re-entry deferred to Sprint 5 (link-time Python 3.14 + maturin wiring on the CI image) |
 
 ### What lives in `mkui-core`
 
@@ -216,10 +219,10 @@ one-sentence summaries.
 * **Mobile**: iOS, iPadOS, Android 🚧 (planned)
 
 ### Language Support
-* **Rust**: Native support with full API ✅
-* **C**: FFI bindings — experimental, known soundness issues deferred to Sprint 4
-* **C++**: Modern C++17 wrapper with RAII and exceptions — same caveat as `mkui-c`
-* **Python**: PyO3 bindings ⚠ broken on Python 3.14 (see [#5](https://github.com/mikbry/ui/issues/5)); use Python 3.13 if `mkui-py` is required
+* **Rust**: Native support with full ergonomic API ✅
+* **C**: FFI bindings — handle-based nested API on the `mkui-runtime` substrate; CI build + clippy gates active ✅
+* **C++**: Modern C++17 wrapper (RAII + exceptions) over the C handle API ✅
+* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; CI re-entry tracking in Sprint 5
 * **JavaScript/TypeScript**: WASM bindings 🚧 (planned)
 
 ---
@@ -245,10 +248,13 @@ return app.exec();
 int main() {
     try {
         auto app = mkui::createApp();
-        app->addButton("Click me", mkui::ButtonVariant::Primary, "px-4 py-2 rounded-lg")
-           .runConsole();
+        auto on_click = app->registerCallback([]() { std::cout << "Clicked!\n"; });
+        app->buttonChild(app->root(), "Click me",
+                         mkui::ButtonVariant::Primary, "px-4 py-2 rounded-lg",
+                         on_click);
+        app->runConsole();
     } catch (const mkui::MkuiException& e) {
-        std::cout << "Clicked!\n";
+        std::cerr << e.what() << "\n";
     }
 }
 ```

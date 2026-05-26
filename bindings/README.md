@@ -29,11 +29,11 @@ bindings/
 int main() {
     try {
         auto app = mkui::createApp();
-        
-        app->addView("container")
-           .addText("Hello, World!", "text-xl font-bold")
-           .addButton("Click me!", mkui::ButtonVariant::Primary);
-           
+        auto root = app->root();
+        auto container = app->viewChild(root, "container");
+        app->textChild(container, "Hello, World!",
+                       mkui::TextVariant::Heading1, "text-xl font-bold");
+        app->buttonChild(container, "Click me!", mkui::ButtonVariant::Primary);
         app->runConsole();
     } catch (const mkui::MkuiException& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -51,15 +51,17 @@ int main() {
 int main() {
     MkuiApp* app = mkui_app_new();
     if (!app) return 1;
-    
-    mkui_app_add_view(app, "container");
-    mkui_app_add_text(app, "Hello, World!", "text-xl font-bold");
-    mkui_app_add_button(app, "Click me!", "", MKUI_BUTTON_PRIMARY);
-    
+
+    MkuiNodeId root = mkui_app_root(app);
+    MkuiNodeId container = mkui_app_view_child(app, root, "container");
+    mkui_app_text_child(app, container, "Hello, World!",
+                        MKUI_TEXT_HEADING_1, "text-xl font-bold");
+    mkui_app_button_child(app, container, "Click me!", MKUI_BUTTON_PRIMARY, "",
+                          (MkuiActionId){UINT32_MAX, UINT32_MAX});
+
     MkuiResult result = mkui_app_run_console(app);
     mkui_app_free(app);
-    
-    return result.code == 0 ? 0 : 1;
+    return result.code == MKUI_SUCCESS ? 0 : 1;
 }
 ```
 
@@ -102,40 +104,49 @@ int main() {
 
 #### Methods
 
-- **`App::addView(className)`**: Add a container/layout view
-- **`App::addText(content, className)`**: Add text content
-- **`App::addButton(text, variant, className)`**: Add interactive button
-- **`App::runConsole()`**: Start the console application
+- **`App::root()`**: Return the runtime tree's root `NodeId`.
+- **`App::viewChild(parent, className)`**: Append a view under `parent`.
+- **`App::textChild(parent, content, variant, className)`**: Append text.
+- **`App::buttonChild(parent, label, variant, className, onPress)`**: Append button. Pass `mkui::kNoAction` for no callback.
+- **`App::registerCallback(callable)`**: Register a `std::function<void()>` and get an `MkuiActionId`.
+- **`App::runConsole()`**: Start the real interactive console backend (Sprint 4 restored — pre-Sprint-4 round-7 shipped a stub).
+- **`App::snapshotJson()`**: Canonical JSON snapshot of the tree (parity test fixture).
 
 #### Enums
 
-- **`mkui::ButtonVariant`**: Primary, Secondary, Destructive, Outline, Ghost, Link
+- **`mkui::ButtonVariant`**: Primary, Secondary, Destructive, Outline, Ghost, Link.
+- **`mkui::TextVariant`**: Body, Heading1, Heading2, Heading3, Caption, Label, Code.
 
 ### C API (mkui_c.h)
 
 #### Types
 
-- **`MkuiApp*`**: Opaque application handle
-- **`MkuiResult`**: Operation result with error code and message
-- **`MkuiErrorCode`**: Error code enumeration
+- **`MkuiApp*`**: Opaque application handle.
+- **`MkuiNodeId`**: `(index, generation)` pair identifying a node — generation guards against use-after-free.
+- **`MkuiActionId`**: Same shape, separate arena, identifies an action callback.
+- **`MkuiResult`**: Operation result with `MkuiErrorCode` + message string.
 
 #### Functions
 
-- **`mkui_app_new()`**: Create new application
-- **`mkui_app_free(app)`**: Free application resources
-- **`mkui_app_add_view(app, class_name)`**: Add view component
-- **`mkui_app_add_text(app, content, class_name)`**: Add text component
-- **`mkui_app_add_button(app, text, class_name, variant)`**: Add button component
-- **`mkui_app_run_console(app)`**: Run console application
+- **`mkui_app_new()`** / **`mkui_app_free(app)`**: Lifecycle.
+- **`mkui_app_root(app)`**: Return root `NodeId`.
+- **`mkui_app_view_child(app, parent, class_name)`**: Append view under `parent`.
+- **`mkui_app_text_child(app, parent, content, variant, class_name)`**: Append text.
+- **`mkui_app_button_child(app, parent, label, variant, class_name, on_press)`**: Append button.
+- **`mkui_app_register_callback(app, fn, user_data)`**: Register C callback, returns `MkuiActionId`.
+- **`mkui_app_run_console(app)`**: Run the real interactive console backend.
+- **`mkui_app_snapshot_json(app)`**: Allocates a JSON snapshot string (host frees with `mkui_free_error_message`).
 
 ## Styling
 
 Both C and C++ APIs support CSS-like class names for styling:
 
 ```cpp
-app->addText("Title", "text-4xl font-bold text-center")
-   .addView("flex items-center justify-between")
-   .addButton("Submit", mkui::ButtonVariant::Primary, "px-4 py-2");
+auto root = app->root();
+auto row = app->viewChild(root, "flex items-center justify-between");
+app->textChild(row, "Title", mkui::TextVariant::Heading1,
+               "text-4xl font-bold text-center");
+app->buttonChild(row, "Submit", mkui::ButtonVariant::Primary, "px-4 py-2");
 ```
 
 Common classes:

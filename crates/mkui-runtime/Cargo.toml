@@ -1,0 +1,20 @@
+[package]
+name = "mkui-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable application-tree substrate for mkui (AppTree, NodeId, ActionId, class parser, JSON snapshots). The contract-implementation layer beneath every mkui binding."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+# Enables canonical JSON snapshots of an AppTree via `mkui_runtime::snapshot`.
+# Gated behind a feature so production builds don't ship the serde derive
+# overhead unless they need it (parity tests + diagnostics turn it on).
+snapshot = []

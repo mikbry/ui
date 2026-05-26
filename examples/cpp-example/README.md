@@ -87,23 +87,28 @@ try {
 }
 ```
 
-### Method Chaining
+### Handle-based nested construction (Sprint 4)
 
 ```cpp
-app->addView("flex-1")
-   .addView("container mx-auto px-4")
-   .addText("Welcome!", "text-2xl font-bold")
-   .addButton("Get Started", mkui::ButtonVariant::Primary)
-   .addButton("Learn More", mkui::ButtonVariant::Secondary);
+auto root = app->root();
+auto container = app->viewChild(root, "container mx-auto px-4");
+app->textChild(container, "Welcome!", mkui::TextVariant::Heading1,
+               "text-2xl font-bold");
+app->buttonChild(container, "Get Started", mkui::ButtonVariant::Primary);
+app->buttonChild(container, "Learn More", mkui::ButtonVariant::Secondary);
 ```
+
+Each child constructor takes an explicit parent `NodeId` and returns the
+new child's id. The pre-Sprint-4 fluent `app->addView(...).addText(...)`
+chaining is gone — see `main.cpp` for the canonical handle-based shape.
 
 ### Type-Safe Enums
 
 ```cpp
-// Strongly typed enum class prevents invalid values
-app->addButton("Submit", mkui::ButtonVariant::Primary)
-   .addButton("Cancel", mkui::ButtonVariant::Secondary)
-   .addButton("Delete", mkui::ButtonVariant::Destructive);
+auto row = app->viewChild(app->root(), "flex gap-2");
+app->buttonChild(row, "Submit", mkui::ButtonVariant::Primary);
+app->buttonChild(row, "Cancel", mkui::ButtonVariant::Secondary);
+app->buttonChild(row, "Delete", mkui::ButtonVariant::Destructive);
 ```
 
 ## API Reference
@@ -112,36 +117,24 @@ app->addButton("Submit", mkui::ButtonVariant::Primary)
 
 #### `mkui::App`
 
-The main application class with RAII semantics.
+RAII wrapper around `MkuiApp*`.
 
 **Methods:**
-- `addView(className = "")` - Add container/layout view
-- `addText(content, className = "")` - Add text content  
-- `addButton(text, variant = Primary, className = "")` - Add button
-- `runConsole()` - Start console application
-- `static version()` - Get library version
+- `root()` — root `NodeId`
+- `viewChild(parent, className)` — append view
+- `textChild(parent, content, variant, className)` — append text
+- `buttonChild(parent, label, variant, className, onPress)` — append button (pass `mkui::kNoAction` for no callback)
+- `registerCallback(std::function<void()>)` — register callable, returns `MkuiActionId`
+- `runConsole()` — run real interactive console backend
+- `snapshotJson()` — canonical JSON snapshot of the tree
+- `static version()` — library version
 
-**Static Functions:**
-- `mkui::createApp()` - Create new application (returns `std::unique_ptr<App>`)
-
-#### `mkui::MkuiException`
-
-Exception class for error handling.
-
-**Methods:**
-- `what()` - Get error message
-- `code()` - Get error code
+#### `mkui::MkuiException` (`what()`, `code()`) — exception type.
 
 ### Enums
 
-#### `mkui::ButtonVariant`
-
-- `Primary` - Primary action button
-- `Secondary` - Secondary action button
-- `Destructive` - Destructive action (delete, etc.)
-- `Outline` - Outlined button
-- `Ghost` - Minimal ghost button
-- `Link` - Link-style button
+#### `mkui::ButtonVariant` — Primary / Secondary / Destructive / Outline / Ghost / Link.
+#### `mkui::TextVariant` — Body / Heading1 / Heading2 / Heading3 / Caption / Label / Code.
 
 ## Example Usage Patterns
 
@@ -153,10 +146,10 @@ Exception class for error handling.
 int main() {
     try {
         auto app = mkui::createApp();
-        
-        app->addText("Hello, World!", "text-xl")
-           .addButton("OK", mkui::ButtonVariant::Primary);
-           
+        auto root = app->root();
+        app->textChild(root, "Hello, World!",
+                       mkui::TextVariant::Heading1, "text-xl");
+        app->buttonChild(root, "OK", mkui::ButtonVariant::Primary);
         app->runConsole();
     } catch (const mkui::MkuiException& e) {
         std::cerr << "Error: " << e.what() << std::endl;
@@ -170,29 +163,24 @@ int main() {
 
 ```cpp
 auto app = mkui::createApp();
+auto root = app->root();
 
-app->addView("min-h-screen flex flex-col")
-   // Header
-   .addView("bg-header border-b")
-   .addView("container mx-auto px-4 py-2")
-   .addText("My Application", "text-2xl font-bold")
-   
-   // Main content
-   .addView("flex-1 container mx-auto px-4 py-8")
-   .addView("max-w-4xl mx-auto space-y-8")
-   
-   // Content sections
-   .addText("Welcome to mkui!", "text-4xl font-bold text-center")
-   .addText("Cross-platform UI library", "text-xl text-gray-600 text-center")
-   
-   // Actions
-   .addView("flex gap-4 justify-center")
-   .addButton("Get Started", mkui::ButtonVariant::Primary)
-   .addButton("Documentation", mkui::ButtonVariant::Outline)
-   
-   // Footer
-   .addView("border-t bg-gray-50 py-4")
-   .addText("© 2024 mkui", "text-center text-gray-500");
+auto page = app->viewChild(root, "min-h-screen flex flex-col");
+
+auto header = app->viewChild(page, "border-b");
+app->textChild(header, "My Application", mkui::TextVariant::Heading1,
+               "text-2xl font-bold");
+
+auto content = app->viewChild(page, "flex-1 container mx-auto px-4 py-8");
+app->textChild(content, "Welcome to mkui!", mkui::TextVariant::Heading1,
+               "text-4xl font-bold text-center");
+app->textChild(content, "Cross-platform UI library",
+               mkui::TextVariant::Caption,
+               "text-xl text-muted-foreground text-center");
+
+auto actions = app->viewChild(content, "flex gap-4 justify-center");
+app->buttonChild(actions, "Get Started", mkui::ButtonVariant::Primary);
+app->buttonChild(actions, "Documentation", mkui::ButtonVariant::Outline);
 ```
 
 ## CSS Styling
@@ -201,23 +189,25 @@ The C++ API supports the same Tailwind-style classes as other mkui implementatio
 
 ### Layout Classes
 ```cpp
-.addView("flex flex-col items-center justify-center")
-.addView("grid grid-cols-2 gap-4")
-.addView("container mx-auto max-w-4xl")
+app->viewChild(parent, "flex flex-col items-center justify-center");
+app->viewChild(parent, "container mx-auto max-w-4xl");
 ```
 
 ### Typography Classes
 ```cpp
-.addText("Title", "text-4xl font-bold")
-.addText("Subtitle", "text-xl font-medium text-gray-600")
-.addText("Body", "text-base leading-relaxed")
+app->textChild(parent, "Title", mkui::TextVariant::Heading1,
+               "text-4xl font-bold");
+app->textChild(parent, "Subtitle", mkui::TextVariant::Caption,
+               "text-xl text-muted-foreground");
+app->textChild(parent, "Body", mkui::TextVariant::Body,
+               "text-base leading-none");
 ```
 
 ### Spacing Classes
 ```cpp
-.addView("p-4 m-2")           // padding and margin
-.addView("px-8 py-4")         // horizontal/vertical padding
-.addView("space-y-6")         // vertical spacing between children
+app->viewChild(parent, "p-6 mb-4");      // padding + bottom margin
+app->viewChild(parent, "px-4 py-6");     // horizontal + vertical padding
+app->viewChild(parent, "space-y-8");     // vertical gap between children
 ```
 
 ## Running

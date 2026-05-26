@@ -2,6 +2,12 @@ use super::traits::{Focusable, HeadlessComponent, KeyboardInteractable};
 use crate::event::Event;
 use crate::state::State;
 
+// `ButtonVariant` lives in `mkui-runtime` so every binding sees the same
+// enum without going through `mkui-core`. The re-export below keeps the
+// historical `mkui_core::headless::ButtonVariant` path stable for the
+// showcase + the headless builders.
+pub use mkui_runtime::ButtonVariant;
+
 /// State for a button component
 #[derive(Debug, Clone, Default)]
 pub struct ButtonState {
@@ -26,18 +32,6 @@ pub enum ButtonEvent {
 }
 
 impl Event for ButtonEvent {}
-
-/// Button variants for styling
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum ButtonVariant {
-    Primary,
-    Secondary,
-    Destructive,
-    Outline,
-    Ghost,
-    Link,
-}
 
 /// Button sizes
 #[derive(Debug, Clone, PartialEq)]

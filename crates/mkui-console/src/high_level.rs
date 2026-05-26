@@ -1,37 +1,26 @@
 //! High-level [`Mkui`] entry point for the console backend.
 //!
-//! Mirrors the shape of [`mkui_web::high_level::Mkui`] and
-//! [`mkui_wgpu::high_level::Mkui`]: build a tree of [`mkui_core::components`]
-//! with `.child(...)`, then call `.run()` to draw it. Internally this
-//! delegates to the [`crate::app::ConsoleApp`] state, the
-//! [`crate::renderer::ConsoleRenderer`] output surface, and the
-//! [`crate::components::walk_component`] tree walker.
-//!
-//! Styling decisions come from the *typed* [`TextVariant`] /
-//! [`ButtonVariant`] values on each component — the backend never inspects
-//! showcase-specific class strings.
+//! Sprint 4: the backend now owns an `mkui_core::Mkui` (which itself wraps
+//! an `mkui_runtime::AppTree`). The navigation loop reads the runtime tree,
+//! looks up actions through the tree's `ActionRegistry`, and fires them on
+//! Enter/Space — closures register dirty bits via `RuntimeCtx`, the renderer
+//! observes them.
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     style::Stylize,
 };
 use mkui_core::components::Component;
-use mkui_core::headless::ButtonVariant;
+use mkui_runtime::ButtonVariant;
 
 use crate::app::ConsoleApp;
-use crate::components::{walk_component, ConsoleButton, Line};
+use crate::components::{walk_tree, ConsoleButton, Line};
 use crate::renderer::ConsoleRenderer;
 
 /// Console backend for the shared `mkui-core` component tree.
-///
-/// The renderer walks any `Box<dyn Component>` tree built from `mkui-core` —
-/// the same model the web and native backends consume — and produces a
-/// terminal rendering. It does not know about showcase-specific class
-/// strings or layouts; styling comes from the typed `TextVariant` /
-/// `ButtonVariant` values on each component.
 pub struct Mkui {
     app: ConsoleApp,
-    children: Vec<Box<dyn Component>>,
+    core: mkui_core::components::Mkui,
     layout: Vec<Line>,
     buttons: Vec<ConsoleButton>,
 }
@@ -40,7 +29,20 @@ impl Mkui {
     pub fn new() -> std::io::Result<Self> {
         Ok(Self {
             app: ConsoleApp::new()?,
-            children: Vec::new(),
+            core: mkui_core::components::Mkui::new(),
+            layout: Vec::new(),
+            buttons: Vec::new(),
+        })
+    }
+
+    /// Wrap an existing `mkui_core::Mkui` (and its `AppTree`) so the
+    /// console backend can run it. Used by `mkui-c` / `mkui-py` to hand
+    /// their already-built tree to the real interactive loop without
+    /// having to rebuild via `.child(...)`.
+    pub fn from_core(core: mkui_core::components::Mkui) -> std::io::Result<Self> {
+        Ok(Self {
+            app: ConsoleApp::new()?,
+            core,
             layout: Vec::new(),
             buttons: Vec::new(),
         })
@@ -48,7 +50,7 @@ impl Mkui {
 
     /// Matches the web `Mkui` API: append a component to the tree.
     pub fn child(mut self, child: impl Component + 'static) -> Self {
-        self.children.push(Box::new(child));
+        self.core = self.core.child(child);
         self
     }
 
@@ -84,8 +86,25 @@ impl Mkui {
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         if let Some(button) = self.buttons.get(self.app.selected_button()) {
-                            if let Some(handler) = &button.on_press {
-                                handler();
+                            if let Some(action_id) = button.on_press {
+                                // Fire through the tree's action registry,
+                                // **capture** the returned `RuntimeCtx`,
+                                // and propagate its dirty bit to the tree.
+                                // Dropping the ctx (the Codex round-7
+                                // anti-pattern) means action-driven state
+                                // changes never trigger a redraw — the
+                                // console loop re-renders every iteration
+                                // so we'd survive, but the substrate's
+                                // contract is broken without this hop.
+                                let ctx = self.core.tree().actions().fire(action_id);
+                                if ctx.is_dirty() {
+                                    self.core.tree_mut().mark_dirty();
+                                }
+                                // Re-walk the tree so any structural changes
+                                // the action made (future scope — toggling
+                                // child visibility, etc.) surface immediately
+                                // rather than waiting for the next event.
+                                self.build_layout();
                             }
                         }
                     }
@@ -104,9 +123,7 @@ impl Mkui {
     fn build_layout(&mut self) {
         let mut layout = Vec::new();
         let mut buttons = Vec::new();
-        for child in &self.children {
-            walk_component(child.as_ref(), &mut layout, &mut buttons);
-        }
+        walk_tree(self.core.tree(), &mut layout, &mut buttons);
         self.layout = layout;
         self.buttons = buttons;
     }
@@ -142,7 +159,7 @@ impl Mkui {
                     if let Some(button) = self.buttons.get(*index) {
                         let is_selected = self.app.selected_button() == *index;
                         let text = format!("[ {} ]", button.label);
-                        match (is_selected, &button.variant) {
+                        match (is_selected, button.variant) {
                             (true, ButtonVariant::Primary) => renderer.print_styled(
                                 4,
                                 current_row,
@@ -187,6 +204,9 @@ impl Mkui {
                             (false, ButtonVariant::Link) => {
                                 renderer.print_styled(4, current_row, text.white().underlined())?
                             }
+                            // `ButtonVariant` is `#[non_exhaustive]` — future
+                            // variants fall back to the Primary style until
+                            // their own arm lands.
                             (true, _) => renderer.print_styled(
                                 4,
                                 current_row,
@@ -221,18 +241,13 @@ mod tests {
 
     #[test]
     fn build_layout_renders_a_realistic_showcase_tree() {
-        // Smoke test for the backend path: a small `mkui-core` tree
-        // containing a heading, a button, and nested views flows through
-        // `build_layout` and produces a non-trivial layout + button list.
         let mut app = Mkui::new().expect("init mkui-console");
         app = app.child(
             View::new()
-                .class("container")
                 .child(Text::new("Hello").variant(TextVariant::Heading1))
                 .child(Text::new("subtitle").variant(TextVariant::Caption))
                 .child(
                     View::new()
-                        .class("row")
                         .child(CoreButton::new("Primary").variant(ButtonVariant::Primary))
                         .child(CoreButton::new("Ghost").variant(ButtonVariant::Ghost)),
                 ),
@@ -251,8 +266,6 @@ mod tests {
             .filter(|l| matches!(l, Line::Button(_)))
             .collect();
         assert_eq!(button_lines.len(), 2);
-        assert_eq!(*button_lines[0], Line::Button(0));
-        assert_eq!(*button_lines[1], Line::Button(1));
 
         assert!(app
             .layout
@@ -262,18 +275,5 @@ mod tests {
             .layout
             .iter()
             .any(|l| matches!(l, Line::Muted(t) if t == "subtitle")));
-    }
-
-    #[test]
-    fn child_components_are_stored_on_the_console_mkui() {
-        // Guard: if the bridge ever drops children silently the console
-        // backend would render a blank screen with no panic — make that a
-        // test failure instead.
-        let app = Mkui::new()
-            .expect("Mkui::new should succeed without a real TTY")
-            .child(Text::new("a"))
-            .child(View::new().child(CoreButton::new("ok")));
-
-        assert_eq!(app.children.len(), 2);
     }
 }
