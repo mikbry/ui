@@ -9,72 +9,122 @@
 //! renderer trait stays in `mkui-wgpu`, not in `mkui-runtime` or
 //! `mkui-core`).
 //!
-//! ## Adding a custom component
+//! ## Trait shape (Codex round-10 §"Concrete Shape")
 //!
 //! ```ignore
-//! use mkui_wgpu::bridge::{CustomWgpuRenderable, WgpuRendererRegistry, WalkContext};
-//! use mkui_runtime::AppTree;
-//!
-//! struct Card;
-//! impl CustomWgpuRenderable for Card {
-//!     fn type_name(&self) -> &str { "card" }
-//!     fn render_custom(
+//! pub trait WgpuRenderable: 'static {
+//!     fn type_name(&self) -> &str;
+//!     fn render(
 //!         &self,
+//!         node: &mkui_runtime::Node,
 //!         props: &serde_json::Value,
-//!         ctx: &mut WalkContext<'_>,
-//!         _registry: &WgpuRendererRegistry,
-//!         _tree: &AppTree,
-//!     ) {
-//!         // Emit primitives into ctx.scene at ctx.cursor; push hit entries
-//!         // into ctx.hit_entries for any interactive sub-rects.
-//!     }
+//!         ctx: &mut WgpuRenderCtx<'_>,
+//!     ) -> Result<WgpuRenderOutcome, MkuiError>;
 //! }
 //! ```
+//!
+//! Returning `WgpuRenderOutcome::RecurseChildren` tells the walker to
+//! continue into the node's children after the custom render returns
+//! (the layout convention for transparent container-style extensions);
+//! `WgpuRenderOutcome::ChildrenHandled` tells it to skip — the renderer
+//! either consumed the children itself or chose not to walk them.
 
 use std::collections::HashMap;
 
-use mkui_runtime::AppTree;
+use mkui_core::error::MkuiError;
+use mkui_runtime::{AppTree, Node};
 
-use crate::walker::WalkContext;
+use crate::theme::HudTheme;
+use crate::types::Scene;
+use crate::walker::HitTestEntry;
 
-/// Backend-specific render trait for [`mkui_runtime::NodeKind::Custom`] node
-/// types on the wgpu backend.
+/// Per-render outcome returned by a [`WgpuRenderable`]. The walker uses
+/// it to decide whether to recurse into the node's children after the
+/// custom render returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum WgpuRenderOutcome {
+    /// The renderer emitted its own primitives; the walker should
+    /// continue into the node's children to render them too. Use this
+    /// for transparent containers (e.g. a `Card` extension that just
+    /// adds a background quad).
+    RecurseChildren,
+    /// The renderer emitted everything it wanted from the node and its
+    /// children. The walker skips children. Use this for atoms that
+    /// have no children (Badge, Dot) or for extensions that walked
+    /// their own children directly via [`WgpuRenderCtx::tree`].
+    ChildrenHandled,
+}
+
+/// Backend-specific render trait for [`mkui_runtime::NodeKind::Custom`]
+/// node types on the wgpu backend.
 ///
 /// Built-in `View` / `Text` / `Button` rendering is hard-wired inside
 /// [`crate::walker`]; only extension types go through this trait. The
-/// callback receives a [`WalkContext`] so the custom renderer can push
-/// primitives + hit entries through the same allocator the built-ins use
-/// (per ADR 0006 — no per-frame Vec allocations from extension code).
-pub trait CustomWgpuRenderable: 'static {
+/// callback receives a [`WgpuRenderCtx`] so the custom renderer can
+/// push primitives + hit entries through the same buffers the built-ins
+/// use (per ADR 0006 — no per-frame Vec allocations from extension
+/// code).
+pub trait WgpuRenderable: 'static {
     /// `type_name` the registry keys this renderer by. Must match the
     /// `type_name` field stored on the [`mkui_runtime::NodeKind::Custom`]
     /// nodes the binding produces.
     fn type_name(&self) -> &str;
 
-    /// Render `props` into `ctx`. The callback may consult the full
-    /// `tree` for hierarchical lookups and the `registry` if it wants
-    /// to recursively dispatch to other custom components.
-    fn render_custom(
+    /// Render `node`'s `props` into `ctx`. The callback may consult the
+    /// full `ctx.tree` for hierarchical lookups and the `ctx.registry`
+    /// if it wants to recursively dispatch to other custom components.
+    ///
+    /// Return [`WgpuRenderOutcome::RecurseChildren`] to ask the walker
+    /// to continue into the node's children afterwards;
+    /// [`WgpuRenderOutcome::ChildrenHandled`] to skip them.
+    fn render(
         &self,
+        node: &Node,
         props: &serde_json::Value,
-        ctx: &mut WalkContext<'_>,
-        registry: &WgpuRendererRegistry,
-        tree: &AppTree,
-    );
+        ctx: &mut WgpuRenderCtx<'_>,
+    ) -> Result<WgpuRenderOutcome, MkuiError>;
 }
 
-type CustomRenderFn =
-    Box<dyn Fn(&serde_json::Value, &mut WalkContext<'_>, &WgpuRendererRegistry, &AppTree)>;
-
-/// Registry of custom-component handlers keyed by `type_name`.
+/// Render context handed to a [`WgpuRenderable`]. Carries the buffers
+/// the renderer mutates (`scene`, `hits`) plus the immutable read-only
+/// state it consults (`tree`, `registry`, `theme`).
 ///
-/// Built-in node kinds bypass this registry; only `NodeKind::Custom` nodes
-/// look up their renderer here. Unknown types either hit the configured
-/// fallback or are silently skipped (debug-asserted so tests catch the
-/// missing registration).
+/// Layout-pass state (`cursor_y`, `content_x`, `viewport_width`) is
+/// exposed so extension renderers can position primitives against the
+/// walker's current flow. The round-10 §"Concrete Shape" sketch
+/// specified the five core fields (`tree`, `registry`, `scene`, `theme`,
+/// `hits`); the layout-state fields are documented walker extensions
+/// the bridge needs for atoms that participate in vertical flow.
+pub struct WgpuRenderCtx<'a> {
+    pub tree: &'a AppTree,
+    pub registry: &'a WgpuRendererRegistry,
+    pub scene: &'a mut Scene,
+    pub theme: &'a HudTheme,
+    pub hits: &'a mut Vec<HitTestEntry>,
+    /// Viewport width in logical pixels — extension renderers can use
+    /// this to size full-width primitives.
+    pub viewport_width: f32,
+    /// Next y-coordinate the walker will emit at. Custom renderers may
+    /// update this after they emit so the next sibling stacks
+    /// underneath.
+    pub cursor_y: f32,
+    /// Left content edge (after any ancestor's left padding has been
+    /// applied).
+    pub content_x: f32,
+}
+
+/// Registry of custom-component handlers keyed by `type_name`. Built-in
+/// node kinds bypass this registry; only `NodeKind::Custom` nodes look
+/// up their renderer here.
+///
+/// `custom` holds `Box<dyn WgpuRenderable>` per the round-10 sketch.
+/// `fallback` is also a `Box<dyn WgpuRenderable>` — its `type_name`
+/// return value is ignored when invoked as a fallback (the registry
+/// dispatches the lookup-missed `type_name` to it directly).
 pub struct WgpuRendererRegistry {
-    custom: HashMap<String, CustomRenderFn>,
-    fallback: Option<CustomRenderFn>,
+    custom: HashMap<String, Box<dyn WgpuRenderable>>,
+    fallback: Option<Box<dyn WgpuRenderable>>,
 }
 
 impl WgpuRendererRegistry {
@@ -96,30 +146,25 @@ impl WgpuRendererRegistry {
     /// Button) register at app construction.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
-        registry.register(crate::bridge::builtins::BadgeRenderer);
-        registry.register(crate::bridge::builtins::DotRenderer);
+        registry.register(builtins::BadgeRenderer);
+        registry.register(builtins::DotRenderer);
         registry
     }
 
-    /// Register a custom renderable.
-    pub fn register<T: CustomWgpuRenderable>(&mut self, component: T) -> &mut Self {
+    /// Register a custom renderable. Re-registering overwrites the
+    /// previous entry for that `type_name`.
+    pub fn register<T: WgpuRenderable>(&mut self, component: T) -> &mut Self {
         let type_name = component.type_name().to_string();
-        self.custom.insert(
-            type_name,
-            Box::new(move |props, ctx, registry, tree| {
-                component.render_custom(props, ctx, registry, tree);
-            }),
-        );
+        self.custom.insert(type_name, Box::new(component));
         self
     }
 
     /// Install a deliberate fallback handler for `NodeKind::Custom` nodes
-    /// whose `type_name` is not registered.
-    pub fn set_fallback<F>(&mut self, f: F) -> &mut Self
-    where
-        F: Fn(&serde_json::Value, &mut WalkContext<'_>, &WgpuRendererRegistry, &AppTree) + 'static,
-    {
-        self.fallback = Some(Box::new(f));
+    /// whose `type_name` is not registered. The fallback's own
+    /// `type_name` return value is ignored — the registry routes
+    /// unknown lookups to it directly.
+    pub fn set_fallback<T: WgpuRenderable>(&mut self, fallback: T) -> &mut Self {
+        self.fallback = Some(Box::new(fallback));
         self
     }
 
@@ -131,26 +176,33 @@ impl WgpuRendererRegistry {
         self.fallback.is_some()
     }
 
+    /// Dispatch a `NodeKind::Custom` node to its registered renderer.
+    /// Returns the renderer's outcome so the walker knows whether to
+    /// recurse into children.
+    ///
+    /// If `type_name` is unregistered and no fallback is installed, the
+    /// dispatch logs a `debug_assert!` and returns
+    /// [`WgpuRenderOutcome::ChildrenHandled`] so the walker still
+    /// terminates the subtree cleanly.
     pub(crate) fn render_custom_node(
         &self,
         type_name: &str,
+        node: &Node,
         props: &serde_json::Value,
-        ctx: &mut WalkContext<'_>,
-        tree: &AppTree,
-    ) {
+        ctx: &mut WgpuRenderCtx<'_>,
+    ) -> Result<WgpuRenderOutcome, MkuiError> {
         if let Some(handler) = self.custom.get(type_name) {
-            handler(props, ctx, self, tree);
-            return;
+            return handler.render(node, props, ctx);
         }
-        if let Some(fallback) = &self.fallback {
-            fallback(props, ctx, self, tree);
-            return;
+        if let Some(fallback) = self.fallback.as_ref() {
+            return fallback.render(node, props, ctx);
         }
         debug_assert!(
             false,
             "mkui-wgpu: no renderer registered for custom node type {type_name:?}. \
-             Register a CustomWgpuRenderable via Mkui::register or install a fallback."
+             Register a WgpuRenderable via Mkui::register or install a fallback."
         );
+        Ok(WgpuRenderOutcome::ChildrenHandled)
     }
 }
 
@@ -179,12 +231,12 @@ impl std::fmt::Debug for WgpuRendererRegistry {
 /// drop a `tree.push_custom(parent, "badge", json!({...}), "")` in
 /// without a schema lookup.
 pub mod builtins {
-    use mkui_runtime::AppTree;
+    use mkui_core::error::MkuiError;
+    use mkui_runtime::Node;
 
-    use super::{CustomWgpuRenderable, WgpuRendererRegistry};
+    use super::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable};
     use crate::theme::{BadgeSize, BadgeVariant, DotSize, DotVariant};
     use crate::types::{DotAnimation, Point, Rect, Size};
-    use crate::walker::WalkContext;
 
     /// Built-in `Badge` renderer. Props:
     ///
@@ -197,18 +249,17 @@ pub mod builtins {
     /// - `width`, `height` (number, optional) — defaults to `(80, 22)`
     pub struct BadgeRenderer;
 
-    impl CustomWgpuRenderable for BadgeRenderer {
+    impl WgpuRenderable for BadgeRenderer {
         fn type_name(&self) -> &str {
             "badge"
         }
 
-        fn render_custom(
+        fn render(
             &self,
+            _node: &Node,
             props: &serde_json::Value,
-            ctx: &mut WalkContext<'_>,
-            _registry: &WgpuRendererRegistry,
-            _tree: &AppTree,
-        ) {
+            ctx: &mut WgpuRenderCtx<'_>,
+        ) -> Result<WgpuRenderOutcome, MkuiError> {
             let label = props
                 .get("label")
                 .and_then(|v| v.as_str())
@@ -240,6 +291,7 @@ pub mod builtins {
             // Advance the walker cursor underneath the badge so adjacent
             // declarative children stack normally below it.
             ctx.cursor_y = (y + height).max(ctx.cursor_y);
+            Ok(WgpuRenderOutcome::ChildrenHandled)
         }
     }
 
@@ -253,18 +305,17 @@ pub mod builtins {
     /// - `animation` (string, default `"none"`) — `none / pulse / pulse_urgent / spin`
     pub struct DotRenderer;
 
-    impl CustomWgpuRenderable for DotRenderer {
+    impl WgpuRenderable for DotRenderer {
         fn type_name(&self) -> &str {
             "dot"
         }
 
-        fn render_custom(
+        fn render(
             &self,
+            _node: &Node,
             props: &serde_json::Value,
-            ctx: &mut WalkContext<'_>,
-            _registry: &WgpuRendererRegistry,
-            _tree: &AppTree,
-        ) {
+            ctx: &mut WgpuRenderCtx<'_>,
+        ) -> Result<WgpuRenderOutcome, MkuiError> {
             let variant = dot_variant(props.get("variant").and_then(|v| v.as_str()));
             let size = dot_size(props.get("size").and_then(|v| v.as_str()));
             let halo = props.get("halo").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -288,6 +339,7 @@ pub mod builtins {
                 animation,
                 ctx.theme,
             );
+            Ok(WgpuRenderOutcome::ChildrenHandled)
         }
     }
 
@@ -340,7 +392,7 @@ mod tests {
     use super::*;
     use crate::theme::HudTheme;
     use crate::types::{Scene, Size};
-    use crate::walker::HitTestEntry;
+    use mkui_runtime::AppTree;
 
     #[test]
     fn with_defaults_registers_builtin_atoms() {
@@ -359,26 +411,18 @@ mod tests {
         assert!(!registry.has_fallback());
     }
 
-    #[test]
-    fn fallback_hook_is_installed_when_set() {
-        let mut registry = WgpuRendererRegistry::new();
-        assert!(!registry.has_fallback());
-        registry.set_fallback(|_props, _ctx, _registry, _tree| {});
-        assert!(registry.has_fallback());
-    }
-
     struct TestWidget;
-    impl CustomWgpuRenderable for TestWidget {
+    impl WgpuRenderable for TestWidget {
         fn type_name(&self) -> &str {
             "test_widget"
         }
-        fn render_custom(
+        fn render(
             &self,
+            _node: &Node,
             _props: &serde_json::Value,
-            _ctx: &mut WalkContext<'_>,
-            _registry: &WgpuRendererRegistry,
-            _tree: &AppTree,
-        ) {
+            _ctx: &mut WgpuRenderCtx<'_>,
+        ) -> Result<WgpuRenderOutcome, MkuiError> {
+            Ok(WgpuRenderOutcome::ChildrenHandled)
         }
     }
 
@@ -398,18 +442,18 @@ mod tests {
         struct CountWidget {
             fired: Rc<Cell<u32>>,
         }
-        impl CustomWgpuRenderable for CountWidget {
+        impl WgpuRenderable for CountWidget {
             fn type_name(&self) -> &str {
                 "count_widget"
             }
-            fn render_custom(
+            fn render(
                 &self,
+                _node: &Node,
                 _props: &serde_json::Value,
-                _ctx: &mut WalkContext<'_>,
-                _registry: &WgpuRendererRegistry,
-                _tree: &AppTree,
-            ) {
+                _ctx: &mut WgpuRenderCtx<'_>,
+            ) -> Result<WgpuRenderOutcome, MkuiError> {
                 self.fired.set(self.fired.get() + 1);
+                Ok(WgpuRenderOutcome::ChildrenHandled)
             }
         }
 
@@ -419,13 +463,99 @@ mod tests {
             fired: Rc::clone(&fired),
         });
 
-        let tree = AppTree::new();
+        // Build a tree with a single custom node so we have a real `Node`
+        // to hand the renderer.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let custom_id = tree
+            .push_custom(root, "count_widget", serde_json::Value::Null, "")
+            .unwrap();
+        let custom_node = tree.get(custom_id).expect("custom node");
+
         let theme = HudTheme::default();
         let mut scene = Scene::new(Size::new(100.0, 100.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
-        let mut ctx = WalkContext::new(&mut scene, &theme, &mut hits, 100.0);
+        let mut ctx = WgpuRenderCtx {
+            tree: &tree,
+            registry: &registry,
+            scene: &mut scene,
+            theme: &theme,
+            hits: &mut hits,
+            viewport_width: 100.0,
+            cursor_y: 0.0,
+            content_x: 0.0,
+        };
 
-        registry.render_custom_node("count_widget", &serde_json::Value::Null, &mut ctx, &tree);
+        let outcome = registry
+            .render_custom_node(
+                "count_widget",
+                custom_node,
+                &serde_json::Value::Null,
+                &mut ctx,
+            )
+            .expect("dispatch ok");
+        assert_eq!(outcome, WgpuRenderOutcome::ChildrenHandled);
         assert_eq!(fired.get(), 1);
+    }
+
+    #[test]
+    fn fallback_is_routed_when_type_name_is_unregistered() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct FallbackWidget {
+            fired: Rc<Cell<u32>>,
+        }
+        impl WgpuRenderable for FallbackWidget {
+            fn type_name(&self) -> &str {
+                "__fallback__"
+            }
+            fn render(
+                &self,
+                _node: &Node,
+                _props: &serde_json::Value,
+                _ctx: &mut WgpuRenderCtx<'_>,
+            ) -> Result<WgpuRenderOutcome, MkuiError> {
+                self.fired.set(self.fired.get() + 1);
+                Ok(WgpuRenderOutcome::ChildrenHandled)
+            }
+        }
+
+        let fired = Rc::new(Cell::new(0u32));
+        let mut registry = WgpuRendererRegistry::new();
+        registry.set_fallback(FallbackWidget {
+            fired: Rc::clone(&fired),
+        });
+
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let custom_id = tree
+            .push_custom(root, "unregistered", serde_json::Value::Null, "")
+            .unwrap();
+        let custom_node = tree.get(custom_id).expect("custom node");
+
+        let theme = HudTheme::default();
+        let mut scene = Scene::new(Size::new(100.0, 100.0));
+        let mut hits: Vec<HitTestEntry> = Vec::new();
+        let mut ctx = WgpuRenderCtx {
+            tree: &tree,
+            registry: &registry,
+            scene: &mut scene,
+            theme: &theme,
+            hits: &mut hits,
+            viewport_width: 100.0,
+            cursor_y: 0.0,
+            content_x: 0.0,
+        };
+
+        registry
+            .render_custom_node(
+                "unregistered",
+                custom_node,
+                &serde_json::Value::Null,
+                &mut ctx,
+            )
+            .expect("fallback dispatch ok");
+        assert_eq!(fired.get(), 1, "fallback must fire for unknown type_name");
     }
 }

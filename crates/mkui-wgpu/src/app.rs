@@ -4,9 +4,9 @@
 //! [`mkui_runtime::AppTree`] declarative path end-to-end. On each frame
 //! it walks the tree into a `Scene`, hands the scene to the renderer,
 //! and routes pointer input through the per-frame hit-test vector. The
-//! legacy `Scene`-only constructor (`WgpuApp::new`) is retained as a
-//! low-level escape hatch — see [`crate::Mkui::with_scene`] (deprecated)
-//! and ADR 0006 §"`with_scene` deprecation choice".
+//! `Scene`-only constructor (`WgpuApp::new`) is retained as the
+//! low-level escape hatch — see [`crate::Mkui::with_scene`] and ADR
+//! 0006 §"`with_scene` as the retained low-level escape hatch".
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,15 +29,15 @@ use winit::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::input::{left_button_state, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
+use crate::render::{RenderOutcome, Renderer};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::walker::{walk_app_tree, HitTestEntry, WalkOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use mkui_runtime::RuntimeSignal;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::event::{ElementState, KeyEvent};
 #[cfg(not(target_arch = "wasm32"))]
 use winit::keyboard::{KeyCode, PhysicalKey};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::render::{RenderOutcome, Renderer};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::walker::{walk_tree, HitTestEntry};
-#[cfg(not(target_arch = "wasm32"))]
-use mkui_runtime::RuntimeSignal;
 
 /// Application shell. Owns the active scene + text system (for the
 /// scene-only escape hatch path) and, when constructed via
@@ -63,12 +63,12 @@ pub struct WgpuApp {
     window_title: String,
     #[cfg(not(target_arch = "wasm32"))]
     headless: bool,
-    /// Reusable per-frame buffer. Owned by the app so `walk_tree` can
-    /// reuse the allocation rather than allocating one Vec per frame
-    /// (audit round-4 Cat 8 guard — no per-frame Vec allocations in the
-    /// walker hot path).
+    /// Most recent per-frame hit-test list. Replaced wholesale on each
+    /// rebuild via [`walk_app_tree`]'s [`WalkOutput`]; the input router
+    /// reads this slice (no `&mut` is ever handed to a renderer or
+    /// action closure).
     #[cfg(not(target_arch = "wasm32"))]
-    hit_entries: Vec<HitTestEntry>,
+    hit_tests: Vec<HitTestEntry>,
     #[cfg(not(target_arch = "wasm32"))]
     pointer: PointerState,
 }
@@ -95,7 +95,7 @@ impl WgpuApp {
             #[cfg(not(target_arch = "wasm32"))]
             headless: false,
             #[cfg(not(target_arch = "wasm32"))]
-            hit_entries: Vec::new(),
+            hit_tests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pointer: PointerState::new(),
         }
@@ -196,23 +196,27 @@ impl WgpuApp {
         let Some(registry) = self.registry.as_ref() else {
             return;
         };
-        let viewport = self.scene.viewport;
-        let mut scene = Scene::new(viewport);
-        self.hit_entries.clear();
-        {
+        let options = WalkOptions {
+            viewport: self.scene.viewport,
+            theme: self.theme,
+        };
+        let output = {
             let core_ref = core.borrow();
-            walk_tree(
-                core_ref.tree(),
-                &mut scene,
-                &self.theme,
-                &mut self.hit_entries,
-                registry,
-            );
-        }
+            // v0.6.0 never returns Err from the walker; surface a render
+            // error if a future extension renderer changes that.
+            match walk_app_tree(core_ref.tree(), registry, &options) {
+                Ok(out) => out,
+                Err(err) => {
+                    eprintln!("mkui-wgpu: walk_app_tree error: {err}");
+                    return;
+                }
+            }
+        };
         // Clear dirty after the walk completes so a future action firing
         // mid-walk does not get its dirty bit clobbered.
         core.borrow_mut().tree_mut().clear_dirty();
-        self.scene = scene;
+        self.scene = output.scene;
+        self.hit_tests = output.hit_tests;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -232,7 +236,7 @@ impl WgpuApp {
     /// arm state machine (see [`crate::input::PointerState::on_release`]).
     #[cfg(not(target_arch = "wasm32"))]
     fn fire_action(&mut self, click_hit: crate::input::ClickHit) -> bool {
-        let Some(action_id) = click_hit.on_press else {
+        let Some(action_id) = click_hit.action else {
             return false;
         };
         let Some(core) = self.core.as_ref() else {
@@ -264,7 +268,7 @@ impl std::fmt::Debug for WgpuApp {
             .field("state", &self.state)
             .field("window_title", &self.window_title)
             .field("headless", &self.headless)
-            .field("hit_entries", &self.hit_entries.len());
+            .field("hit_tests", &self.hit_tests.len());
         builder.finish()
     }
 }
@@ -387,12 +391,10 @@ impl ApplicationHandler for WgpuApp {
                     ElementState::Pressed => {
                         // Press-to-arm: record the topmost-hit node;
                         // never fire on press (Codex round-10 Q4).
-                        self.pointer.on_press(&self.hit_entries, cursor);
+                        self.pointer.on_press(&self.hit_tests, cursor);
                     }
                     ElementState::Released => {
-                        let Some(click) =
-                            self.pointer.on_release(&self.hit_entries, cursor)
-                        else {
+                        let Some(click) = self.pointer.on_release(&self.hit_tests, cursor) else {
                             // Release on different node / empty space /
                             // after cancel — armed slot already cleared
                             // inside `on_release`. Nothing to fire.

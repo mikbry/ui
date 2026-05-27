@@ -16,7 +16,7 @@
 use mkui_core::components::Component;
 use mkui_core::error::MkuiError;
 
-use crate::bridge::{CustomWgpuRenderable, WgpuRendererRegistry};
+use crate::bridge::{WgpuRenderable, WgpuRendererRegistry};
 use crate::{Scene, Size, WgpuApp};
 
 /// High-level mkui-wgpu entry point. Wraps the [`WgpuApp`] event-loop
@@ -99,7 +99,7 @@ impl Mkui {
     }
 
     /// Register a custom-component renderer with the wgpu registry.
-    pub fn register<T: CustomWgpuRenderable>(mut self, component: T) -> Self {
+    pub fn register<T: WgpuRenderable>(mut self, component: T) -> Self {
         if let Some(registry) = self.registry.as_mut() {
             registry.register(component);
         }
@@ -107,17 +107,11 @@ impl Mkui {
     }
 
     /// Install a fallback renderer for unregistered custom node types.
-    pub fn fallback<F>(mut self, f: F) -> Self
-    where
-        F: Fn(
-                &serde_json::Value,
-                &mut crate::walker::WalkContext<'_>,
-                &WgpuRendererRegistry,
-                &mkui_runtime::AppTree,
-            ) + 'static,
-    {
+    /// The fallback's own `type_name` return value is ignored — the
+    /// registry routes unknown-`type_name` lookups to it directly.
+    pub fn fallback<T: WgpuRenderable>(mut self, fallback: T) -> Self {
         if let Some(registry) = self.registry.as_mut() {
-            registry.set_fallback(f);
+            registry.set_fallback(fallback);
         }
         self
     }

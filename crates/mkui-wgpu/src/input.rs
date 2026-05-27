@@ -97,13 +97,9 @@ impl PointerState {
     ///
     /// Never fires an action: per Codex round-10 Q4, activation happens
     /// on release-inside-same-node, not on press.
-    pub fn on_press(
-        &mut self,
-        hit_entries: &[HitTestEntry],
-        cursor: Point,
-    ) -> Option<NodeId> {
+    pub fn on_press(&mut self, hit_entries: &[HitTestEntry], cursor: Point) -> Option<NodeId> {
         let hit = hit_test(hit_entries, cursor);
-        self.armed = hit.map(|h| h.node_id);
+        self.armed = hit.map(|h| h.node);
         self.armed
     }
 
@@ -115,14 +111,10 @@ impl PointerState {
     ///
     /// The armed slot clears unconditionally on release, win or lose,
     /// so the next event starts fresh.
-    pub fn on_release(
-        &mut self,
-        hit_entries: &[HitTestEntry],
-        cursor: Point,
-    ) -> Option<ClickHit> {
+    pub fn on_release(&mut self, hit_entries: &[HitTestEntry], cursor: Point) -> Option<ClickHit> {
         let armed = self.armed.take();
         let hit = hit_test(hit_entries, cursor)?;
-        if armed == Some(hit.node_id) {
+        if armed == Some(hit.node) {
             Some(hit)
         } else {
             None
@@ -144,22 +136,22 @@ impl PointerState {
 /// if let Some(state) = left_button_state(button, state) { ... }
 /// ```
 #[cfg(not(target_arch = "wasm32"))]
-pub fn left_button_state(
-    button: MouseButton,
-    state: ElementState,
-) -> Option<ElementState> {
+pub fn left_button_state(button: MouseButton, state: ElementState) -> Option<ElementState> {
     (button == MouseButton::Left).then_some(state)
 }
 
-/// Result of a hit-test that found a target. The caller fires `on_press`
+/// Result of a hit-test that found a target. The caller fires `action`
 /// through the tree's `ActionRegistry`. Held separately from
 /// [`HitTestEntry`] so the caller doesn't accidentally re-borrow the
 /// per-frame vec while running the action closure (anti-pattern
 /// carry-forward from Sprint 4).
+///
+/// Field names mirror the round-10 §"Concrete Shape" sketch's
+/// [`HitTestEntry`] (`node`, `action`).
 #[derive(Debug, Clone, Copy)]
 pub struct ClickHit {
-    pub node_id: NodeId,
-    pub on_press: Option<ActionId>,
+    pub node: NodeId,
+    pub action: Option<ActionId>,
 }
 
 /// Reverse paint-order hit-test. Iterates `hit_entries` from the end
@@ -176,8 +168,8 @@ pub fn hit_test(hit_entries: &[HitTestEntry], cursor: Point) -> Option<ClickHit>
         .rev()
         .find(|entry| rect_contains(entry.rect, cursor))
         .map(|entry| ClickHit {
-            node_id: entry.node_id,
-            on_press: entry.on_press,
+            node: entry.node,
+            action: entry.action,
         })
 }
 
@@ -198,8 +190,8 @@ mod tests {
     ) -> HitTestEntry {
         HitTestEntry {
             rect: Rect::new(Point::new(x, y), Size::new(w, h)),
-            node_id: NodeId::from_raw(idx, 0),
-            on_press: action,
+            node: NodeId::from_raw(idx, 0),
+            action,
         }
     }
 
@@ -236,7 +228,7 @@ mod tests {
             entry(20.0, 20.0, 40.0, 40.0, 2),
         ];
         let hit = hit_test(&entries, Point::new(30.0, 30.0)).expect("inside both");
-        assert_eq!(hit.node_id, NodeId::from_raw(2, 0));
+        assert_eq!(hit.node, NodeId::from_raw(2, 0));
     }
 
     #[test]
@@ -246,7 +238,7 @@ mod tests {
             entry(80.0, 80.0, 10.0, 10.0, 2),
         ];
         let hit = hit_test(&entries, Point::new(30.0, 30.0)).expect("inside outer only");
-        assert_eq!(hit.node_id, NodeId::from_raw(1, 0));
+        assert_eq!(hit.node, NodeId::from_raw(1, 0));
     }
 
     // ---- press-to-arm state machine (Codex round-10 Q4 contract) ----
@@ -260,7 +252,7 @@ mod tests {
         let click = p
             .on_release(&entries, Point::new(60.0, 60.0))
             .expect("release on armed node fires");
-        assert_eq!(click.node_id, NodeId::from_raw(1, 0));
+        assert_eq!(click.node, NodeId::from_raw(1, 0));
         assert!(p.armed().is_none(), "release clears the armed slot");
     }
 
@@ -314,7 +306,10 @@ mod tests {
         p.cancel();
         assert!(p.armed().is_none());
         let click = p.on_release(&entries, Point::new(50.0, 50.0));
-        assert!(click.is_none(), "Escape-cancelled press must not fire on release");
+        assert!(
+            click.is_none(),
+            "Escape-cancelled press must not fire on release"
+        );
     }
 
     #[test]
