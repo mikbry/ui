@@ -10,6 +10,15 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+### Changed
+- Docs/comment hygiene pass: scrubbed proper-noun references to the
+  predecessor private reference codebase from public-facing source-doc
+  comments (`mkui-text`, `mkui-wgpu`), the CHANGELOG history entry for
+  v0.3.0, and ADRs 0002 + 0004. The engineering-history meaning
+  ("port of an earlier 2D HUD pipeline", "bitmap glyph table") is
+  preserved; only the private-repo proper noun is replaced with
+  domain-neutral phrasing. Zero functional impact (#58)
+
 ## [0.5.0] — 2026-05-25
 
 ### Added
@@ -215,7 +224,7 @@ breaking changes can land on minor bumps).
 ### Added
 - `mkui-wgpu` crate with scene primitives, theme tokens (cva-style ButtonVariant/Size/State),
   declarative builders (`UiBuilder<T>`, `NumberRow`, `ListRow`), and tessellation pipeline
-  — upstreamed from `stonesketch-gui`'s domain-neutral subset (#12)
+  — upstreamed from the predecessor HUD crate's domain-neutral subset (#12)
 - `mkui-console` real component tree renderer replacing the prior closed-set showcase
   path; `TextVariant`-driven Line styling (#13)
 - `mkui-web` extensible component registry (`WebRendererRegistry`) replacing the prior

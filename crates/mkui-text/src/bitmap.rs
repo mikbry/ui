@@ -1,13 +1,13 @@
 //! 5×7 ASCII bitmap implementation of [`TextSystem`].
 //!
-//! Direct port of StoneSketch's `tessellate_text` / `bitmap_glyph` /
-//! `wrap_text_lines` / `normalize_bitmap_char` / `measure_line_width` /
-//! `max_glyphs_for_width` helpers (originally at
-//! `astoneer/stonesketch/crates/gui/src/tessellation.rs:57-360`). The
-//! algorithms are unchanged; only the names are domain-neutral and the call
-//! shape is the trait surface rather than an inline renderer helper.
+//! Direct port of the predecessor renderer prototype's `tessellate_text` /
+//! `bitmap_glyph` / `wrap_text_lines` / `normalize_bitmap_char` /
+//! `measure_line_width` / `max_glyphs_for_width` helpers from an earlier
+//! internal 2D HUD tessellation pipeline. The algorithms are unchanged; only
+//! the names are domain-neutral and the call shape is the trait surface
+//! rather than an inline renderer helper.
 //!
-//! What changed vs the StoneSketch source:
+//! What changed vs the predecessor source:
 //!
 //! - Wrapping, alignment, and line positioning moved from the renderer into
 //!   [`BitmapTextSystem::layout`] so the renderer never replays the math.
@@ -177,7 +177,7 @@ impl TextSystem for BitmapTextSystem {
     }
 }
 
-/// Bitmap scale derived from a requested font size. Matches the StoneSketch
+/// Bitmap scale derived from a requested font size. Matches the predecessor
 /// prototype's `(font_size_px / 10.0).max(1.0)`.
 pub fn bitmap_scale(font_size_px: f32) -> f32 {
     (font_size_px / REFERENCE_FONT_SIZE_PX).max(1.0)
@@ -195,7 +195,7 @@ pub fn max_glyphs_for_width(width: f32, advance: f32, glyph_width: f32) -> usize
 
 /// Wrap `content` into lines, each no longer than `max_glyphs`, capped at
 /// `max_lines` total (ellipsizing the last line when content overflows).
-/// Ported from the StoneSketch `wrap_text_lines` helper.
+/// Ported from the predecessor prototype's `wrap_text_lines` helper.
 pub fn wrap_text_lines(content: &str, max_glyphs: usize, max_lines: usize) -> Vec<String> {
     let mut wrapped = Vec::new();
     let mut truncated = false;
@@ -303,7 +303,7 @@ pub fn measure_line_width(glyphs: &[char], advance: f32, glyph_width: f32) -> f3
 
 /// Map a few common non-ASCII characters down to their ASCII bitmap-table
 /// equivalents. Ported verbatim from `normalize_bitmap_char` — the same
-/// short table that StoneSketch ships.
+/// short table the predecessor prototype ships.
 pub fn normalize_bitmap_char(character: char) -> char {
     match character {
         '²' => '2',
@@ -316,7 +316,7 @@ pub fn normalize_bitmap_char(character: char) -> char {
 
 /// 5×7 bit pattern for a single ASCII glyph. Rows are MSB-first; bit 4 is the
 /// leftmost column. Unknown characters fall back to `'?'`. Ported verbatim
-/// from the StoneSketch `bitmap_glyph` table.
+/// from the predecessor prototype's `bitmap_glyph` table.
 #[rustfmt::skip]
 pub fn bitmap_glyph(character: char) -> [u8; 7] {
     match character {
