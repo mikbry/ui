@@ -162,3 +162,24 @@ re-architecting the walker.
   consumers onto a workaround path for a use case the declarative API
   is not designed to cover. The two surfaces target different layers
   of the stack and coexist by design.
+
+## Out of scope (reserved for future sprints)
+
+- **Shared `mkui-layout` crate / module.** This sprint ships a
+  minimal **wgpu-local** layout pass inside the walker (Codex
+  round-10 Q3 Option A): top-down vertical flow with class-driven
+  padding + gap + text/button sizing, just enough to render
+  `examples/showcase-common::create_showcase_ui` recognisably on
+  wgpu. A future sprint may extract layout to a `mkui-layout` shared
+  module/crate consumed by `mkui-runtime` + every backend (Codex
+  round-10 Q3 Option D) once web/console/wgpu/native need true
+  layout parity. The wgpu-local pass is intentionally scoped to the
+  current showcase tokens; the shared layer is the right place for
+  general flex / grid semantics, breakpoint resolution, and
+  cross-binding layout snapshots.
+- **Visual regression / screenshot diff infrastructure.** Sprint 7+.
+- **Hover state, responsive breakpoints, CSS transitions.** Sprint 7+
+  — depend on either the wgpu-local layout v2 or the shared
+  `mkui-layout` extraction, whichever lands first.
+- **Incremental tree diffing.** Sprint 8+, after criterion benches
+  exist (see "Alternatives considered" above for rationale).
