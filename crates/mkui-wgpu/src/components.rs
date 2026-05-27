@@ -7,15 +7,15 @@
 //! `variant` and a `size` and resolves concrete colors through [`HudTheme`]
 //! — the same cva-style shape shadcn uses for its `ButtonVariant` /
 //! `ButtonSize`. State (`ButtonState::Idle` / `Active`) is orthogonal to
-//! variant and supplied per-frame, because StoneSketch is immediate-mode
-//! and does not retain a component tree between frames.
+//! variant and supplied per-frame, because the upstream HUD renderer is
+//! immediate-mode and does not retain a component tree between frames.
 //!
 //! Two layers:
 //!
 //! - **component builders** — [`card`], [`button`], [`input`], [`slider`],
 //!   [`chip_group`], [`scrollbar`], [`swatch`], [`heading`], [`text`]. Each takes a
 //!   variant / size / state and pulls concrete colors from [`HudTheme`].
-//!   This is the layer StoneSketch overlays call.
+//!   This is the layer HUD overlays call.
 //! - **primitives** — [`panel`], [`titled_panel`], [`label`], [`button_with`].
 //!   These take pre-resolved `PanelStyle` / `ButtonStyle` values and are the
 //!   escape hatch when a caller needs a one-off style that isn't in the

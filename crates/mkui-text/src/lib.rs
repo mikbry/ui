@@ -14,7 +14,7 @@
 //! - [`TextSystem`] / [`LayoutRun`] / [`LayoutGlyph`] / [`GlyphCacheKey`] /
 //!   [`GlyphImage`] — the call shape every implementation honours.
 //! - [`BitmapTextSystem`] — Sprint 2 implementation: 5×7 ASCII bit-pattern
-//!   port of StoneSketch's existing prototype, behind the trait so it can
+//!   port of an earlier reference prototype, behind the trait so it can
 //!   be swapped out without touching renderer code.
 //!
 //! The bitmap implementation is permanent debug-fallback and visual
