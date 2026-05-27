@@ -27,7 +27,11 @@ use winit::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::input::{hit_test, MouseUpdate, PointerState};
+use crate::input::{left_button_state, PointerState};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::event::{ElementState, KeyEvent};
+#[cfg(not(target_arch = "wasm32"))]
+use winit::keyboard::{KeyCode, PhysicalKey};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::{RenderOutcome, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
@@ -222,16 +226,13 @@ impl WgpuApp {
             ))
     }
 
-    /// Fire any action attached to the topmost hit entry under `cursor`.
-    /// Looks up the `ActionId` in the per-frame hit vector, drops the
-    /// borrow, then fires through the tree's `ActionRegistry`. Returns
-    /// true if a redraw signal was raised.
+    /// Fire the action attached to `click_hit` through the tree's
+    /// `ActionRegistry`. Returns true if a redraw signal was raised.
+    /// Caller must have already resolved `click_hit` via the press-to-
+    /// arm state machine (see [`crate::input::PointerState::on_release`]).
     #[cfg(not(target_arch = "wasm32"))]
-    fn fire_click(&mut self, cursor: crate::types::Point) -> bool {
-        let Some(hit) = hit_test(&self.hit_entries, cursor) else {
-            return false;
-        };
-        let Some(action_id) = hit.on_press else {
+    fn fire_action(&mut self, click_hit: crate::input::ClickHit) -> bool {
+        let Some(action_id) = click_hit.on_press else {
             return false;
         };
         let Some(core) = self.core.as_ref() else {
@@ -352,21 +353,58 @@ impl ApplicationHandler for WgpuApp {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer.update_cursor(position);
             }
+            WindowEvent::CursorLeft { .. } => {
+                // Mouse left the window: cancel any armed press without
+                // firing (Codex round-10 Q4 — drag-cancel affordance).
+                self.pointer.cancel();
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                // User-driven cancel: Escape clears the armed slot
+                // without firing.
+                self.pointer.cancel();
+            }
             WindowEvent::MouseInput { state, button, .. } => {
-                let update = self.pointer.update_mouse(button, state);
-                if matches!(update, MouseUpdate::Released) {
-                    let scale = self
-                        .state
-                        .as_ref()
-                        .map(|s| s.window.scale_factor())
-                        .unwrap_or(1.0);
-                    if let Some(cursor) = self.pointer.cursor_logical(scale) {
-                        if self.fire_click(cursor) {
-                            // Action requested a redraw — rebuild from the
-                            // (now-dirty) tree and ask winit for a redraw.
-                            // The `request_redraw` call is made HERE in the
-                            // event loop, NOT from inside the action closure
-                            // (Sprint 4 anti-pattern guard).
+                let Some(state) = left_button_state(button, state) else {
+                    return;
+                };
+                let scale = self
+                    .state
+                    .as_ref()
+                    .map(|s| s.window.scale_factor())
+                    .unwrap_or(1.0);
+                let Some(cursor) = self.pointer.cursor_logical(scale) else {
+                    return;
+                };
+                match state {
+                    ElementState::Pressed => {
+                        // Press-to-arm: record the topmost-hit node;
+                        // never fire on press (Codex round-10 Q4).
+                        self.pointer.on_press(&self.hit_entries, cursor);
+                    }
+                    ElementState::Released => {
+                        let Some(click) =
+                            self.pointer.on_release(&self.hit_entries, cursor)
+                        else {
+                            // Release on different node / empty space /
+                            // after cancel — armed slot already cleared
+                            // inside `on_release`. Nothing to fire.
+                            return;
+                        };
+                        if self.fire_action(click) {
+                            // Action requested a redraw — rebuild from
+                            // the (now-dirty) tree and ask winit for a
+                            // redraw. The `request_redraw` call is made
+                            // HERE in the event loop, NOT from inside
+                            // the action closure (Sprint 4 anti-pattern
+                            // guard).
                             self.rebuild_scene_from_tree();
                             if let Some(state) = self.state.as_ref() {
                                 state.window.request_redraw();

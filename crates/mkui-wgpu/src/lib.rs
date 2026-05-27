@@ -71,7 +71,7 @@ mod tessellation;
 pub use app::WgpuApp;
 pub use bridge::{CustomWgpuRenderable, WgpuRendererRegistry};
 pub use high_level::Mkui;
-pub use input::{hit_test, ClickHit, MouseUpdate, PointerState};
+pub use input::{hit_test, ClickHit, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{RenderOutcome, Renderer};
 pub use renderer::WgpuRenderer;
