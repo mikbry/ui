@@ -19,8 +19,9 @@ project facing "render UI text" reaches for:
 - `parley` (Linebender layout)
 - `fontdue`, `ab_glyph` (pure rasterisers)
 
-mkui's predecessor reference (stonesketch's `gui.md`) committed explicitly to a
-from-scratch text stack — the same architectural commitment mkui inherits.
+mkui's predecessor reference (an earlier internal text-rendering survey)
+committed explicitly to a from-scratch text stack — the same architectural
+commitment mkui inherits.
 External code review (Codex rounds 1-3) proposed adopting `cosmic-text` +
 `glyphon`; the operator reversed that direction on 2026-05-21.
 

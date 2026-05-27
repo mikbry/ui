@@ -13,7 +13,7 @@ configuration, pipeline layout, render-pass orchestration, and a winit shell
 each need a working baseline before any UI primitive can land.
 
 A production-grade 2D HUD pipeline already existed in an upstream reference
-project (stonesketch-render, ~2 854 lines of wgpu code). That pipeline was
+project (the predecessor 2D HUD renderer, ~2 854 lines of wgpu code). That pipeline was
 production-tested but carried 3D-renderer concerns mkui does not need: scene
 pass, shadow map, ambient occlusion, selection outline, accumulator. Importing
 the full renderer would have brought all of those along, plus the maintenance
