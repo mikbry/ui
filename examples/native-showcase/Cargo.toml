@@ -1,0 +1,10 @@
+[package]
+name = "native-showcase"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+showcase-common = { path = "../showcase-common", features = ["wgpu"] }
+mkui = { path = "../../crates/mkui", features = ["wgpu"] }

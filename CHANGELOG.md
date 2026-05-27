@@ -19,6 +19,67 @@ breaking changes can land on minor bumps).
   preserved; only the private-repo proper noun is replaced with
   domain-neutral phrasing. Zero functional impact (#58)
 
+## [0.6.0] — 2026-05-27
+
+### Added
+- **`mkui-wgpu` declarative bridge over `mkui_runtime::AppTree`** —
+  `Mkui::new()?.child(...).run()` on the wgpu backend now mirrors the
+  web and console backends. The walker projects the runtime tree into
+  the existing tessellation pipeline (no new GPU pipeline state); the
+  input router does reverse paint-order hit-testing against the per-
+  frame `Vec<HitTestEntry>` collected during the walk. ADR 0006
+  documents the design (#56)
+- **`WgpuRenderable` trait + `WgpuRendererRegistry`** in `mkui-wgpu`
+  (backend-local placement per Codex round-7 Q1 ratification, mirrors
+  `mkui-web::WebRendererRegistry`). `with_defaults()` ships built-in
+  `BadgeRenderer` + `DotRenderer` so the scene-primitive atoms ported
+  in ADR 0004 stay accessible through the AppTree `NodeKind::Custom`
+  slot. Custom-component test in `crates/mkui-wgpu/src/bridge.rs` (#56)
+- **`mkui-wgpu/src/walker.rs`** — AppTree → `Scene` walker. Eager
+  rebuild on `RuntimeCtx::RequestRedraw`; never indexed into the raw
+  `nodes` vec (every lookup goes through `tree.get(id)` so the
+  generation-counter staleness guard fires) (#56)
+- **`mkui-wgpu/src/input.rs`** — pointer state machine. Cursor latched
+  from `WindowEvent::CursorMoved`, click semantics on release, logical/
+  physical DPI conversion via `window.scale_factor()`. `window.request_redraw()`
+  is called from the event-loop handler — never from inside action
+  closures (Sprint 4 anti-pattern carry-forward) (#56)
+- **`examples/atoms-on-wgpu`** re-introduced — 12-badge grid + dot
+  showcase + title text built via `tree.push_custom("badge", …)` /
+  `tree.push_custom("dot", …)`. The renderers ship in
+  `WgpuRendererRegistry::with_defaults()` so the example needs no
+  per-app registration (#56)
+- **`examples/native-showcase`** — drives
+  `examples/showcase-common::create_showcase_ui` end-to-end on the
+  wgpu backend via `mkui::run!(create_showcase_ui, wgpu)`. The
+  showcase function itself is byte-unchanged from main (Codex round-7
+  Q6 audit-grade preservation) (#56)
+- **`mkui::run!` wgpu arm** — the bridge crate now supports
+  `mkui::run!(create_ui, wgpu)` alongside the existing `web` /
+  `console` arms (#56)
+- **`mkui-wgpu::Mkui::from_core(core)`** — wraps a pre-built
+  `mkui_core::components::Mkui` so callers that constructed the
+  `AppTree` directly (FFI bindings, the atoms-on-wgpu example) can
+  hand it to the wgpu run loop (#56)
+- **`mkui` bridge crate `wgpu` feature** — enables the wgpu backend
+  through the unified `Mkui` type and the `mkui::run!` macro's `wgpu`
+  arm (#56)
+- **ADR 0006** — bridge design (walker, registry, input model),
+  relationship to ADR 0005 (consumes the substrate, doesn't extend
+  it) and ADR 0004 (tessellation pipeline preserved; bridge layers
+  above), `with_scene` deprecation choice (option a — mark deprecated,
+  retain through v0.6.x, slated for removal in v0.7.0) (#56)
+
+### Deprecated
+- **`mkui_wgpu::Mkui::with_scene(scene)`** — marked `#[deprecated]` in
+  favour of the declarative `Mkui::new()?.child(...).run()` shape.
+  Retained for v0.6.x as a low-level escape hatch; slated for removal
+  in v0.7.0. See ADR 0006 §"`with_scene` deprecation choice" (#56)
+
+### Changed
+- **`mkui-wgpu/Cargo.toml`** — adds `mkui-runtime` dependency. Sprint
+  4 deliberately deferred this edge; Sprint 5 takes it (#56)
+
 ## [0.5.0] — 2026-05-25
 
 ### Added

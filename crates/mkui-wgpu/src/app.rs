@@ -1,18 +1,22 @@
 //! Winit `ApplicationHandler` shell that drives the mkui-wgpu renderer.
 //!
-//! `WgpuApp` owns the scene + the active text system and (after the first
-//! `resumed` event) the window + the async-initialized
-//! [`render::Renderer`]. Downstream native apps don't usually instantiate
-//! this directly — they call [`crate::Mkui::run`], which wraps the
-//! event-loop boilerplate.
-//!
-//! [`render::Renderer`]: crate::render::Renderer
+//! Sprint 5 (issue #56): the app shell now drives the
+//! [`mkui_runtime::AppTree`] declarative path end-to-end. On each frame
+//! it walks the tree into a `Scene`, hands the scene to the renderer,
+//! and routes pointer input through the per-frame hit-test vector. The
+//! legacy `Scene`-only constructor (`WgpuApp::new`) is retained as a
+//! low-level escape hatch — see [`crate::Mkui::with_scene`] (deprecated)
+//! and ADR 0006 §"`with_scene` deprecation choice".
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use mkui_text::{BitmapTextSystem, TextSystem};
 
-use crate::Scene;
+use crate::bridge::WgpuRendererRegistry;
+use crate::theme::HudTheme;
+use crate::types::{Scene, Size};
 
 #[cfg(not(target_arch = "wasm32"))]
 use winit::{
@@ -23,24 +27,46 @@ use winit::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::input::{hit_test, MouseUpdate, PointerState};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::render::{RenderOutcome, Renderer};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::walker::{walk_tree, HitTestEntry};
+#[cfg(not(target_arch = "wasm32"))]
+use mkui_runtime::RuntimeSignal;
 
-/// Application shell. Wraps a mutable [`Scene`] + the
-/// [`Arc<dyn TextSystem>`] the tessellator delegates glyph layout to,
-/// plus — on native targets — the [`Renderer`] state created on
-/// `resumed`.
+/// Application shell. Owns the active scene + text system (for the
+/// scene-only escape hatch path) and, when constructed via
+/// [`WgpuApp::with_app_tree`], the runtime [`mkui_core::components::Mkui`]
+/// + the [`WgpuRendererRegistry`] for custom-component dispatch.
 ///
-/// Constructed via [`WgpuApp::new`] (defaults to [`BitmapTextSystem`]) or
-/// [`WgpuApp::with_text_system`]. The [`ApplicationHandler`] impl is
-/// only present on native targets so the same scene-only constructor
-/// keeps compiling on wasm consumers that don't pull in winit.
+/// Native targets additionally hold the `Renderer` state and the
+/// per-frame hit-test buffer. Both are `Option` so the same struct shape
+/// compiles on wasm consumers that don't pull in winit.
 pub struct WgpuApp {
     scene: Scene,
     text_system: Arc<dyn TextSystem>,
+    theme: HudTheme,
+    /// Either a runtime tree (declarative path) or `None` (raw-scene
+    /// escape hatch). When `Some`, `Renderer::render` is called against
+    /// a tree-derived scene the app rebuilds per frame; when `None`, the
+    /// original `scene` field is rendered verbatim.
+    core: Option<Rc<RefCell<mkui_core::components::Mkui>>>,
+    registry: Option<WgpuRendererRegistry>,
     #[cfg(not(target_arch = "wasm32"))]
     state: Option<WgpuAppState>,
     #[cfg(not(target_arch = "wasm32"))]
     window_title: String,
+    #[cfg(not(target_arch = "wasm32"))]
+    headless: bool,
+    /// Reusable per-frame buffer. Owned by the app so `walk_tree` can
+    /// reuse the allocation rather than allocating one Vec per frame
+    /// (audit round-4 Cat 8 guard — no per-frame Vec allocations in the
+    /// walker hot path).
+    #[cfg(not(target_arch = "wasm32"))]
+    hit_entries: Vec<HitTestEntry>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pointer: PointerState,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -55,10 +81,19 @@ impl WgpuApp {
         Self {
             scene,
             text_system: Arc::new(BitmapTextSystem::new()),
+            theme: HudTheme::default(),
+            core: None,
+            registry: None,
             #[cfg(not(target_arch = "wasm32"))]
             state: None,
             #[cfg(not(target_arch = "wasm32"))]
             window_title: "mkui".to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            headless: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            hit_entries: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            pointer: PointerState::new(),
         }
     }
 
@@ -66,14 +101,23 @@ impl WgpuApp {
     /// need to swap implementations (bitmap → Slug) construct via this entry
     /// rather than `new`.
     pub fn with_text_system(scene: Scene, text_system: Arc<dyn TextSystem>) -> Self {
-        Self {
-            scene,
-            text_system,
-            #[cfg(not(target_arch = "wasm32"))]
-            state: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            window_title: "mkui".to_string(),
-        }
+        let mut app = Self::new(scene);
+        app.text_system = text_system;
+        app
+    }
+
+    /// Build a declarative-path app from a runtime [`mkui_core::components::Mkui`]
+    /// plus a custom-component registry. The event loop rebuilds the scene
+    /// from the tree per frame (eager rebuild — Sprint 4 substrate
+    /// contract, ADR 0006).
+    pub fn with_app_tree(
+        core: mkui_core::components::Mkui,
+        registry: WgpuRendererRegistry,
+    ) -> Self {
+        let mut app = Self::new(Scene::new(Size::new(1280.0, 720.0)));
+        app.core = Some(Rc::new(RefCell::new(core)));
+        app.registry = Some(registry);
+        app
     }
 
     pub fn scene(&self) -> &Scene {
@@ -92,11 +136,79 @@ impl WgpuApp {
         self.text_system = text_system;
     }
 
+    pub fn theme(&self) -> &HudTheme {
+        &self.theme
+    }
+
+    pub fn set_theme(&mut self, theme: HudTheme) {
+        self.theme = theme;
+    }
+
+    /// Borrow the underlying core Mkui (and thus the runtime AppTree),
+    /// if the app was constructed via [`WgpuApp::with_app_tree`]. Tests
+    /// and FFI shims call this to inspect or mutate the tree without
+    /// going through the event loop.
+    pub fn core(&self) -> Option<&Rc<RefCell<mkui_core::components::Mkui>>> {
+        self.core.as_ref()
+    }
+
+    pub fn registry(&self) -> Option<&WgpuRendererRegistry> {
+        self.registry.as_ref()
+    }
+
     /// Override the window title used on the next `resumed` event.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_window_title(mut self, title: impl Into<String>) -> Self {
         self.window_title = title.into();
         self
+    }
+
+    /// Run the event loop in headless mode — build the scene once, then
+    /// exit without opening a window. The `HEADLESS=1` smoke-test gate
+    /// (acceptance criterion #18) routes through this path so CI can
+    /// validate the bridge end-to-end without a display server.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_headless(mut self, headless: bool) -> Self {
+        self.headless = headless;
+        self
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn is_headless(&self) -> bool {
+        self.headless
+    }
+
+    /// Pull the runtime tree's `is_dirty` state, rebuild the scene from
+    /// it via the walker, and clear the dirty flag. No-op when the app
+    /// is in scene-only mode (the legacy `with_scene` path).
+    ///
+    /// Exposed so headless tests can drive the walker once without
+    /// running the full event loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn rebuild_scene_from_tree(&mut self) {
+        let Some(core) = self.core.as_ref() else {
+            return;
+        };
+        let Some(registry) = self.registry.as_ref() else {
+            return;
+        };
+        let viewport = self.scene.viewport;
+        let mut scene = Scene::new(viewport);
+        self.hit_entries.clear();
+        {
+            let core_ref = core.borrow();
+            walk_tree(
+                core_ref.tree(),
+                &mut scene,
+                &self.theme,
+                &mut self.hit_entries,
+                registry,
+            );
+        }
+        // Clear dirty after the walk completes so a future action firing
+        // mid-walk does not get its dirty bit clobbered.
+        core.borrow_mut().tree_mut().clear_dirty();
+        self.scene = scene;
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -109,6 +221,33 @@ impl WgpuApp {
                 viewport.height as f64,
             ))
     }
+
+    /// Fire any action attached to the topmost hit entry under `cursor`.
+    /// Looks up the `ActionId` in the per-frame hit vector, drops the
+    /// borrow, then fires through the tree's `ActionRegistry`. Returns
+    /// true if a redraw signal was raised.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn fire_click(&mut self, cursor: crate::types::Point) -> bool {
+        let Some(hit) = hit_test(&self.hit_entries, cursor) else {
+            return false;
+        };
+        let Some(action_id) = hit.on_press else {
+            return false;
+        };
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        // Borrow scoping: `fire` only needs `&self`, so we drop the
+        // immutable borrow before re-borrowing mutably to propagate the
+        // dirty bit. Holding both at once is the round-7 anti-pattern.
+        let mut ctx = core.borrow().tree().actions().fire(action_id);
+        if ctx.is_dirty() {
+            core.borrow_mut().tree_mut().mark_dirty();
+        }
+        ctx.drain_emitted()
+            .iter()
+            .any(|s| matches!(s, RuntimeSignal::RequestRedraw))
+    }
 }
 
 impl std::fmt::Debug for WgpuApp {
@@ -116,11 +255,15 @@ impl std::fmt::Debug for WgpuApp {
         let mut builder = f.debug_struct("WgpuApp");
         builder
             .field("scene", &self.scene)
-            .field("text_system", &"Arc<dyn TextSystem>");
+            .field("text_system", &"Arc<dyn TextSystem>")
+            .field("has_core", &self.core.is_some())
+            .field("has_registry", &self.registry.is_some());
         #[cfg(not(target_arch = "wasm32"))]
         builder
             .field("state", &self.state)
-            .field("window_title", &self.window_title);
+            .field("window_title", &self.window_title)
+            .field("headless", &self.headless)
+            .field("hit_entries", &self.hit_entries.len());
         builder.finish()
     }
 }
@@ -128,6 +271,16 @@ impl std::fmt::Debug for WgpuApp {
 #[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler for WgpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // Headless mode: walk once for the smoke gate, then exit without
+        // ever creating a window or wgpu surface. Lets CI validate the
+        // walker + registry wiring end-to-end on machines without a
+        // display server (acceptance criterion #18).
+        if self.headless {
+            self.rebuild_scene_from_tree();
+            event_loop.exit();
+            return;
+        }
+
         // `resumed` can fire more than once on Android-style lifecycles;
         // bail out if we already have a window so we don't drop the
         // current renderer.
@@ -145,6 +298,9 @@ impl ApplicationHandler for WgpuApp {
         match pollster::block_on(Renderer::new(window.clone())) {
             Ok(renderer) => {
                 self.state = Some(WgpuAppState { window, renderer });
+                if self.core.is_some() {
+                    self.rebuild_scene_from_tree();
+                }
                 if let Some(state) = self.state.as_ref() {
                     state.window.request_redraw();
                 }
@@ -172,12 +328,63 @@ impl ApplicationHandler for WgpuApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(state) = self.state.as_mut() {
+                let (new_viewport, window) = {
+                    let Some(state) = self.state.as_mut() else {
+                        return;
+                    };
                     state.renderer.resize(size.width, size.height);
-                    state.window.request_redraw();
+                    let scale = state.window.scale_factor() as f32;
+                    (
+                        Size::new(
+                            size.width as f32 / scale.max(f32::EPSILON),
+                            size.height as f32 / scale.max(f32::EPSILON),
+                        ),
+                        Arc::clone(&state.window),
+                    )
+                };
+                self.scene = Scene::new(new_viewport);
+                if let Some(core) = self.core.as_ref() {
+                    core.borrow_mut().tree_mut().mark_dirty();
+                }
+                self.rebuild_scene_from_tree();
+                window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer.update_cursor(position);
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                let update = self.pointer.update_mouse(button, state);
+                if matches!(update, MouseUpdate::Released) {
+                    let scale = self
+                        .state
+                        .as_ref()
+                        .map(|s| s.window.scale_factor())
+                        .unwrap_or(1.0);
+                    if let Some(cursor) = self.pointer.cursor_logical(scale) {
+                        if self.fire_click(cursor) {
+                            // Action requested a redraw — rebuild from the
+                            // (now-dirty) tree and ask winit for a redraw.
+                            // The `request_redraw` call is made HERE in the
+                            // event loop, NOT from inside the action closure
+                            // (Sprint 4 anti-pattern guard).
+                            self.rebuild_scene_from_tree();
+                            if let Some(state) = self.state.as_ref() {
+                                state.window.request_redraw();
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
+                // If the tree dirtied between events, rebuild before painting.
+                let needs_rebuild = self
+                    .core
+                    .as_ref()
+                    .map(|c| c.borrow().tree().is_dirty())
+                    .unwrap_or(false);
+                if needs_rebuild {
+                    self.rebuild_scene_from_tree();
+                }
                 if let Some(state) = self.state.as_mut() {
                     let outcome = state.renderer.render(&self.scene, &*self.text_system);
                     match outcome {
@@ -209,6 +416,7 @@ mod tests {
         let scene = Scene::new(Size::new(640.0, 480.0));
         let app = WgpuApp::new(scene);
         assert_eq!(app.scene().viewport, Size::new(640.0, 480.0));
+        assert!(app.core().is_none(), "scene-only constructor has no core");
     }
 
     #[test]
@@ -216,5 +424,32 @@ mod tests {
         let mut app = WgpuApp::new(Scene::new(Size::new(100.0, 100.0)));
         app.set_scene(Scene::new(Size::new(200.0, 200.0)));
         assert_eq!(app.scene().viewport, Size::new(200.0, 200.0));
+    }
+
+    #[test]
+    fn with_app_tree_attaches_core_and_registry() {
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let app = WgpuApp::with_app_tree(core, registry);
+        assert!(app.core().is_some());
+        assert!(app.registry().is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn rebuild_scene_from_tree_runs_the_walker() {
+        use mkui_core::components::{Mkui as CoreMkui, Text};
+        use mkui_runtime::TextVariant;
+
+        let core = CoreMkui::new().child(Text::new("hi").variant(TextVariant::Heading1));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.rebuild_scene_from_tree();
+        let has_text = app
+            .scene()
+            .primitives
+            .iter()
+            .any(|p| matches!(p, crate::types::Primitive::Text(_)));
+        assert!(has_text, "walker should emit at least one text primitive");
     }
 }
