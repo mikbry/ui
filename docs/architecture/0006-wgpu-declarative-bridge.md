@@ -70,21 +70,30 @@ after. This is the Sprint 4 retro's load-bearing rule applied forward;
 violating it would re-introduce the "closure holding `RefCell` borrow
 across rebuild" failure mode the substrate explicitly closed.
 
-### `Mkui::with_scene` deprecation
+### `Mkui::with_scene` as the retained low-level escape hatch
 
-The Sprint 4 retro left `Mkui::with_scene(scene).run()` retained as a
-low-level HUD entry. Sprint 5 picks option **(a)** from the issue's
-in-scope §8: mark the constructor `#[deprecated(since = "0.6.0", …)]`
-with a migration note pointing at the declarative `Mkui::new()?.child(...).run()`
-shape. The deprecation is non-blocking: `with_scene` continues to compile
-through the v0.6.x line and is slated for removal in v0.7.0.
+`Mkui::with_scene(scene).run()` is **retained as the low-level escape
+hatch**, not deprecated. The declarative `Mkui::new()?.child(...).run()`
+API is the public identity end users build their apps against; the
+wgpu-specific `Scene` constructor coexists for renderer tests, custom
+HUDs, headless tessellation demos, and future direct-GPU experiments
+(Slug glyph rendering, mkui-vector2d primitives — Sprint 7+). Both
+surfaces are documented public API.
 
-The keep-as-escape-hatch option (b) was rejected because the wgpu
-backend's `Scene` API is not part of mkui's public contract — it is an
-implementation detail of the HUD pipeline. Keeping `with_scene` as a
-"raw scene primitives" surface would commit the project to a second
-public construction path the other backends do not have, fracturing
-the cross-binding contract.
+This matches the Codex round-10 Q5 ratification and Sprint 5
+acceptance criterion #14. The alternative — deprecating `with_scene`
+in v0.6.0 — would force consumers building renderer tests or custom
+HUDs onto a workaround path before the cross-binding declarative API
+covers their use case. The declarative API is the *recommended* surface
+for app code; it is not the *only* surface.
+
+The wgpu backend's `Scene` API is intentionally an
+implementation-of-the-HUD-pipeline surface, not a cross-binding
+contract. That is the source of the asymmetry vs. web/console (which
+have no equivalent low-level surface): the HUD pipeline (ADR 0004) is
+the load-bearing wgpu-specific layer, and giving it a public
+constructor is the right way to expose it without re-exporting the
+tessellator's internals.
 
 ### Layout v1
 
@@ -109,8 +118,11 @@ re-architecting the walker.
   registration.
 - `examples/native-showcase` is added — the cross-binding canonical
   showcase running on wgpu via `mkui::run!(create_showcase_ui, wgpu)`.
-- `mkui-wgpu::Mkui::with_scene` is deprecated; the migration path is
-  the declarative `Mkui::new()?.child(...).run()` API.
+- `mkui-wgpu::Mkui::with_scene` is **retained** as the documented
+  low-level escape hatch. Recommended app code uses the declarative
+  `Mkui::new()?.child(...).run()` API; renderer tests, custom HUDs,
+  and direct-GPU work continue to use `with_scene`. Both surfaces
+  coexist as documented public API.
 - The HUD tessellation pipeline (ADR 0004) is preserved verbatim. The
   bridge layers **above** it — walker → `Scene` → tessellator → HUD
   pass — so any future tessellation work (Slug-style outline text per
@@ -141,8 +153,12 @@ re-architecting the walker.
   event loop, so the global pointer would be pure ceremony — and a
   re-entry hazard. Codex round 10 Q3 anti-pattern-list flagged this
   ahead of time.
-- **Defer `with_scene` deprecation to a follow-up sprint.** Rejected.
-  Shipping the declarative API and leaving the old constructor un-
-  annotated would tell users both shapes are equally supported. The
-  deprecation message is the migration signpost; `#[deprecated]` is
-  the right tool for that.
+- **Deprecate `Mkui::with_scene` in v0.6.0.** Rejected per Codex
+  round-10 Q5. Both shapes ARE equally supported, just for different
+  use cases: declarative for app code, `with_scene` for
+  direct-to-renderer paths (renderer tests, custom HUDs, headless
+  tessellation, future Slug / mkui-vector2d integration). Deprecating
+  the low-level surface before its successor exists would force
+  consumers onto a workaround path for a use case the declarative API
+  is not designed to cover. The two surfaces target different layers
+  of the stack and coexist by design.

@@ -6,10 +6,12 @@
 //! The scene is rebuilt from the tree on every render (eager rebuild on
 //! dirty signal, per ADR 0006 + Codex round-7 Q3).
 //!
-//! The pre-Sprint-5 `Mkui::with_scene(scene).run()` HUD-primitive API is
-//! retained as a low-level escape hatch (deprecated; the migration path
-//! is the new declarative API). See ADR 0006 §"`with_scene` deprecation
-//! choice" for the rationale.
+//! [`Mkui::with_scene`] is the **retained low-level escape hatch** for
+//! renderer tests, custom HUDs, headless tessellation demos, and future
+//! direct-GPU work (Slug glyph rendering, mkui-vector2d primitives).
+//! Both surfaces — declarative `Mkui::new` and low-level `with_scene` —
+//! coexist as documented public API. See ADR 0006 §"`with_scene` as
+//! the retained low-level escape hatch".
 
 use mkui_core::components::Component;
 use mkui_core::error::MkuiError;
@@ -22,14 +24,17 @@ use crate::{Scene, Size, WgpuApp};
 /// type and let it decide whether to drive a winit event loop, a
 /// headless tessellation pass, or (later) a web canvas.
 ///
-/// Two construction paths:
+/// Two construction paths, both supported as documented public API:
 ///
-/// - **Declarative (recommended)** — `Mkui::new()?.child(...).run()`.
+/// - **Declarative (recommended for app code)** — `Mkui::new()?.child(...).run()`.
 ///   Builds an `mkui_runtime::AppTree` via `mkui_core`'s lowering
-///   registry; the walker projects it into a scene per frame.
-/// - **Raw scene (escape hatch, deprecated)** — `Mkui::with_scene(scene).run()`.
-///   Hands a pre-built `Scene` to the renderer unchanged. Retained for
-///   v0.6.x; slated for removal in v0.7.0 (see ADR 0006).
+///   registry; the walker projects it into a scene per frame. This is
+///   the cross-binding identity the web and console backends also expose.
+/// - **Low-level escape hatch** — `Mkui::with_scene(scene).run()`. Hands
+///   a pre-built `Scene` to the renderer unchanged. The right surface
+///   for renderer tests, custom HUDs, headless tessellation demos, and
+///   future direct-GPU work (Slug glyph rendering, mkui-vector2d
+///   primitives). See ADR 0006.
 pub struct Mkui {
     app: WgpuApp,
     /// Stored alongside `app` so `.child()` can lower into the runtime
@@ -61,19 +66,19 @@ impl Mkui {
         })
     }
 
-    /// Raw-scene escape hatch. Hands `scene` straight to the renderer
-    /// without going through the runtime tree walker. Retained for
-    /// v0.6.x as the documented "I want raw scene primitives" surface;
-    /// see ADR 0006 §"`with_scene` deprecation choice" — the canonical
-    /// path is the declarative `.new()?.child(...).run()` API mirrored
-    /// from `mkui-web` and `mkui-console`.
-    #[deprecated(
-        since = "0.6.0",
-        note = "prefer Mkui::new()?.child(...).run() — the declarative \
-                AppTree path. with_scene is retained as a low-level \
-                escape hatch for v0.6.x and is slated for removal in \
-                v0.7.0 (ADR 0006)."
-    )]
+    /// Build a `Mkui` from a pre-built [`Scene`] of raw render primitives.
+    ///
+    /// This is the **low-level escape hatch** for renderer tests, custom
+    /// HUDs, headless tessellation demos, and future direct-GPU
+    /// experiments (Slug glyph rendering, mkui-vector2d primitives).
+    /// For typical declarative UI, use [`Mkui::new`] and build a runtime
+    /// tree via [`Component`]s instead.
+    ///
+    /// `with_scene` is a **permanent** low-level surface, not a
+    /// deprecated path. The declarative `Mkui::new` API is the cross-
+    /// binding public identity; `with_scene` continues to exist as a
+    /// documented direct-to-renderer entry point. See ADR 0006
+    /// §"`with_scene` as the retained low-level escape hatch".
     pub fn with_scene(scene: Scene) -> Self {
         Self {
             app: WgpuApp::new(scene),
@@ -196,7 +201,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn with_scene_skips_the_runtime_path() {
         let scene = Scene::new(Size::new(640.0, 480.0));
         let mkui = Mkui::with_scene(scene);

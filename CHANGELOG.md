@@ -64,21 +64,22 @@ breaking changes can land on minor bumps).
 - **`mkui` bridge crate `wgpu` feature** — enables the wgpu backend
   through the unified `Mkui` type and the `mkui::run!` macro's `wgpu`
   arm (#56)
-- **ADR 0006** — bridge design (walker, registry, input model),
-  relationship to ADR 0005 (consumes the substrate, doesn't extend
-  it) and ADR 0004 (tessellation pipeline preserved; bridge layers
-  above), `with_scene` deprecation choice (option a — mark deprecated,
-  retain through v0.6.x, slated for removal in v0.7.0) (#56)
-
-### Deprecated
-- **`mkui_wgpu::Mkui::with_scene(scene)`** — marked `#[deprecated]` in
-  favour of the declarative `Mkui::new()?.child(...).run()` shape.
-  Retained for v0.6.x as a low-level escape hatch; slated for removal
-  in v0.7.0. See ADR 0006 §"`with_scene` deprecation choice" (#56)
+- **ADR 0006** — bridge design (walker, registry, input model,
+  press-to-arm pointer activation), relationship to ADR 0005
+  (consumes the substrate, doesn't extend it) and ADR 0004
+  (tessellation pipeline preserved; bridge layers above), and
+  `with_scene` retained as the documented low-level escape hatch
+  (Codex round-10 Q5 ratification) (#56)
 
 ### Changed
 - **`mkui-wgpu/Cargo.toml`** — adds `mkui-runtime` dependency. Sprint
   4 deliberately deferred this edge; Sprint 5 takes it (#56)
+- **`mkui_wgpu::Mkui::with_scene` doc** — clarified as the retained
+  low-level escape hatch for renderer tests, custom HUDs, headless
+  tessellation demos, and future direct-GPU experiments (Slug,
+  mkui-vector2d). Behaviour unchanged; the rewritten doc positions
+  it alongside the declarative `Mkui::new` API as documented public
+  API rather than a successor-pending path (#56)
 
 ## [0.5.0] — 2026-05-25
 
