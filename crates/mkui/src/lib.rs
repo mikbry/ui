@@ -84,7 +84,9 @@ pub struct Mkui {
     inner: mkui_console::prelude::Mkui,
     #[cfg(all(feature = "web", not(feature = "console")))]
     inner: mkui_web::prelude::Mkui,
-    #[cfg(not(any(feature = "web", feature = "console")))]
+    #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+    inner: mkui_wgpu::prelude::Mkui,
+    #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
     _marker: std::marker::PhantomData<()>,
 }
 
@@ -102,10 +104,16 @@ impl Mkui {
             Ok(Self { inner })
         }
 
-        #[cfg(not(any(feature = "web", feature = "console")))]
+        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        {
+            let inner = mkui_wgpu::prelude::Mkui::new()?;
+            Ok(Self { inner })
+        }
+
+        #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
         {
             Err(MkuiError::initialization(
-                "No mkui backend feature enabled (enable `web` or `console`)",
+                "No mkui backend feature enabled (enable `web`, `console`, or `wgpu`)",
             ))
         }
     }
@@ -123,7 +131,13 @@ impl Mkui {
                 inner: self.inner.child(child),
             }
         }
-        #[cfg(not(any(feature = "web", feature = "console")))]
+        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        {
+            Self {
+                inner: self.inner.child(child),
+            }
+        }
+        #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
         {
             let _ = child;
             self
@@ -142,7 +156,12 @@ impl Mkui {
             self.inner.run().map_err(js_value_to_mkui_error)
         }
 
-        #[cfg(not(any(feature = "web", feature = "console")))]
+        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        {
+            self.inner.run()
+        }
+
+        #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
         {
             Err(MkuiError::generic("No mkui backend feature enabled"))
         }
@@ -214,6 +233,27 @@ macro_rules! run {
                     std::io::ErrorKind::Other,
                     e.to_string(),
                 ))
+            }
+        }
+    }};
+
+    ($create_ui_fn:expr, wgpu) => {{
+        // Native wgpu arm: surfaces `MkuiError` via `Box<dyn Error>` so a
+        // showcase binary's `main` can return the same type the native
+        // example template uses.
+        let app = match $create_ui_fn() {
+            Ok(app) => app,
+            Err(e) => {
+                eprintln!("Failed to create app: {}", e);
+                return Err(Box::<dyn std::error::Error>::from(e.to_string()));
+            }
+        };
+
+        match app.run() {
+            Ok(()) => Ok::<(), Box<dyn std::error::Error>>(()),
+            Err(e) => {
+                eprintln!("Failed to run app: {}", e);
+                Err(Box::<dyn std::error::Error>::from(e.to_string()))
             }
         }
     }};

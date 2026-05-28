@@ -18,6 +18,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stroke: None,
     }));
 
+    // `with_scene` is the retained low-level escape hatch for the HUD
+    // `Scene` API (ADR 0006). The native-window smoke deliberately
+    // exercises this direct-to-renderer path so a regression in the
+    // tessellation pipeline still shows up here.
     let mkui = Mkui::with_scene(scene);
     mkui.run()?;
     Ok(())
