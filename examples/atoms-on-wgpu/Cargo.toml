@@ -1,0 +1,12 @@
+[package]
+name = "atoms-on-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-core = { path = "../../crates/mkui-core" }
+mkui-runtime = { path = "../../crates/mkui-runtime" }
+mkui-wgpu = { path = "../../crates/mkui-wgpu" }
+serde_json = { workspace = true }

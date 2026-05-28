@@ -122,6 +122,15 @@ struct PyCallback {
 
 #[pymethods]
 impl App {
+    // `App::new` is the PyO3 constructor exposed to Python — adding an
+    // `impl Default for App` block would either duplicate the body or
+    // introduce a non-`#[pyclass]`-aware path that the PyO3 toolchain
+    // does not expect to coexist with `#[new]`. The cleanup is tracked
+    // for Sprint 6 mkui-py hygiene work in
+    // https://github.com/mikbry/ui/issues/53; allow the lint here so
+    // the workspace `clippy -D warnings` gate stays green in the
+    // meantime (Codex round-11 P2 #4).
+    #[allow(clippy::new_without_default)]
     #[new]
     pub fn new() -> Self {
         Self {

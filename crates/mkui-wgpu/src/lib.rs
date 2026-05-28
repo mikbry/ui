@@ -52,24 +52,30 @@
 
 pub mod app;
 pub mod badge;
+pub mod bridge;
 pub mod builder;
 pub mod components;
 pub mod dot;
 pub mod high_level;
+pub mod input;
 pub mod prelude;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render;
 pub mod renderer;
 pub mod theme;
 pub mod types;
+pub mod walker;
 
 mod tessellation;
 
 pub use app::WgpuApp;
+pub use bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable, WgpuRendererRegistry};
 pub use high_level::Mkui;
+pub use input::{hit_test, ClickHit, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{RenderOutcome, Renderer};
 pub use renderer::WgpuRenderer;
+pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
 
 // Low-level types
 pub use types::{

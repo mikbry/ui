@@ -21,6 +21,14 @@ and the four records below.
   — A bounded port of an upstream 2D HUD renderer (~600 lines) + a `winit`
   `ApplicationHandler` shell gives `mkui-wgpu` a working wgpu surface in one
   sprint.
+- [ADR 0005 — `mkui-runtime` as the portable AppTree substrate](0005-mkui-runtime-portable-substrate.md)
+  — A new `mkui-runtime` crate owns the arena-backed `AppTree`,
+  generation-counter `NodeId` / `ActionId` handles, and the class parser
+  every binding shares.
+- [ADR 0006 — `mkui-wgpu` declarative bridge over `mkui-runtime::AppTree`](0006-wgpu-declarative-bridge.md)
+  — `mkui-wgpu` walks the runtime tree into the existing tessellation
+  pipeline; `WgpuRenderable` + `WgpuRendererRegistry` stay backend-local;
+  the legacy `Mkui::with_scene` constructor is deprecated.
 
 ## ADR format conventions
 

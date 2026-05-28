@@ -19,6 +19,88 @@ breaking changes can land on minor bumps).
   preserved; only the private-repo proper noun is replaced with
   domain-neutral phrasing. Zero functional impact (#58)
 
+## [0.6.0] — 2026-05-27
+
+### Added
+- **`mkui-wgpu` declarative bridge over `mkui_runtime::AppTree`** —
+  `Mkui::new()?.child(...).run()` on the wgpu backend now mirrors the
+  web and console backends. The walker projects the runtime tree into
+  the existing tessellation pipeline (no new GPU pipeline state); the
+  input router does reverse paint-order hit-testing against the per-
+  frame `Vec<HitTestEntry>` collected during the walk. ADR 0006
+  documents the design (#56)
+- **`WgpuRenderable` trait + `WgpuRendererRegistry`** in `mkui-wgpu`
+  (backend-local placement per Codex round-7 Q1 ratification, mirrors
+  `mkui-web::WebRendererRegistry`). Trait signature matches the Codex
+  round-10 §"Concrete Shape" sketch: `render(&Node, &Value, &mut WgpuRenderCtx)
+  -> Result<WgpuRenderOutcome, MkuiError>`. `WgpuRenderOutcome::{RecurseChildren,
+  ChildrenHandled}` lets a renderer signal whether the walker should
+  continue into the node's children. `WgpuRenderCtx<'a>` exposes the
+  five round-10 fields (`tree`, `registry`, `scene`, `theme`, `hits`)
+  plus three layout-state fields extension renderers need to position
+  primitives in the walker's vertical flow. `with_defaults()` ships
+  built-in `BadgeRenderer` + `DotRenderer` so the scene-primitive
+  atoms ported in ADR 0004 stay accessible through the AppTree
+  `NodeKind::Custom` slot. Custom-component + fallback tests in
+  `crates/mkui-wgpu/src/bridge.rs` (#56)
+- **`mkui-wgpu/src/walker.rs`** — `walk_app_tree(tree, registry, &WalkOptions)
+  -> Result<WalkOutput, MkuiError>` AppTree → `Scene` walker matching
+  the Codex round-10 §"Concrete Shape" sketch (`WalkOptions` carries
+  viewport + theme; `WalkOutput` returns `scene` + `hit_tests` +
+  `layouts` as a single move). Eager rebuild on
+  `RuntimeCtx::RequestRedraw`; never indexed into the raw `nodes` vec
+  (every lookup goes through `tree.get(id)` so the generation-counter
+  staleness guard fires). Layout v1 is a deliberately minimal
+  wgpu-local pass (top-down vertical flow + class-driven padding /
+  gap / text-button sizing); a future shared `mkui-layout` module is
+  the reserved seam for cross-binding layout parity (ADR 0006 §"Out
+  of scope") (#56)
+- **`mkui-wgpu/src/input.rs`** — press-to-arm pointer state machine
+  (Codex round-10 Q4). Cursor latched from `WindowEvent::CursorMoved`;
+  press hit-tests + arms the topmost node; release fires only if the
+  release hit-tests the same armed node; `CursorLeft` and Escape
+  clear the armed slot without firing. Logical/physical DPI
+  conversion via `window.scale_factor()`. `window.request_redraw()`
+  is called from the event-loop handler — never from inside action
+  closures (Sprint 4 anti-pattern carry-forward) (#56)
+- **`examples/atoms-on-wgpu`** re-introduced — 12-badge grid + dot
+  showcase + title text built via `tree.push_custom("badge", …)` /
+  `tree.push_custom("dot", …)`. The renderers ship in
+  `WgpuRendererRegistry::with_defaults()` so the example needs no
+  per-app registration (#56)
+- **`examples/native-showcase`** — *added alongside* the existing
+  `examples/native-window` HUD smoke (not a rename). Drives
+  `examples/showcase-common::create_showcase_ui` end-to-end on the
+  wgpu backend via `mkui::run!(create_showcase_ui, wgpu)`. The
+  showcase function itself is byte-unchanged from main (Codex round-7
+  Q6 audit-grade preservation) (#56)
+- **`mkui::run!` wgpu arm** — the bridge crate now supports
+  `mkui::run!(create_ui, wgpu)` alongside the existing `web` /
+  `console` arms (#56)
+- **`mkui-wgpu::Mkui::from_core(core)`** — wraps a pre-built
+  `mkui_core::components::Mkui` so callers that constructed the
+  `AppTree` directly (FFI bindings, the atoms-on-wgpu example) can
+  hand it to the wgpu run loop (#56)
+- **`mkui` bridge crate `wgpu` feature** — enables the wgpu backend
+  through the unified `Mkui` type and the `mkui::run!` macro's `wgpu`
+  arm (#56)
+- **ADR 0006** — bridge design (walker, registry, input model,
+  press-to-arm pointer activation), relationship to ADR 0005
+  (consumes the substrate, doesn't extend it) and ADR 0004
+  (tessellation pipeline preserved; bridge layers above), and
+  `with_scene` retained as the documented low-level escape hatch
+  (Codex round-10 Q5 ratification) (#56)
+
+### Changed
+- **`mkui-wgpu/Cargo.toml`** — adds `mkui-runtime` dependency. Sprint
+  4 deliberately deferred this edge; Sprint 5 takes it (#56)
+- **`mkui_wgpu::Mkui::with_scene` doc** — clarified as the retained
+  low-level escape hatch for renderer tests, custom HUDs, headless
+  tessellation demos, and future direct-GPU experiments (Slug,
+  mkui-vector2d). Behaviour unchanged; the rewritten doc positions
+  it alongside the declarative `Mkui::new` API as documented public
+  API rather than a successor-pending path (#56)
+
 ## [0.5.0] — 2026-05-25
 
 ### Added
