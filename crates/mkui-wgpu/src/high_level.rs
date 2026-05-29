@@ -1,4 +1,6 @@
-//! High-level [`Mkui`] entry point for the wgpu backend.
+//! High-level `Mkui` entry point for the wgpu backend.
+//! Provides the declarative AppTree path plus `with_scene` as a retained
+//! low-level raw-scene escape hatch.
 //!
 //! Sprint 5 (issue #56): the entry point now mirrors the web + console
 //! backends — `Mkui::new()?.child(...).run()` — built on the

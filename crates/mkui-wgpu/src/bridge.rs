@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use mkui_core::error::MkuiError;
 use mkui_runtime::{AppTree, Node};
 
-use crate::theme::HudTheme;
+use crate::theme::WgpuTheme;
 use crate::types::Scene;
 use crate::walker::HitTestEntry;
 
@@ -100,7 +100,7 @@ pub struct WgpuRenderCtx<'a> {
     pub tree: &'a AppTree,
     pub registry: &'a WgpuRendererRegistry,
     pub scene: &'a mut Scene,
-    pub theme: &'a HudTheme,
+    pub theme: &'a WgpuTheme,
     pub hits: &'a mut Vec<HitTestEntry>,
     /// Viewport width in logical pixels — extension renderers can use
     /// this to size full-width primitives.
@@ -390,7 +390,7 @@ pub mod builtins {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::HudTheme;
+    use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size};
     use mkui_runtime::AppTree;
 
@@ -472,7 +472,7 @@ mod tests {
             .unwrap();
         let custom_node = tree.get(custom_id).expect("custom node");
 
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut scene = Scene::new(Size::new(100.0, 100.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
         let mut ctx = WgpuRenderCtx {
@@ -534,7 +534,7 @@ mod tests {
             .unwrap();
         let custom_node = tree.get(custom_id).expect("custom node");
 
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut scene = Scene::new(Size::new(100.0, 100.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
         let mut ctx = WgpuRenderCtx {
