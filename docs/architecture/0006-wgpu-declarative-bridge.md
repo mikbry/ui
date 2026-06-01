@@ -40,7 +40,7 @@ existing tessellation pipeline.
   `mkui_runtime::AppTree` and emits scene primitives via the existing
   tessellation pipeline. No new GPU pipeline state is introduced; the
   pipeline boundary documented in ADR 0004 (`Scene` → HUD pass) holds.
-- **Input router** (`crates/mkui-wgpu/src/input.rs`) — cursor tracked
+- **Input router** (`crates/mkui-wgpu/src/pointer.rs`) — cursor tracked
   from `WindowEvent::CursorMoved`, hit-test in reverse paint order
   against the per-frame `Vec<HitTestEntry>` collected during the walk,
   click semantics on release. Logical/physical DPI conversion uses the

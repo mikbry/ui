@@ -27,7 +27,7 @@ use winit::{
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::input::{left_button_state, PointerState};
+use crate::pointer::{left_button_state, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::{RenderOutcome, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
@@ -233,9 +233,9 @@ impl WgpuApp {
     /// Fire the action attached to `click_hit` through the tree's
     /// `ActionRegistry`. Returns true if a redraw signal was raised.
     /// Caller must have already resolved `click_hit` via the press-to-
-    /// arm state machine (see [`crate::input::PointerState::on_release`]).
+    /// arm state machine (see [`crate::pointer::PointerState::on_release`]).
     #[cfg(not(target_arch = "wasm32"))]
-    fn fire_action(&mut self, click_hit: crate::input::ClickHit) -> bool {
+    fn fire_action(&mut self, click_hit: crate::pointer::ClickHit) -> bool {
         let Some(action_id) = click_hit.action else {
             return false;
         };

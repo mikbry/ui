@@ -283,7 +283,7 @@ impl<'a, T> UiBuilder<'a, T> {
             ),
             Size::new(input_width, 20.0),
         );
-        components::input(
+        components::text_field(
             self.scene,
             input_rect,
             row.value,
