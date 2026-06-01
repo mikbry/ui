@@ -166,7 +166,7 @@ fn push_rect(triangles: &mut Vec<GuiTriangle>, rect: Rect, color: Color) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::HudTheme;
+    use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size, Text};
 
     #[test]
@@ -175,7 +175,7 @@ mod tests {
         scene.text(Text {
             rect: Rect::new(Point::new(8.0, 8.0), Size::new(220.0, 24.0)),
             content: "Undo Ctrl/Cmd+Z".to_string(),
-            style: HudTheme::default().body_style,
+            style: WgpuTheme::default().body_style,
         });
 
         let triangles = tessellate_scene(&scene);
@@ -189,7 +189,7 @@ mod tests {
         scene.text(Text {
             rect: Rect::new(Point::new(8.0, 8.0), Size::new(220.0, 24.0)),
             content: String::new(),
-            style: HudTheme::default().body_style,
+            style: WgpuTheme::default().body_style,
         });
         assert!(tessellate_scene(&scene).is_empty());
     }

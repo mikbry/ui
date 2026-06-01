@@ -15,7 +15,7 @@ fn main() {
     println!("After space key: {}", toggle.is_checked());
 
     // ---- Atom showcase: Badge × variant × size + Dot × variant × halo × animation
-    let theme = HudTheme::default();
+    let theme = WgpuTheme::default();
     let mut scene = Scene::new(Size::new(640.0, 320.0));
 
     // Badge grid: each variant in both sizes, laid out as a 4×2 grid.

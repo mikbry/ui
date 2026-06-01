@@ -8,7 +8,7 @@
 //! visual modifiers; the animation lives on [`Scene::animations`] for the
 //! renderer to interpret per-frame.
 
-use crate::theme::{DotSize, DotVariant, HudTheme};
+use crate::theme::{DotSize, DotVariant, WgpuTheme};
 use crate::types::{
     CornerRadii, DotAnimation, DotAnimationInstance, Point, Quad, Rect, Scene, Size,
 };
@@ -29,7 +29,7 @@ pub fn dot(
     size: DotSize,
     halo: bool,
     animation: DotAnimation,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     let style = theme.dot_style(variant, size);
     let radius = style.diameter * 0.5;
@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn emits_one_quad_per_variant_size_combination_without_halo() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         for variant in [
             DotVariant::Ok,
             DotVariant::Warn,
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn halo_emits_an_extra_quad_at_one_and_a_half_diameter() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut s = scene();
         dot(
             &mut s,
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn variants_resolve_to_distinct_fills() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut fills = Vec::new();
         for variant in [
             DotVariant::Ok,
@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn animation_none_pushes_no_metadata() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut s = scene();
         dot(
             &mut s,
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn animation_non_none_pushes_one_instance_keyed_at_center() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         for kind in [
             DotAnimation::Pulse,
             DotAnimation::PulseUrgent,

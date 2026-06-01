@@ -1,10 +1,11 @@
-//! AppTree walker — projects an [`mkui_runtime::AppTree`] into the
-//! scene-primitive pipeline that the existing wgpu renderer consumes.
+//! AppTree to Scene projection for the wgpu backend.
+//! The walker consumes `mkui_runtime::AppTree`, emits `Scene` primitives, and
+//! collects hit-test data for pointer routing.
 //!
 //! The walker is the wgpu-side equivalent of
 //! [`mkui_web::render::render_tree`] (per ADR 0006): it consumes the
 //! runtime tree directly, emits [`crate::Primitive`]s through the
-//! tessellation pipeline already wired up by the v0.4.x HUD work
+//! tessellation pipeline already wired up by the v0.4.x tessellator port
 //! (ADR 0004), and collects a per-frame `Vec<HitTestEntry>` for the
 //! input router to reverse-paint-order hit-test against.
 //!
@@ -53,7 +54,7 @@ use mkui_runtime::{
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
 use crate::theme::{
-    ButtonSize, ButtonVariant as ThemeButtonVariant, HudTheme, TextVariant as ThemeTextVariant,
+    ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
 };
 use crate::types::{
     CornerRadii, Point, Quad, Rect, Scene, Size, Stroke, Text, TextAlign, TextStyle,
@@ -95,12 +96,12 @@ pub struct NodeLayout {
 ///
 /// `viewport` is the logical-pixel size of the surface to lay out
 /// against. `theme` is consumed by value so the walker can hand a
-/// shared `&HudTheme` to every node + extension renderer without
+/// shared `&WgpuTheme` to every node + extension renderer without
 /// threading a lifetime through every internal helper.
 #[derive(Debug, Clone, Copy)]
 pub struct WalkOptions {
     pub viewport: Size,
-    pub theme: HudTheme,
+    pub theme: WgpuTheme,
 }
 
 /// Output of one [`walk_app_tree`] pass: the freshly built scene, the
@@ -457,7 +458,7 @@ mod tests {
         let registry = WgpuRendererRegistry::with_defaults();
         let options = WalkOptions {
             viewport: Size::new(800.0, 600.0),
-            theme: HudTheme::default(),
+            theme: WgpuTheme::default(),
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
