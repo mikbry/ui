@@ -1,21 +1,21 @@
 //! Cross-platform components that emit into a `Scene`.
 //!
 //! The surface mirrors [`miklabs/ui`] (`mkui-core::components`) and
-//! [shadcn/ui]: every overlay is composed from `Card`, `Button`, `Input`,
+//! [shadcn/ui]: every view is composed from `Card`, `Button`, `Input`,
 //! `Slider`, `ChipGroup`, `Scrollbar`, `Swatch`, `Label`, `Text`. Each
 //! component takes a
-//! `variant` and a `size` and resolves concrete colors through [`HudTheme`]
+//! `variant` and a `size` and resolves concrete colors through [`WgpuTheme`]
 //! — the same cva-style shape shadcn uses for its `ButtonVariant` /
 //! `ButtonSize`. State (`ButtonState::Idle` / `Active`) is orthogonal to
-//! variant and supplied per-frame, because the upstream HUD renderer is
+//! variant and supplied per-frame, because the underlying renderer is
 //! immediate-mode and does not retain a component tree between frames.
 //!
 //! Two layers:
 //!
 //! - **component builders** — [`card`], [`button`], [`input`], [`slider`],
 //!   [`chip_group`], [`scrollbar`], [`swatch`], [`heading`], [`text`]. Each takes a
-//!   variant / size / state and pulls concrete colors from [`HudTheme`].
-//!   This is the layer HUD overlays call.
+//!   variant / size / state and pulls concrete colors from [`WgpuTheme`].
+//!   This is the layer view code calls.
 //! - **primitives** — [`panel`], [`titled_panel`], [`label`], [`button_with`].
 //!   These take pre-resolved `PanelStyle` / `ButtonStyle` values and are the
 //!   escape hatch when a caller needs a one-off style that isn't in the
@@ -25,8 +25,8 @@
 //! [`miklabs/ui`]: https://github.com/mikbry/ui
 
 use crate::theme::{
-    ButtonSize, ButtonState, ButtonStyle, ButtonVariant, CardStyle, HudTheme, InputStyle,
-    PanelStyle, ScrollbarStyle, SliderStyle, SwatchStyle, TextVariant,
+    ButtonSize, ButtonState, ButtonStyle, ButtonVariant, CardStyle, InputStyle, PanelStyle,
+    ScrollbarStyle, SliderStyle, SwatchStyle, TextVariant, WgpuTheme,
 };
 use crate::types::{
     CornerRadii, HitRegion, PanelLayout, Point, Quad, Rect, Scene, Shadow, Size, Stroke, Text,
@@ -184,7 +184,7 @@ pub fn swatch(scene: &mut Scene, rect: Rect, fill: crate::types::Color, style: S
 }
 
 /// Two-state button with shadcn-style `variant` + `size`. Resolves through
-/// the provided [`HudTheme`] so a theme swap is a one-line change at every
+/// the provided [`WgpuTheme`] so a theme swap is a one-line change at every
 /// call site.
 pub fn button(
     scene: &mut Scene,
@@ -193,7 +193,7 @@ pub fn button(
     variant: ButtonVariant,
     size: ButtonSize,
     state: ButtonState,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     let style = theme.button_style(variant, size);
     button_with(scene, rect, label_text, state, &style);
@@ -311,7 +311,7 @@ pub fn chip_group<T>(
     selected: usize,
     variant: ButtonVariant,
     size: ButtonSize,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
     to_target: impl Fn(usize) -> T,
 ) -> Vec<Rect> {
     const INNER_PADDING: f32 = 10.0;
@@ -356,7 +356,7 @@ pub fn chip_group<T>(
 /// Convenience: emit the title row of a [`titled_panel`] as a themed
 /// heading. Kept for symmetry with miklabs/ui's `Text` component; callers
 /// who want the raw `TextStyle` can still use [`label`] directly.
-pub fn heading(scene: &mut Scene, rect: Rect, text: impl Into<String>, theme: &HudTheme) {
+pub fn heading(scene: &mut Scene, rect: Rect, text: impl Into<String>, theme: &WgpuTheme) {
     label(scene, rect, text, theme.text_style(TextVariant::Heading));
 }
 
@@ -366,21 +366,20 @@ pub fn text(
     rect: Rect,
     text: impl Into<String>,
     variant: TextVariant,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     label(scene, rect, text, theme.text_style(variant));
 }
 
 /// Vertical list of lines under a title inside a panel — the familiar
-/// "mode / status / history" card used by the HUD. Kept for the existing
-/// overlay code; new panels should compose [`titled_panel`] + [`label`]
-/// directly.
-pub fn hud_list(
+/// "mode / status / history" card. Kept for existing overlay code; new
+/// panels should compose [`titled_panel`] + [`label`] directly.
+pub fn info_list(
     scene: &mut Scene,
     rect: Rect,
     title: &str,
     lines: &[impl AsRef<str>],
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     let content = panel(scene, rect, theme.panel);
     label(
@@ -414,10 +413,10 @@ mod tests {
     use crate::types::{Primitive, Scene, Size};
 
     #[test]
-    fn hud_list_builds_panel_and_text() {
+    fn info_list_builds_panel_and_text() {
         let mut scene = Scene::new(Size::new(800.0, 600.0));
-        let theme = HudTheme::default();
-        hud_list(
+        let theme = WgpuTheme::default();
+        info_list(
             &mut scene,
             Rect::new(Point::new(20.0, 20.0), Size::new(260.0, 140.0)),
             "Status",
@@ -435,7 +434,7 @@ mod tests {
 
     #[test]
     fn button_emits_different_fills_for_idle_and_active() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut idle_scene = Scene::new(Size::new(200.0, 80.0));
         let mut active_scene = Scene::new(Size::new(200.0, 80.0));
         button(
@@ -464,7 +463,7 @@ mod tests {
     #[test]
     fn titled_panel_returns_content_below_title() {
         let mut scene = Scene::new(Size::new(400.0, 400.0));
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let rect = Rect::new(Point::new(0.0, 0.0), Size::new(260.0, 200.0));
         let body = titled_panel(&mut scene, rect, "Mode", theme.panel, theme.title_style);
         let content = rect.inset(theme.panel.padding);
@@ -480,7 +479,7 @@ mod tests {
     #[test]
     fn slider_thumb_sits_proportional_to_fraction() {
         let mut scene = Scene::new(Size::new(400.0, 80.0));
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let style = theme.slider();
         let track = Rect::new(Point::new(10.0, 40.0), Size::new(200.0, 8.0));
         let regions = slider(&mut scene, track, 0.25, &style);
@@ -492,7 +491,7 @@ mod tests {
     #[test]
     fn chip_group_pushes_one_hit_region_per_option() {
         let mut scene = Scene::new(Size::new(400.0, 200.0));
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let mut layout: PanelLayout<usize> = PanelLayout::default();
         let row = Rect::new(Point::new(0.0, 0.0), Size::new(300.0, 50.0));
         let rects = chip_group(
@@ -514,7 +513,7 @@ mod tests {
     #[test]
     fn input_draws_box_and_text() {
         let mut scene = Scene::new(Size::new(240.0, 80.0));
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         input(
             &mut scene,
             Rect::new(Point::new(10.0, 10.0), Size::new(90.0, 20.0)),
@@ -535,7 +534,7 @@ mod tests {
     #[test]
     fn swatch_draws_colored_quad() {
         let mut scene = Scene::new(Size::new(80.0, 80.0));
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let fill = crate::types::Color::rgba(0.3, 0.4, 0.5, 1.0);
         swatch(
             &mut scene,

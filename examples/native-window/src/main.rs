@@ -4,7 +4,7 @@
 //! single quad emitted by the existing `Scene` API. This is the smoke
 //! test referenced by issue #20's acceptance criteria — the window
 //! shouldn't show anything more elaborate than that, so any visual
-//! regression in the HUD pipeline is immediately obvious.
+//! regression in the render pipeline is immediately obvious.
 
 use mkui_wgpu::{Color, CornerRadii, Mkui, Point, Primitive, Quad, Rect, Scene, Size};
 
@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stroke: None,
     }));
 
-    // `with_scene` is the retained low-level escape hatch for the HUD
+    // `with_scene` is the retained low-level escape hatch for the raw
     // `Scene` API (ADR 0006). The native-window smoke deliberately
     // exercises this direct-to-renderer path so a regression in the
     // tessellation pipeline still shows up here.

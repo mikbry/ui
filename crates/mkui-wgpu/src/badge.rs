@@ -6,19 +6,19 @@
 //! signals (state pills, role tags, tier markers) compose this atom in
 //! downstream crates and do **not** extend the enum.
 
-use crate::theme::{BadgeSize, BadgeVariant, HudTheme};
+use crate::theme::{BadgeSize, BadgeVariant, WgpuTheme};
 use crate::types::{CornerRadii, Point, Quad, Rect, Scene, Size, Stroke, Text, TextStyle};
 
 /// Emit a badge into `scene` at `rect`. The caller picks the rect so the
 /// atom can be laid out by the parent (table row, header strip, etc.);
-/// `variant` + `size` resolve through [`HudTheme::badge_style`].
+/// `variant` + `size` resolve through [`WgpuTheme::badge_style`].
 pub fn badge(
     scene: &mut Scene,
     rect: Rect,
     label: impl Into<String>,
     variant: BadgeVariant,
     size: BadgeSize,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     let style = theme.badge_style(variant, size);
 
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn emits_quad_and_text_for_every_variant_size_combination() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let rect = Rect::new(Point::new(0.0, 0.0), Size::new(60.0, 22.0));
         for variant in [
             BadgeVariant::Default,
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn outline_variant_has_stroke_other_variants_do_not() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let rect = Rect::new(Point::new(0.0, 0.0), Size::new(60.0, 22.0));
 
         let mut outline = scene();
@@ -159,7 +159,7 @@ mod tests {
         // Smoke: Ghost + Link round-trip through `badge_style` without
         // panicking and resolve to a chrome-less background (alpha 0). The
         // label colour comes through non-zero so the text is still drawn.
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         for variant in [BadgeVariant::Ghost, BadgeVariant::Link] {
             let style = theme.badge_style(variant, BadgeSize::Default);
             assert_eq!(
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn sm_size_uses_smaller_label_text() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let rect = Rect::new(Point::new(0.0, 0.0), Size::new(60.0, 22.0));
 
         let mut default_scene = scene();

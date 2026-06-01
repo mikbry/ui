@@ -15,7 +15,7 @@ use std::sync::Arc;
 use mkui_text::{BitmapTextSystem, TextSystem};
 
 use crate::bridge::WgpuRendererRegistry;
-use crate::theme::HudTheme;
+use crate::theme::WgpuTheme;
 use crate::types::{Scene, Size};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,7 +50,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 pub struct WgpuApp {
     scene: Scene,
     text_system: Arc<dyn TextSystem>,
-    theme: HudTheme,
+    theme: WgpuTheme,
     /// Either a runtime tree (declarative path) or `None` (raw-scene
     /// escape hatch). When `Some`, `Renderer::render` is called against
     /// a tree-derived scene the app rebuilds per frame; when `None`, the
@@ -85,7 +85,7 @@ impl WgpuApp {
         Self {
             scene,
             text_system: Arc::new(BitmapTextSystem::new()),
-            theme: HudTheme::default(),
+            theme: WgpuTheme::default(),
             core: None,
             registry: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -140,11 +140,11 @@ impl WgpuApp {
         self.text_system = text_system;
     }
 
-    pub fn theme(&self) -> &HudTheme {
+    pub fn theme(&self) -> &WgpuTheme {
         &self.theme
     }
 
-    pub fn set_theme(&mut self, theme: HudTheme) {
+    pub fn set_theme(&mut self, theme: WgpuTheme) {
         self.theme = theme;
     }
 

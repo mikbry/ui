@@ -6,7 +6,7 @@
 //!
 //! ```
 //! use mkui_wgpu::prelude::*;
-//! # let theme = HudTheme::default();
+//! # let theme = WgpuTheme::default();
 //! # let mut scene = Scene::new(Size::new(320.0, 200.0));
 //! # let mut layout: PanelLayout<()> = PanelLayout::default();
 //! # let content = Rect::new(Point::new(10.0, 10.0), Size::new(300.0, 180.0));
@@ -25,8 +25,8 @@ pub use crate::components;
 pub use crate::high_level::Mkui;
 pub use crate::renderer::WgpuRenderer;
 pub use crate::theme::{
-    BadgeSize, BadgeVariant, ButtonSize, ButtonState, ButtonVariant, DotSize, DotVariant, HudTheme,
-    PanelStyle, TextVariant,
+    BadgeSize, BadgeVariant, ButtonSize, ButtonState, ButtonVariant, DotSize, DotVariant,
+    PanelStyle, TextVariant, WgpuTheme,
 };
 pub use crate::types::{
     Axis, Color, DotAnimation, HitRegion, PanelLayout, Point, Rect, Scene, Size, TextStyle,

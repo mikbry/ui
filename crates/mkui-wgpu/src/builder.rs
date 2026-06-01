@@ -11,7 +11,7 @@
 //!
 //! ```
 //! use mkui_wgpu::prelude::*;
-//! # let theme = HudTheme::default();
+//! # let theme = WgpuTheme::default();
 //! # let mut scene = Scene::new(Size::new(800.0, 600.0));
 //! # let mut layout: PanelLayout<()> = PanelLayout::default();
 //! # let content = Rect::new(Point::new(0.0, 0.0), Size::new(260.0, 200.0));
@@ -28,7 +28,7 @@
 
 use crate::components;
 use crate::theme::{
-    ButtonSize, ButtonState, ButtonVariant, CardStyle, HudTheme, PanelStyle, TextVariant,
+    ButtonSize, ButtonState, ButtonVariant, CardStyle, PanelStyle, TextVariant, WgpuTheme,
 };
 use crate::types::{
     Color, HitRegion, PanelLayout, Point, Rect, Scene, Size, Text, TextAlign, TextStyle,
@@ -41,7 +41,7 @@ use crate::types::{
 pub struct UiBuilder<'a, T> {
     scene: &'a mut Scene,
     layout: &'a mut PanelLayout<T>,
-    theme: &'a HudTheme,
+    theme: &'a WgpuTheme,
     content: Rect,
     cursor_y: f32,
 }
@@ -83,7 +83,7 @@ impl<'a, T> UiBuilder<'a, T> {
     pub fn new(
         scene: &'a mut Scene,
         layout: &'a mut PanelLayout<T>,
-        theme: &'a HudTheme,
+        theme: &'a WgpuTheme,
         content: Rect,
     ) -> Self {
         Self {
@@ -106,7 +106,7 @@ impl<'a, T> UiBuilder<'a, T> {
     pub fn panel(
         scene: &'a mut Scene,
         layout: &'a mut PanelLayout<T>,
-        theme: &'a HudTheme,
+        theme: &'a WgpuTheme,
         rect: Rect,
         style: PanelStyle,
     ) -> Self {
@@ -127,7 +127,7 @@ impl<'a, T> UiBuilder<'a, T> {
     pub fn titled_panel(
         scene: &'a mut Scene,
         layout: &'a mut PanelLayout<T>,
-        theme: &'a HudTheme,
+        theme: &'a WgpuTheme,
         rect: Rect,
         title: &str,
         style: PanelStyle,
@@ -157,7 +157,7 @@ impl<'a, T> UiBuilder<'a, T> {
     }
 
     /// Read-only access to the theme in use.
-    pub fn theme(&self) -> &HudTheme {
+    pub fn theme(&self) -> &WgpuTheme {
         self.theme
     }
 
@@ -385,7 +385,7 @@ impl<'a, T> UiBuilder<'a, T> {
     }
 
     /// Emit a list row into a precomputed `rect`. Used when the caller owns
-    /// its own layout pass (e.g. the Scene Explorer scroll viewport, which
+    /// its own layout pass (e.g. the virtualized list viewport, which
     /// decides row positions outside the builder's linear cursor).
     pub fn list_row_at(&mut self, rect: Rect, spec: ListRow<'_, T>) -> &mut Self {
         let card_style = if spec.selected {
@@ -430,7 +430,7 @@ fn draw_list_row(
     swatch_color: Color,
     label: &str,
     detail: &str,
-    theme: &HudTheme,
+    theme: &WgpuTheme,
 ) {
     components::card(scene, rect, card_style);
 
@@ -474,11 +474,11 @@ mod tests {
     use super::*;
     use crate::types::{Axis, Primitive};
 
-    fn fresh() -> (Scene, PanelLayout<&'static str>, HudTheme, Rect) {
+    fn fresh() -> (Scene, PanelLayout<&'static str>, WgpuTheme, Rect) {
         (
             Scene::new(Size::new(800.0, 600.0)),
             PanelLayout::default(),
-            HudTheme::default(),
+            WgpuTheme::default(),
             Rect::new(Point::new(20.0, 30.0), Size::new(260.0, 400.0)),
         )
     }
@@ -620,7 +620,7 @@ mod tests {
                 &mut layout,
                 &theme,
                 rect,
-                theme.hud_panel(),
+                theme.panel_style(),
             );
             ui.heading("Panel");
         }
@@ -646,11 +646,11 @@ mod tests {
                 &theme,
                 rect,
                 "Inspector",
-                theme.hud_panel(),
+                theme.panel_style(),
             );
             ui.cursor_y()
         };
-        let padded_top = rect.inset(theme.hud_panel().padding).origin.y;
+        let padded_top = rect.inset(theme.panel_style().padding).origin.y;
         assert!(
             inner_content_top > padded_top,
             "titled_panel cursor ({inner_content_top}) should start below the padded content top ({padded_top})"

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
-//! # mkui-wgpu — WGPU/scene backend for mkui
-//!
-//! Shared GUI primitives, theme, and backend scaffolding for mkui WGPU surfaces.
+//! WGPU backend for mkui.
+//! Renders `mkui-runtime::AppTree` data and low-level `Scene` primitive streams
+//! through a WGPU surface.
 //!
 //! The crate is domain-free — it depends on nothing above the standard
 //! library and does not know about projects, timelines, tools, or any
@@ -20,7 +20,7 @@
 //!
 //! - [`types`]        — primitives (Point / Rect / Color / Scene / Primitive),
 //!   text & font handles, `HitRegion<T>`, `PanelLayout<T>`.
-//! - [`theme`]        — [`HudTheme`], [`ButtonVariant`], [`ButtonSize`],
+//! - [`theme`]        — [`WgpuTheme`], [`ButtonVariant`], [`ButtonSize`],
 //!   [`ButtonState`], [`TextVariant`], and cva-style style resolvers.
 //!   Mirrors shadcn's variant / size / state model.
 //! - [`components`]   — scene builders: [`components::card`],
@@ -88,8 +88,8 @@ pub use types::{
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
-    CardStyle, DotSize, DotStyle, DotVariant, HudTheme, InputStyle, PanelStyle, ScrollbarStyle,
-    ShadowStyle, SliderStyle, SwatchStyle, TextVariant, ThemeTokens,
+    CardStyle, DotSize, DotStyle, DotVariant, InputStyle, PanelStyle, ScrollbarStyle, ShadowStyle,
+    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)

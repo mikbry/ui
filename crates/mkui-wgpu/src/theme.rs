@@ -1,4 +1,6 @@
-//! Theme, variants, and cva-style style resolvers.
+//! Backend theme tokens and variant resolvers for mkui-wgpu.
+//! `WgpuTheme` maps semantic tokens and shadcn-style variants into concrete
+//! colors, typography, spacing, and component chrome.
 //!
 //! The shape follows [shadcn/ui] and [`miklabs/ui`] conventions: widgets take
 //! a `variant` and a `size`, and the theme resolves the pair to a concrete
@@ -32,15 +34,15 @@ pub struct ShadowStyle {
     pub spread: f32,
 }
 
-/// Root theme for the HUD. Holds panel / text baseline and a small palette
-/// of semantic tokens (`primary`, `muted`, `destructive`) that variant
-/// resolvers combine with size tokens into concrete widget styles.
+/// Root theme for the wgpu UI backend. Holds panel / text baseline and a
+/// small palette of semantic tokens (`primary`, `muted`, `destructive`) that
+/// variant resolvers combine with size tokens into concrete widget styles.
 ///
 /// The defaults target a warm editorial control-surface look; a future
 /// light-mode or per-product palette swap would only need to replace this
 /// struct.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct HudTheme {
+pub struct WgpuTheme {
     pub panel: PanelStyle,
     pub title_style: TextStyle,
     pub body_style: TextStyle,
@@ -111,7 +113,7 @@ pub enum ButtonSize {
 }
 
 /// Text semantic variant, matching the heading/body ladder in shadcn
-/// typography. Resolved by [`HudTheme::text_style`] into a concrete
+/// typography. Resolved by [`WgpuTheme::text_style`] into a concrete
 /// [`TextStyle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextVariant {
@@ -129,7 +131,7 @@ pub enum TextVariant {
 
 /// Concrete, resolved button look-and-feel. Lower-level widgets
 /// (`widgets::button_with`) take this directly. Higher-level widgets take
-/// `(variant, size)` and resolve through [`HudTheme::button_style`].
+/// `(variant, size)` and resolve through [`WgpuTheme::button_style`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ButtonStyle {
     pub idle_fill: Color,
@@ -160,7 +162,7 @@ pub struct SliderStyle {
 }
 
 /// Concrete, resolved text input look-and-feel. This is a lightweight
-/// shadcn "Input" analogue for immediate-mode HUD fields.
+/// shadcn "Input" analogue for immediate-mode UI fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct InputStyle {
     pub fill: Color,
@@ -224,7 +226,7 @@ pub enum BadgeSize {
 }
 
 /// Concrete, resolved badge look-and-feel. Atoms (`components::badge`) take
-/// `(variant, size)` and resolve through [`HudTheme::badge_style`]; this
+/// `(variant, size)` and resolve through [`WgpuTheme::badge_style`]; this
 /// struct is the cva-style output the atom paints from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BadgeStyle {
@@ -275,7 +277,7 @@ pub struct DotStyle {
     pub diameter: f32,
 }
 
-impl Default for HudTheme {
+impl Default for WgpuTheme {
     fn default() -> Self {
         let font = FontFaceId(0);
         let tokens = ThemeTokens {
@@ -333,10 +335,11 @@ impl Default for HudTheme {
     }
 }
 
-impl HudTheme {
-    /// Baseline panel style for HUD overlays (inspector, explorer, hint bar,
-    /// toolbar). Callers override padding / corner_radius as needed.
-    pub fn hud_panel(&self) -> PanelStyle {
+impl WgpuTheme {
+    /// Baseline panel chrome (inspector, explorer, hint bar, toolbar, and
+    /// other surface containers). Callers override padding / corner_radius as
+    /// needed.
+    pub fn panel_style(&self) -> PanelStyle {
         PanelStyle {
             fill: self.tokens.surface,
             stroke: Stroke {
@@ -671,7 +674,7 @@ mod tests {
 
     #[test]
     fn button_style_flips_fill_on_variant() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let default = theme.button_style(ButtonVariant::Default, ButtonSize::Default);
         let outline = theme.button_style(ButtonVariant::Outline, ButtonSize::Default);
         assert_ne!(
@@ -682,7 +685,7 @@ mod tests {
 
     #[test]
     fn button_style_respects_size() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let sm = theme.button_style(ButtonVariant::Default, ButtonSize::Sm);
         let lg = theme.button_style(ButtonVariant::Default, ButtonSize::Lg);
         assert!(sm.corner_radius < lg.corner_radius);
@@ -690,7 +693,7 @@ mod tests {
 
     #[test]
     fn text_variant_muted_is_dimmer_than_body() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         let body = theme.text_style(TextVariant::Body);
         let muted = theme.text_style(TextVariant::Muted);
         assert!(muted.color.a < body.color.a);
@@ -698,7 +701,7 @@ mod tests {
 
     #[test]
     fn card_selected_differs_from_card() {
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         assert_ne!(theme.card().fill, theme.card_selected().fill);
     }
 
@@ -715,7 +718,7 @@ mod tests {
         // `active_fill`. The collapsed explorer toggle's "+" became unreadable.
         // Every variant's active_label must land on the opposite side of
         // mid-luma from its active_fill.
-        let theme = HudTheme::default();
+        let theme = WgpuTheme::default();
         for variant in [
             ButtonVariant::Default,
             ButtonVariant::Destructive,

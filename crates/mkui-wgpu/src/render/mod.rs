@@ -1,10 +1,12 @@
-//! 2D HUD render pipeline for mkui.
+//! WGPU triangle renderer for mkui UI primitives.
+//! Owns surface configuration, render pipelines, vertex upload, and frame
+//! submission for tessellated UI triangles.
 //!
 //! # Kept vs dropped — port of the upstream reference
 //!
 //! The reference renderer this port draws from (an unrelated 3D scene
 //! viewer) is a 2 854-line, multi-pass pipeline. mkui only needs the load-
-//! bearing 2D HUD slice; the rest is 3D-scene concerns that have no place
+//! bearing 2D UI slice; the rest is 3D-scene concerns that have no place
 //! in a UI renderer.
 //!
 //! **Kept**
@@ -15,9 +17,9 @@
 //! - MSAA capability probe (`pick_sample_count`). Both the swapchain color
 //!   format **and** the depth format have to advertise the requested
 //!   sample count, otherwise pipeline creation fails at runtime. mkui ships
-//!   without depth (the HUD pass writes directly to the swapchain), so the
+//!   without depth (the UI pass writes directly to the swapchain), so the
 //!   probe only needs the color flags — see `pick_sample_count`.
-//! - HUD vertex / fragment entry points. Pixel-space scene coordinates →
+//! - UI vertex / fragment entry points. Pixel-space scene coordinates →
 //!   NDC happens on the CPU in `gui_vertices`; the vertex shader passes
 //!   the result through and the fragment shader writes the per-vertex
 //!   color. This is the entire load-bearing GPU contract for a 2D UI.
@@ -43,13 +45,13 @@
 //!   pong on Rg16Float). UI selection is communicated by recoloring the
 //!   primitive in the scene, not by a post-process outline.
 //! - **Progressive accumulator** (`accumulator.wgsl`, Rgba16Float ping-
-//!   pong, running-average weight, `frames_since_input` counter). The HUD
+//!   pong, running-average weight, `frames_since_input` counter). The UI
 //!   has no Monte-Carlo noise to converge — every frame is deterministic
 //!   from the scene description.
 //! - **Camera / lighting / shadow uniforms.** Replaced by the
-//!   identity-NDC mapping in `gui_vertices`. The HUD pipeline takes
+//!   identity-NDC mapping in `gui_vertices`. The UI pipeline takes
 //!   no bind groups at all.
-//! - **Depth attachment.** The HUD draws back-to-front in primitive order
+//! - **Depth attachment.** The UI draws back-to-front in primitive order
 //!   and uses alpha blending; depth would only force us to keep a
 //!   matching multisampled depth view on resize for no visual gain.
 
@@ -63,7 +65,7 @@ use crate::{tessellate_scene_with_text, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
-/// Preferred MSAA sample count for the HUD pass. 4× on adapters that
+/// Preferred MSAA sample count for the UI pass. 4× on adapters that
 /// support it for the swapchain color format; 1× fallback otherwise.
 const MSAA_SAMPLE_COUNT_PREF: u32 = 4;
 
@@ -83,8 +85,8 @@ pub enum RenderOutcome {
     NeedsReconfigure,
 }
 
-/// 2D HUD renderer. Owns the wgpu device, the surface configuration, the
-/// HUD pipeline, and the optional multisampled color attachment.
+/// 2D UI renderer. Owns the wgpu device, the surface configuration, the
+/// UI pipeline, and the optional multisampled color attachment.
 #[derive(Debug)]
 pub struct Renderer {
     /// Held so the surface lifetime stays bound to a real window — the
@@ -95,20 +97,20 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    /// Effective MSAA sample count for the HUD pass. `1` on adapters that
+    /// Effective MSAA sample count for the UI pass. `1` on adapters that
     /// don't support 4× MSAA on the chosen swapchain color format.
     sample_count: u32,
-    hud_pipeline: wgpu::RenderPipeline,
-    /// Multisampled color attachment the HUD pass renders into when
+    ui_pipeline: wgpu::RenderPipeline,
+    /// Multisampled color attachment the UI pass renders into when
     /// `sample_count > 1`. Resolves into the swapchain texture at end-of-
-    /// pass. `None` on the 1× fallback, where the HUD pass writes the
+    /// pass. `None` on the 1× fallback, where the UI pass writes the
     /// swapchain view directly.
     msaa_color_view: Option<wgpu::TextureView>,
 }
 
 impl Renderer {
     /// Async constructor — requests an adapter, creates the device + queue,
-    /// configures the surface, builds the HUD pipeline.
+    /// configures the surface, builds the UI pipeline.
     pub async fn new(window: Arc<Window>) -> Result<Self, MkuiError> {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -179,7 +181,7 @@ impl Renderer {
         let color_flags = adapter.get_texture_format_features(format).flags;
         let sample_count = pick_sample_count(color_flags, MSAA_SAMPLE_COUNT_PREF);
 
-        let hud_pipeline = build_hud_pipeline(&device, format, sample_count);
+        let ui_pipeline = build_ui_pipeline(&device, format, sample_count);
         let msaa_color_view = create_msaa_color_view(&device, width, height, format, sample_count);
 
         Ok(Self {
@@ -189,7 +191,7 @@ impl Renderer {
             queue,
             config,
             sample_count,
-            hud_pipeline,
+            ui_pipeline,
             msaa_color_view,
         })
     }
@@ -225,7 +227,7 @@ impl Renderer {
     }
 
     /// Tessellate `scene` against the supplied text system, upload the
-    /// resulting triangles, issue the HUD draw call and present.
+    /// resulting triangles, issue the UI draw call and present.
     pub fn render(
         &mut self,
         scene: &Scene,
@@ -259,13 +261,13 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("mkui-wgpu HUD Encoder"),
+                label: Some("mkui-wgpu UI Encoder"),
             });
 
         let vertex_buffer = (!vertices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mkui-wgpu HUD Vertices"),
+                    label: Some("mkui-wgpu UI Vertices"),
                     contents: bytemuck::cast_slice(&vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
@@ -293,7 +295,7 @@ impl Renderer {
                 },
             };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mkui-wgpu HUD Pass"),
+                label: Some("mkui-wgpu UI Pass"),
                 color_attachments: &[Some(color_attachment)],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
@@ -301,7 +303,7 @@ impl Renderer {
                 multiview_mask: None,
             });
             if let Some(buffer) = vertex_buffer.as_ref() {
-                pass.set_pipeline(&self.hud_pipeline);
+                pass.set_pipeline(&self.ui_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..vertices.len() as u32, 0..1);
             }
@@ -327,7 +329,7 @@ fn clamp_resize(width: u32, height: u32) -> Option<(u32, u32)> {
 }
 
 /// MSAA capability probe. Returns `preferred` when the swapchain color
-/// format advertises support for it, otherwise falls back to `1`. The HUD
+/// format advertises support for it, otherwise falls back to `1`. The UI
 /// pass has no depth attachment so only the color format matters — the
 /// reference also probes the depth format because its scene pass binds
 /// depth in the same pipeline.
@@ -342,17 +344,17 @@ fn pick_sample_count(color_flags: wgpu::TextureFormatFeatureFlags, preferred: u3
     }
 }
 
-fn build_hud_pipeline(
+fn build_ui_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     sample_count: u32,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("mkui-wgpu HUD Shader"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("hud.wgsl").into()),
+        label: Some("mkui-wgpu UI Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("ui_triangles.wgsl").into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("mkui-wgpu HUD Pipeline Layout"),
+        label: Some("mkui-wgpu UI Pipeline Layout"),
         bind_group_layouts: &[],
         immediate_size: 0,
     });
@@ -362,11 +364,11 @@ fn build_hud_pipeline(
         write_mask: wgpu::ColorWrites::ALL,
     })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("mkui-wgpu HUD Pipeline"),
+        label: Some("mkui-wgpu UI Pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
-            entry_point: Some("vs_hud"),
+            entry_point: Some("vs_ui_triangles"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             buffers: &[Vertex::layout()],
         },
@@ -379,7 +381,7 @@ fn build_hud_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_hud"),
+            entry_point: Some("fs_ui_triangles"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &targets,
         }),
@@ -399,7 +401,7 @@ fn create_msaa_color_view(
         return None;
     }
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("mkui-wgpu HUD MSAA Color"),
+        label: Some("mkui-wgpu UI MSAA Color"),
         size: wgpu::Extent3d {
             width: width.max(1),
             height: height.max(1),

@@ -27,8 +27,11 @@ and the four records below.
   every binding shares.
 - [ADR 0006 — `mkui-wgpu` declarative bridge over `mkui-runtime::AppTree`](0006-wgpu-declarative-bridge.md)
   — `mkui-wgpu` walks the runtime tree into the existing tessellation
-  pipeline; `WgpuRenderable` + `WgpuRendererRegistry` stay backend-local;
-  the legacy `Mkui::with_scene` constructor is deprecated.
+  pipeline; `WgpuRenderable` + `WgpuRendererRegistry` stay backend-local.
+  The declarative `Mkui::new()?.child(...).run()` API is the documented
+  primary path; `Mkui::with_scene` is a retained low-level raw-scene escape
+  hatch (renderer tests, custom HUDs, headless tessellation demos, future
+  direct-GPU experiments), not deprecated.
 
 ## ADR format conventions
 

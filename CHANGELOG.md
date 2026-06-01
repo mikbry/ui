@@ -11,6 +11,27 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Changed
+- **BREAKING (`mkui-wgpu`): scrubbed the HUD paradigm from the backend's
+  identity.** Post-Sprint-5 the wgpu backend renders `mkui_runtime::AppTree`
+  end-to-end — a UI framework backend, not the 2D HUD pipeline it was ported
+  from. The type system and docs now say so:
+  - `HudTheme` → `WgpuTheme` (the root theme for the wgpu UI backend). Plain
+    `Theme` was rejected because `mkui_core::Theme` already owns that name;
+    `WgpuTheme` names the backend and disambiguates. Re-exported from
+    `mkui_wgpu::prelude` under the new name.
+  - `theme::WgpuTheme::hud_panel()` → `panel_style()`; `components::hud_list()`
+    → `info_list()`.
+  - Shader `render/hud.wgsl` → `render/ui_triangles.wgsl` (it draws the
+    tessellated UI triangle stream, not a widget-specific pass); entry points
+    `vs_hud`/`fs_hud` → `vs_ui_triangles`/`fs_ui_triangles`; the `Renderer`'s
+    `hud_pipeline` field / `build_hud_pipeline` helper / wgpu debug labels
+    reframed from "HUD" to "UI" (`ui_pipeline` / `build_ui_pipeline`).
+  - File-level `//!` docs reframed from the HUD-overlay paradigm to the
+    UI-framework / `AppTree` substrate identity (`lib.rs`, `render/mod.rs`,
+    `theme.rs`, `components.rs`, `walker.rs`). The `Mkui::with_scene` doc keeps
+    "custom HUDs" as one valid low-level escape-hatch use case (per ADR 0006).
+  Pure rename + doc rewrite — no behavior change. ADR 0004's historical
+  "2D HUD pipeline port" framing is preserved as engineering history (#77)
 - Docs/comment hygiene pass: scrubbed proper-noun references to the
   predecessor private reference codebase from public-facing source-doc
   comments (`mkui-text`, `mkui-wgpu`), the CHANGELOG history entry for
