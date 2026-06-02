@@ -23,8 +23,9 @@
 //! - [`theme`]        — [`WgpuTheme`], [`ButtonVariant`], [`ButtonSize`],
 //!   [`ButtonState`], [`TextVariant`], and cva-style style resolvers.
 //!   Mirrors shadcn's variant / size / state model.
-//! - [`components`]   — scene builders: [`components::card`],
-//!   [`components::button`], [`components::input`], [`components::slider`],
+//! - [`components`]   — scene builders organized one concern per file under
+//!   `components/`: [`components::card`], [`components::button`],
+//!   [`components::text_field`], [`components::slider`],
 //!   [`components::chip_group`], [`components::scrollbar`],
 //!   [`components::swatch`], [`components::heading`], [`components::text`], plus the
 //!   [`components::panel`] / [`components::titled_panel`] primitives the
@@ -51,13 +52,11 @@
 //! [`mkui_console`]: https://docs.rs/mkui-console
 
 pub mod app;
-pub mod badge;
 pub mod bridge;
 pub mod builder;
 pub mod components;
-pub mod dot;
 pub mod high_level;
-pub mod input;
+pub mod pointer;
 pub mod prelude;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render;
@@ -71,7 +70,7 @@ mod tessellation;
 pub use app::WgpuApp;
 pub use bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable, WgpuRendererRegistry};
 pub use high_level::Mkui;
-pub use input::{hit_test, ClickHit, PointerState};
+pub use pointer::{hit_test, ClickHit, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{RenderOutcome, Renderer};
 pub use renderer::WgpuRenderer;
