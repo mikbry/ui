@@ -44,6 +44,18 @@ breaking changes can land on minor bumps).
   The rustdoc gains standard `# Panics` + `# Examples` sections pointing at the
   fallible [`Mkui::try_child`] for callers who want a `Result`. No call-site
   changes (backwards-compatible) (#69)
+- **`mkui-runtime`: removed the dead `free` reuse pool from `ActionRegistry`.**
+  The pool (and the generation-bump path that fed it) was designed as a
+  use-after-free guard for a future node-removal API (Codex round-7
+  §"Concrete Shape"), but no public API removes an action, so it was never
+  populated — dead infrastructure flagged by the round-5 audit (Phase 2 Task
+  2.6). `register_local`/`register_local_action`/`register_remote` are now
+  plainly append-only. The public `ActionId` shape is unchanged: the
+  `generation` field is retained as an always-`0` forward-compat reservation,
+  so `ActionId::from_raw` callers are unaffected, and the lookup guard still
+  rejects forged/out-of-band ids. The `free` pool + an
+  `ActionRegistry::remove(id)` will be re-introduced if a node-removal API
+  ever lands (#70).
 - **`mkui-wgpu`: reorganized component implementations into a `components/`
   subdirectory with a grouped layout.** The flat `src/components.rs`
   (15 components) plus the already-extracted `src/badge.rs` / `src/dot.rs` are
