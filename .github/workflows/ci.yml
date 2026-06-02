@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# All jobs (fmt, clippy, test, test-doc, build-release, cargo-deny, cargo-audit) are active.
+# All jobs (fmt, clippy, test, test-doc, build-release, msrv, cargo-deny, cargo-audit) are active.
 #
 # `--locked` is enforced on every build/test/clippy invocation: CI fails loudly
 # if Cargo.lock is stale relative to manifests, instead of silently regenerating
@@ -117,6 +117,36 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
       - run: cargo build --workspace --exclude mkui-py --release --locked
+
+  msrv:
+    # MSRV gate: `Cargo.toml` declares the workspace's minimum supported Rust
+    # version, but every other job uses `dtolnay/rust-toolchain@stable`, which
+    # floats to whatever stable is current and never exercises the promised
+    # floor. This job pins the toolchain to the declared MSRV so a dep that
+    # silently requires a newer compiler fails here instead of on a user's
+    # fresh-MSRV install. Keep this pin in lockstep with
+    # `[workspace.package].rust-version` in Cargo.toml.
+    #
+    # `cargo check` (not `test`) is enough to catch the compile-floor break
+    # without paying the full test-suite CI time. `mkui-py` is excluded for the
+    # same PyO3 linkage reason the main `clippy` / `test` / `build-release` jobs
+    # exclude it (re-merge tracked alongside those jobs).
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+      - run: cargo check --workspace --exclude mkui-py --locked
 
   mkui-py-parity:
     # Codex round-8 P1 #1 fix: byte-identical Rust/C/Py snapshot parity.
