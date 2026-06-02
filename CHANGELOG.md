@@ -77,6 +77,15 @@ breaking changes can land on minor bumps).
   ("port of an earlier 2D HUD pipeline", "bitmap glyph table") is
   preserved; only the private-repo proper noun is replaced with
   domain-neutral phrasing. Zero functional impact (#58)
+- Docs/comment hygiene pass (round-5 audit Cat 4 / 9 / 10): documented the
+  `ViewProps` / `TextProps` / `ButtonProps` payload structs in
+  `mkui-runtime::tree`; added justifying `// allow:` comments to the
+  `#[allow(dead_code)]` on `walker::map_text_variant` and standardized the
+  `#[allow(clippy::new_without_default)]` comment in `mkui-py` to the workspace
+  pattern; annotated the `pollster::block_on` adapter-init call site in
+  `mkui-wgpu::app` (ADR 0004); and added a **Threading model** section to the
+  README documenting the single-threaded `AppTree` / `ActionRegistry` invariant
+  (ADR 0005 + ADR 0006). Pure documentation — zero behavior impact (#75)
 
 ## [0.6.0] — 2026-05-27
 

@@ -300,6 +300,10 @@ impl ApplicationHandler for WgpuApp {
                 return;
             }
         };
+        // pollster: deliberate sync init — wgpu adapter/device resolution is a
+        // one-shot at window creation, not a per-frame cost, so blocking the
+        // resumed-event handler here is cheaper than threading an async runtime
+        // through the winit `ApplicationHandler` (ADR 0004).
         match pollster::block_on(Renderer::new(window.clone())) {
             Ok(renderer) => {
                 self.state = Some(WgpuAppState { window, renderer });

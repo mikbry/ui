@@ -85,15 +85,24 @@ pub enum NodeKind {
     },
 }
 
+/// Payload for a `View` node — a layout-only container. It carries no
+/// intrinsic data of its own; geometry and appearance come entirely from the
+/// node's `class` / `resolved` style projection. The empty struct keeps the
+/// `NodeKind::View` arm symmetric with the other variants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewProps {}
 
+/// Payload for a `Text` node: the string to render plus the semantic
+/// [`TextVariant`] that drives the renderer's typographic scale.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextProps {
     pub content: String,
     pub variant: TextVariant,
 }
 
+/// Payload for a `Button` node: the visible `label`, its visual
+/// [`ButtonVariant`], and an optional `on_press` [`ActionId`] resolved against
+/// the [`ActionRegistry`] when the button fires.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonProps {
     pub label: String,
