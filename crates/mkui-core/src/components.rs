@@ -199,15 +199,35 @@ impl Mkui {
         }
     }
 
-    /// Append a child. `.child()` panics on a class-parse error so the user-
-    /// facing builder API stays infallible (matching the v0.4.1 surface). To
-    /// catch parse errors programmatically, use [`Mkui::try_child`].
+    /// Append a child to this UI tree.
+    ///
+    /// `.child()` keeps the user-facing builder API infallible (matching the
+    /// v0.4.1 surface), so a class-parse error is a panic rather than a
+    /// `Result`. The panic is `#[track_caller]`, so the blame points at your
+    /// `.child(...)` call site instead of mkui-core internals.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a class-parse error (e.g. a typo in a Tailwind-like utility
+    /// class). The panic message carries the offending token so the typo is
+    /// obvious from the backtrace. For the fallible variant that surfaces
+    /// [`ClassParseError`] instead of panicking, use [`Mkui::try_child`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use mkui_core::prelude::{Mkui, View};
+    ///
+    /// let app = Mkui::new().child(View::new().class("flex-col gap-4"));
+    /// assert_eq!(app.children_len(), 1);
+    /// ```
+    #[track_caller]
     pub fn child(mut self, child: impl Component + 'static) -> Self {
         let boxed: Box<dyn Component> = Box::new(child);
         let root = self.tree.root();
-        self.registry
-            .lower_boxed(boxed, &mut self.tree, root)
-            .expect("mkui-core: lowering failed — see ClassParseError");
+        if let Err(err) = self.registry.lower_boxed(boxed, &mut self.tree, root) {
+            panic!("mkui-core: failed to append child — {err}");
+        }
         self
     }
 
@@ -553,8 +573,27 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "lowering failed")]
+    #[should_panic(expected = "failed to append child")]
     fn child_panics_on_unknown_class() {
         Mkui::new().child(View::new().class("totally-bogus-utility"));
+    }
+
+    #[test]
+    fn child_panic_message_names_the_offending_token() {
+        // The sharpened diagnostic must surface the bogus class string itself,
+        // not just a generic "lowering failed" line (issue #69).
+        let result = std::panic::catch_unwind(|| {
+            Mkui::new().child(View::new().class("flex-col totally-bogus-utility gap-4"));
+        });
+        let err = result.expect_err("child must panic on an unknown class token");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| err.downcast_ref::<&str>().copied())
+            .expect("panic payload must be a string");
+        assert!(
+            msg.contains("totally-bogus-utility"),
+            "panic message must name the offending token, got: {msg}"
+        );
     }
 }
