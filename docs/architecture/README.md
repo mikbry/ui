@@ -4,7 +4,7 @@ This directory tracks the load-bearing architectural decisions in mkui's
 history. Each record (ADR) documents one decision: why it was made, what was
 considered, and what the consequences are. New contributors and reviewers
 should be able to understand the shape of the workspace by reading this index
-and the four records below.
+and the six records below.
 
 ## Index
 

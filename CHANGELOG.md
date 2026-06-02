@@ -11,6 +11,15 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Changed
+- **Docs: refreshed the workspace `README.md` + ADR index to v0.8.0
+  reality.** The "Current capabilities" header now tracks the actual
+  `Cargo.toml` version; ADRs 0005 (`mkui-runtime` substrate) and 0006
+  (`mkui-wgpu` declarative bridge) are listed in the README architecture
+  section; the `mkui-c` soundness framing reflects the Sprint 4 `// SAFETY:`
+  annotations + CI re-entry (no longer "deferred to Sprint 4"); the Python
+  3.14 / PyO3 0.28 note points at [#53] instead of a stale Sprint-4/5
+  deferral; and `docs/architecture/README.md` says "six records" to match its
+  own index. Pure documentation hygiene — no behavior change (#71)
 - **`mkui-wgpu`: reorganized component implementations into a `components/`
   subdirectory with a grouped layout.** The flat `src/components.rs`
   (15 components) plus the already-extracted `src/badge.rs` / `src/dot.rs` are

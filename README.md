@@ -151,7 +151,7 @@ Backend-specific code never leaks into the contract.
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | `mkui-core`   | Shared contract: component model, headless logic, theme / layout / input / style / error. Zero backend deps.                    | Stable                                                        |
 | `mkui-text`   | Text-system trait + from-scratch bitmap prototype. No external text-stack deps (no cosmic-text / swash / freetype / fontdue).   | Experimental (bitmap prototype, trait stable)                 |
-| `mkui-wgpu`   | WGPU scene primitives + declarative builders + `winit` `ApplicationHandler` shell. Backs the HUD-style 2D pipeline.             | Experimental (shipping; Sprint 4+ extends rendering capabilities) |
+| `mkui-wgpu`   | WGPU scene primitives + declarative builders + `winit` `ApplicationHandler` shell. Backs the HUD-style 2D pipeline.             | Experimental (shipping; declarative `AppTree` bridge per ADR 0006) |
 | `mkui-web`    | Web/WASM backend. Translates the shared component tree into DOM via `web-sys`.                                                  | Stable                                                        |
 | `mkui-console`| Terminal backend. Translates the shared component tree into `crossterm` output.                                                 | Stable                                                        |
 | `mkui-native` | Scene-walker contract for native backends — collects `mkui-core` component trees into draw records that `mkui-wgpu` can render. | Experimental                                                  |
@@ -159,7 +159,7 @@ Backend-specific code never leaks into the contract.
 | `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
 | `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |
 | `mkui-c`      | C/C++ FFI bindings — handle-based nested API over `mkui-runtime`'s `AppTree`. CI builds + clippy gates active.                  | Stable (Sprint 4)                                             |
-| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API.                                                                       | CI re-entry deferred to Sprint 5 (link-time Python 3.14 + maturin wiring on the CI image) |
+| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API.                                                                       | CI parity job active; full-matrix re-entry tracked in [#53](https://github.com/mikbry/ui/issues/53) (Python 3.14 + PyO3 0.28) |
 
 ### What lives in `mkui-core`
 
@@ -202,6 +202,8 @@ are documented as ADRs (Architecture Decision Records) under
 - [ADR 0002 — `mkui-text` owns the stack (no external Rust text crates)](docs/architecture/0002-mkui-text-own-the-stack.md)
 - [ADR 0003 — `mkui-web` registry-based extension](docs/architecture/0003-mkui-web-registry-based-extension.md)
 - [ADR 0004 — `mkui-wgpu` 2D HUD pipeline port](docs/architecture/0004-mkui-wgpu-2d-hud-pipeline-port.md)
+- [ADR 0005 — `mkui-runtime` as the portable AppTree substrate](docs/architecture/0005-mkui-runtime-portable-substrate.md)
+- [ADR 0006 — `mkui-wgpu` declarative bridge over `mkui-runtime::AppTree`](docs/architecture/0006-wgpu-declarative-bridge.md)
 
 New contributors and reviewers should start with the
 [ADR index](docs/architecture/README.md) for the format conventions and
@@ -215,14 +217,14 @@ one-sentence summaries.
 * **Desktop**: Windows, macOS, Linux ✅
 * **Console**: Terminal UIs with crossterm ✅
 * **Web**: via WebAssembly ✅
-* **Native WGPU**: HUD-style 2D scene pipeline + `winit` `ApplicationHandler` shell shipped in `mkui-wgpu`. Bitmap-text fallback is the current default; the Sprint 4+ direction for richer text rendering is internal.
+* **Native WGPU**: HUD-style 2D scene pipeline + `winit` `ApplicationHandler` shell shipped in `mkui-wgpu`. Bitmap-text fallback is the current default; richer text rendering is on the roadmap, tracked in project issues.
 * **Mobile**: iOS, iPadOS, Android 🚧 (planned)
 
 ### Language Support
 * **Rust**: Native support with full ergonomic API ✅
 * **C**: FFI bindings — handle-based nested API on the `mkui-runtime` substrate; CI build + clippy gates active ✅
 * **C++**: Modern C++17 wrapper (RAII + exceptions) over the C handle API ✅
-* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; CI re-entry tracking in Sprint 5
+* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; Python 3.14 + PyO3 0.28 compatibility tracked in [#53](https://github.com/mikbry/ui/issues/53)
 * **JavaScript/TypeScript**: WASM bindings 🚧 (planned)
 
 ---
@@ -313,9 +315,10 @@ cargo run --example native-window
 
 ### Python Example
 
-> ⚠ **`mkui-py` is broken on Python 3.14** — see [#5](https://github.com/mikbry/ui/issues/5)
-> (deferred to Sprint 4). Use Python 3.13 if you specifically need the Python
-> bindings; otherwise build the workspace with `--exclude mkui-py`.
+> ⚠ **`mkui-py` requires Python 3.13** — Python 3.14 + PyO3 0.28
+> compatibility is tracked in [#53](https://github.com/mikbry/ui/issues/53).
+> Use Python 3.13 if you specifically need the Python bindings; otherwise
+> build the workspace with `--exclude mkui-py`.
 
 **Python Example** - PyO3 bindings with exception handling (Python 3.13)
 ```bash
@@ -344,19 +347,20 @@ python main.py
 ## 🧪 Local Verification
 
 Before opening a PR, run the workspace checks. `mkui-py` needs a local
-PyO3 / Python 3.13 toolchain (it does not build on Python 3.14, see
-[#5](https://github.com/mikbry/ui/issues/5)) and `mkui-c` has known
-soundness issues deferred to Sprint 4 — the everyday loop excludes both.
+PyO3 / Python 3.13 toolchain — Python 3.14 + PyO3 0.28 compatibility is
+tracked in [#53](https://github.com/mikbry/ui/issues/53) — so the everyday
+loop excludes it. `mkui-c` is no longer excluded: the Sprint 4 handle-based
+rewrite added `// SAFETY:` annotations on every `unsafe` block and `mkui-c`
+re-entered the CI matrix (build + clippy + test) as of v0.5.0.
 
 ```bash
-# Everyday loop (no PyO3 / C-FFI toolchain required)
-cargo build   --workspace --exclude mkui-py --exclude mkui-c
-cargo test    --workspace --exclude mkui-py --exclude mkui-c
-cargo clippy  --workspace --exclude mkui-py --exclude mkui-c --all-targets -- -D warnings
+# Everyday loop (no PyO3 toolchain required)
+cargo build   --workspace --exclude mkui-py
+cargo test    --workspace --exclude mkui-py
+cargo clippy  --workspace --exclude mkui-py --all-targets -- -D warnings
 cargo fmt     --all -- --check
 
-# Full workspace (requires Python 3.13 + maturin for mkui-py; mkui-c is
-# experimental — soundness work tracked for Sprint 4)
+# Full workspace (requires Python 3.13 + maturin for mkui-py)
 cargo build   --workspace
 cargo test    --workspace
 ```
@@ -382,7 +386,7 @@ the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
 
 ## 🔮 Current Capabilities & Direction
 
-### ✅ Current capabilities (v0.4.0)
+### ✅ Current capabilities (v0.8.0)
 
 - **Shared contract** — `mkui-core` component model (`View` / `Text` /
   `Button`), headless state/variant logic, theme / layout / input contracts.
@@ -408,12 +412,14 @@ the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
   contract.
 - **RSX macro** — `mkui-rsx` is a placeholder; JSX-like authoring is the
   target.
-- **Native text rendering** — Sprint 4+ direction extends `mkui-text`
-  beyond the bitmap prototype. The specific approach is internal; the
+- **Native text rendering** — extending `mkui-text` beyond the bitmap
+  prototype is on the roadmap. The specific approach is internal; the
   trait surface is the public contract.
-- **FFI hardening** — `mkui-c` / `mkui-py` are experimental. `mkui-c` has
-  known soundness issues deferred to Sprint 4; `mkui-py` requires
-  Python 3.13 until [#5](https://github.com/mikbry/ui/issues/5) lands.
+- **FFI hardening** — `mkui-c` is gated in CI (build + clippy + test) with
+  `// SAFETY:` annotations on every `unsafe` block since the Sprint 4
+  handle-based rewrite; `mkui-py` requires a local Python 3.13 toolchain
+  until Python 3.14 + PyO3 0.28 support lands
+  ([#53](https://github.com/mikbry/ui/issues/53)).
 
 ### 🔮 Longer-horizon
 
