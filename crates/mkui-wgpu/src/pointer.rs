@@ -1,4 +1,6 @@
-//! Pointer input plumbing for the wgpu backend.
+//! Pointer routing for the wgpu backend.
+//! Converts winit cursor and mouse events into press, arm, hit-test, and
+//! activation behavior over the current frame's interactive regions.
 //!
 //! Translates raw `winit::WindowEvent`s into a press-to-arm activation
 //! model:

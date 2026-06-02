@@ -11,6 +11,35 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Changed
+- **`mkui-wgpu`: reorganized component implementations into a `components/`
+  subdirectory with a grouped layout.** The flat `src/components.rs`
+  (15 components) plus the already-extracted `src/badge.rs` / `src/dot.rs` are
+  now a single `src/components/` directory. Related functions are grouped per
+  file rather than one file per function: `button + button_with` in
+  `button.rs`, `panel + titled_panel` in `panel.rs`,
+  `text + heading + label` in `text.rs`, `slider + SliderRegions` in
+  `slider.rs`. The remaining components (`badge`, `card`, `chip_group`, `dot`,
+  `info_list`, `scrollbar`, `swatch`, `text_field`) each ship in their own
+  file under `components/`. Pure module reorganization — no behavior change.
+  The `components::*` re-export surface (and the `widgets` glob alias) is
+  unchanged, but moving the two previously crate-root atom modules into
+  `components/` removes their old public module paths (breaking, pre-1.0):
+  - `mkui_wgpu::badge::*` → `mkui_wgpu::components::badge` (the `badge` fn is
+    now re-exported from `components`; the crate-root `badge` module is gone)
+  - `mkui_wgpu::dot::*` → `mkui_wgpu::components::dot` (same shape as `badge`)
+  - the input-field component `mkui_wgpu::components::input` →
+    `mkui_wgpu::components::text_field` (resolves the name collision with the
+    crate's pointer-routing plumbing, now `src/pointer.rs`; "TextField" also
+    matches the renderer's single-line text-input semantic better than
+    shadcn's generic "Input") (#78)
+- **BREAKING (`mkui-wgpu`): renamed `src/input.rs` → `src/pointer.rs`**
+  (module path `mkui_wgpu::input` → `mkui_wgpu::pointer`). The file is pointer
+  routing — it converts winit cursor/mouse events into press / arm / hit-test /
+  activation over the current frame's interactive regions — not text-input
+  semantics, so `pointer` names it accurately and frees the `input` namespace.
+  The re-exported `hit_test` / `ClickHit` / `PointerState` items at the crate
+  root are unchanged; only the module path moves. Pre-1.0 minor-bump policy
+  permits the path break (#78)
 - **BREAKING (`mkui-wgpu`): scrubbed the HUD paradigm from the backend's
   identity.** Post-Sprint-5 the wgpu backend renders `mkui_runtime::AppTree`
   end-to-end — a UI framework backend, not the 2D HUD pipeline it was ported
