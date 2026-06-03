@@ -411,6 +411,10 @@ fn text_font_size_px(variant: TextVariant, style: &ResolvedStyle) -> f32 {
     }
 }
 
+// allow: forward-compat scaffold — the runtime→theme `TextVariant` mapping is
+// not yet wired into the text render path (unlike its sibling
+// `map_button_variant`, which has a live consumer). Kept here so the mapping
+// lives beside `text_font_size_px` for when the theme text path lands.
 #[allow(dead_code)]
 fn map_text_variant(v: TextVariant) -> ThemeTextVariant {
     match v {

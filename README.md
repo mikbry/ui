@@ -209,6 +209,38 @@ New contributors and reviewers should start with the
 [ADR index](docs/architecture/README.md) for the format conventions and
 one-sentence summaries.
 
+### Threading model
+
+**mkui is single-threaded by design.** The component tree (`AppTree`) and the
+`ActionRegistry` must be built, mutated, and driven from a **single thread** —
+they are intentionally `!Send + !Sync`. Actions are stored as
+`Rc<RefCell<…>>`, so the tree and its callbacks never cross a thread boundary.
+This is a deliberate invariant, not an oversight: adding `Send + Sync` bounds
+prematurely would force every binding (Rust, C, Python) to thread those bounds
+through closures that never actually cross threads.
+
+Where the boundary sits:
+
+- **The host may be multithreaded.** Your application can run any number of
+  threads for I/O, compute, or networking.
+- **mkui's tree must be driven from one thread.** All `AppTree` /
+  `ActionRegistry` access — construction, mutation, event dispatch, and the
+  `mkui-wgpu` render walk — has to happen on that one owning thread (typically
+  the main / UI thread). Marshal data from worker threads back to the UI
+  thread before touching the tree.
+- **Errors stay local too.** `MkuiError` is `Send + Sync` on native targets so
+  results can flow across spawned tasks, but the WASM `JsValue` variant is
+  `!Send + !Sync` because errors there are local to the single-threaded WASM
+  context.
+
+A future host (Python, C, …) wanting to drive UI from a non-main thread should
+treat this as a hard constraint today. The design rationale lives in
+[ADR 0005](docs/architecture/0005-mkui-runtime-portable-substrate.md) (the
+`ActionRegistry` single-threaded decision) and
+[ADR 0006](docs/architecture/0006-wgpu-declarative-bridge.md) (the declarative
+bridge over `AppTree`). Cross-thread support is explicitly out of scope until a
+real multithreaded runtime exists.
+
 ---
 
 ## 🌍 Target Platforms & Languages
