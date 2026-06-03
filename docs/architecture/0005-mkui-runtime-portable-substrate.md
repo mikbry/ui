@@ -42,6 +42,15 @@ Add `mkui-runtime`. It owns the portable application tree:
 - `ActionRegistry` — single-threaded callback table. Actions register an
   `ActionId`; the binding owns the actual callable. Renderers fire by id
   through the registry; closures never cross the FFI boundary.
+
+  > **Update (#70):** the Codex round-7 §"Concrete Shape" design listed a
+  > generation-counter + `free` reuse pool on `ActionRegistry` as a
+  > use-after-free guard for a future node-removal API. That removal API
+  > never shipped, so the `free` pool was dead infrastructure and has been
+  > removed. The `ActionId.generation` field is retained as an always-`0`
+  > forward-compat reservation (the public id shape is unchanged); the guard
+  > will be re-added — `free` pool + `ActionRegistry::remove(id)` — if/when a
+  > node-removal API lands.
 - `StyleClass` + `ResolvedStyle` — utility-class strings and the typed
   projection. Parser supports the 39 Tier-1 tokens used by the showcase,
   documents 3 Tier-2 no-op patterns, and rejects Tier 3 as a parse error
