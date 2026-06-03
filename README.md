@@ -159,7 +159,7 @@ Backend-specific code never leaks into the contract.
 | `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
 | `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |
 | `mkui-c`      | C/C++ FFI bindings — handle-based nested API over `mkui-runtime`'s `AppTree`. CI builds + clippy gates active.                  | Stable (Sprint 4)                                             |
-| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API.                                                                       | CI parity job active; full-matrix re-entry tracked in [#53](https://github.com/mikbry/ui/issues/53) (Python 3.14 + PyO3 0.28) |
+| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API. Builds + tests on Python 3.9–3.14.                                    | Stable (Sprint 4)                                            |
 
 ### What lives in `mkui-core`
 
@@ -256,7 +256,7 @@ real multithreaded runtime exists.
 * **Rust**: Native support with full ergonomic API ✅
 * **C**: FFI bindings — handle-based nested API on the `mkui-runtime` substrate; CI build + clippy gates active ✅
 * **C++**: Modern C++17 wrapper (RAII + exceptions) over the C handle API ✅
-* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; Python 3.14 + PyO3 0.28 compatibility tracked in [#53](https://github.com/mikbry/ui/issues/53)
+* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; builds + tests on Python 3.9–3.14 ✅
 * **JavaScript/TypeScript**: WASM bindings 🚧 (planned)
 
 ---
@@ -347,18 +347,18 @@ cargo run --example native-window
 
 ### Python Example
 
-> ⚠ **`mkui-py` requires Python 3.13** — Python 3.14 + PyO3 0.28
-> compatibility is tracked in [#53](https://github.com/mikbry/ui/issues/53).
-> Use Python 3.13 if you specifically need the Python bindings; otherwise
-> build the workspace with `--exclude mkui-py`.
+> ℹ **`mkui-py` builds on Python 3.9–3.14.** The PyO3 0.28.3 bump
+> ([#5](https://github.com/mikbry/ui/issues/5)) cleared the old Python
+> 3.13 ceiling, so the full workspace — including `mkui-py` — tests on a
+> current interpreter.
 
-**Python Example** - PyO3 bindings with exception handling (Python 3.13)
+**Python Example** - PyO3 bindings with exception handling
 ```bash
 cd examples/python-example
 
 # Build the Python bindings first
 cd ../../crates/mkui-py
-uv venv --python 3.13 && source .venv/bin/activate
+uv venv && source .venv/bin/activate    # any Python 3.9–3.14
 maturin develop --release
 
 # Run the Python example
@@ -378,23 +378,32 @@ python main.py
 
 ## 🧪 Local Verification
 
-Before opening a PR, run the workspace checks. `mkui-py` needs a local
-PyO3 / Python 3.13 toolchain — Python 3.14 + PyO3 0.28 compatibility is
-tracked in [#53](https://github.com/mikbry/ui/issues/53) — so the everyday
-loop excludes it. `mkui-c` is no longer excluded: the Sprint 4 handle-based
-rewrite added `// SAFETY:` annotations on every `unsafe` block and `mkui-c`
-re-entered the CI matrix (build + clippy + test) as of v0.5.0.
+Before opening a PR, run the workspace checks. The default `mkui-py` test
+path does **not** link `libpython` (PyO3's `extension-module` feature
+provides the symbols at load time), so the everyday loop runs the full
+workspace — `mkui-py` included — with no Python toolchain required.
+`mkui-c` is likewise in-matrix: the Sprint 4 handle-based rewrite added
+`// SAFETY:` annotations on every `unsafe` block and `mkui-c` re-entered
+the CI matrix (build + clippy + test) as of v0.5.0.
 
 ```bash
-# Everyday loop (no PyO3 toolchain required)
-cargo build   --workspace --exclude mkui-py
-cargo test    --workspace --exclude mkui-py
-cargo clippy  --workspace --exclude mkui-py --all-targets -- -D warnings
-cargo fmt     --all -- --check
-
-# Full workspace (requires Python 3.13 + maturin for mkui-py)
+# Everyday loop — full workspace, no Python toolchain required
 cargo build   --workspace
 cargo test    --workspace
+cargo clippy  --workspace --all-targets -- -D warnings
+cargo fmt     --all -- --check
+```
+
+The Python bindings additionally carry two interpreter-linked tests
+(byte-identical snapshot parity + a live `import mkui_py` smoke). They are
+feature-gated behind `parity-test` (which enables `pyo3/auto-initialize`
+and links a real `libpython`), so they stay out of the default path. Run
+them against any Python 3.9–3.14 interpreter with:
+
+```bash
+# Python binding verification (links libpython via PYO3_PYTHON)
+PYO3_PYTHON=$(which python3) cargo test -p mkui-py \
+  --no-default-features --features "parity-test,console" --locked
 ```
 
 Backend-specific feature checks for the bridge crate:
@@ -449,9 +458,8 @@ the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
   trait surface is the public contract.
 - **FFI hardening** — `mkui-c` is gated in CI (build + clippy + test) with
   `// SAFETY:` annotations on every `unsafe` block since the Sprint 4
-  handle-based rewrite; `mkui-py` requires a local Python 3.13 toolchain
-  until Python 3.14 + PyO3 0.28 support lands
-  ([#53](https://github.com/mikbry/ui/issues/53)).
+  handle-based rewrite; `mkui-py` builds + tests on Python 3.9–3.14 since
+  the PyO3 0.28.3 bump ([#5](https://github.com/mikbry/ui/issues/5)).
 
 ### 🔮 Longer-horizon
 

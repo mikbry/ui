@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """mkui Python Example — handle-based, runtime-backed (Sprint 4)."""
 
-import os
+import glob
 import sys
 
-venv_path = "../../crates/mkui-py/.venv/lib/python3.13/site-packages"
-if os.path.exists(venv_path):
-    sys.path.insert(0, venv_path)
+# The maturin venv's site-packages is version-stamped (lib/python3.X);
+# glob so the example runs on any supported interpreter (3.9–3.14)
+# rather than a single hardcoded minor version.
+venv_globs = glob.glob("../../crates/mkui-py/.venv/lib/python3.*/site-packages")
+if venv_globs:
+    sys.path.insert(0, venv_globs[0])
 else:
     sys.path.insert(0, "../../target/release")
 
