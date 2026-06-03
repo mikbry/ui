@@ -10,6 +10,20 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+### Tooling
+- **CI: new `msrv` job pins `dtolnay/rust-toolchain@1.87.0`** and runs
+  `cargo check --workspace --exclude mkui-py --locked`. Every other job floats
+  on `@stable`, so the declared `rust-version` was never tested. The job fails
+  loudly if a dep ever requires a newer toolchain than the declared MSRV,
+  before the breakage reaches a user on a fresh-MSRV install (round-5 audit
+  Cat 9 + Phase 3 Task 3.1, #72).
+- **MSRV bumped from 1.84 to 1.87.** The new gate immediately caught that the
+  declared `rust-version = "1.84"` had been silently false since Sprint 4
+  (#51 / commit 05fb386): wgpu 29.0.3 (`wgpu-hal` / `wgpu-types` /
+  `wgpu-naga-bridge`) requires rustc 1.87. Truth wins — the declared MSRV now
+  matches what the workspace actually compiles on; downgrading wgpu would lose
+  Sprint 4 substrate work (#72).
+
 ### Changed
 - **Docs: refreshed the workspace `README.md` + ADR index to v0.8.0
   reality.** The "Current capabilities" header now tracks the actual
