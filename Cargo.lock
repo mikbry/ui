@@ -1107,15 +1107,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mkui-rsx"
-version = "0.8.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.106",
-]
-
-[[package]]
 name = "mkui-runtime"
 version = "0.8.0"
 dependencies = [

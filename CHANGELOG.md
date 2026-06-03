@@ -21,6 +21,15 @@ breaking changes can land on minor bumps).
   row are removed; stale doc-comment references to `mkui-native` as a backend now
   point at `mkui-wgpu`. Closes the original Sprint-1 tracker #9; round-5 audit
   Cat 1 + Phase 1 Task 1.3 (#73).
+- **Deleted the `mkui-rsx` placeholder crate.** Its `src/lib.rs` was three
+  lines (`#![forbid(unsafe_code)]` + a `// Placeholder` line comment) with no
+  `//!` doc, no public surface, and no other crate depending on it — pure
+  workspace-build time + audit surface for zero current value (round-5 audit
+  Cat 1 + Phase 1 Task 1.4). mkui's identity is the fluent builder API
+  (`Mkui::new()?.child(View::new()...)`); an RSX-style proc-macro is a separate
+  aesthetic, not current scope. The workspace `members` entry is removed too.
+  Re-adding the crate is trivial if an RSX macro is ever wanted — there is no
+  migration cost to deletion (#74)
 
 ### Tooling
 - **CI: new `msrv` job pins `dtolnay/rust-toolchain@1.87.0`** and runs
