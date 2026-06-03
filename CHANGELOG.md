@@ -34,6 +34,16 @@ breaking changes can land on minor bumps).
   3.14 / PyO3 0.28 note points at [#53] instead of a stale Sprint-4/5
   deferral; and `docs/architecture/README.md` says "six records" to match its
   own index. Pure documentation hygiene — no behavior change (#71)
+- **`mkui-core`: sharper diagnostic when `Mkui::child` panics on a class-parse
+  error.** `.child()` stays infallible (the fluent builder surface is
+  unchanged), but the panic is now `#[track_caller]` so the blame points at the
+  consumer's `.child(...)` call site instead of mkui-core internals, and the
+  panic message carries the offending class token (via `ClassParseError`'s
+  `Display`) instead of the opaque `"lowering failed — see ClassParseError"`.
+  A typo in a Tailwind-like utility class now shows exactly which token failed.
+  The rustdoc gains standard `# Panics` + `# Examples` sections pointing at the
+  fallible [`Mkui::try_child`] for callers who want a `Result`. No call-site
+  changes (backwards-compatible) (#69)
 - **`mkui-wgpu`: reorganized component implementations into a `components/`
   subdirectory with a grouped layout.** The flat `src/components.rs`
   (15 components) plus the already-extracted `src/badge.rs` / `src/dot.rs` are
