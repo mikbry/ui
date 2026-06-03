@@ -19,14 +19,21 @@ env:
 # `-D warnings` is scoped to the clippy command only; do NOT re-introduce
 # `RUSTFLAGS: -D warnings` at workflow scope (Sprint 2 retro Lesson 2).
 #
-# `mkui-py` is excluded from the main workspace `clippy` / `test` /
-# `build-release` jobs because PyO3 0.28's `extension-module` cdylib needs
-# careful linkage (`pyo3-build-config`) that the main workspace jobs do not
-# provide. **A dedicated `mkui-py` job below** sets up Python on the
-# runner, installs the dev headers, and runs the byte-identical parity
-# snapshot test against the C/Rust reference (Codex round-8 P1 fix).
-# Tracking issue for re-merging mkui-py into the main jobs:
-# BLOCKED-BY mkui-py-ci-reentry-tracker (to be filed once Sprint 5 opens).
+# `mkui-py` is now back in the main workspace `clippy` / `test` /
+# `test-doc` / `build-release` / `msrv` jobs (#5). PyO3 0.28's default
+# `extension-module` build needs only a Python interpreter on PATH at
+# build time (each job adds `actions/setup-python`) — it does NOT link
+# `libpython` (the host provides the symbols at load time), so the
+# cdylib builds and the non-interpreter test path runs without dev
+# headers. The old PyO3-0.22 / Python-3.14 build-script rejection that
+# forced the exclusion is gone after the 0.28.3 bump.
+#
+# **The dedicated `mkui-py-bindings` job below** still runs the two
+# interpreter-LINKED tests — byte-identical snapshot parity + a live
+# `import mkui_py` smoke — via `--no-default-features --features
+# parity-test` (which pulls `pyo3/auto-initialize` and links `libpython`).
+# That link mode is mutually exclusive with `extension-module`, so it
+# cannot ride along in the main jobs.
 #
 # `mkui-c` is now back in every job — the Sprint 4 handle-based rewrite
 # (#51) folds in `// SAFETY:` annotations on every `unsafe` block and clears
@@ -52,6 +59,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/cache@v4
         with:
           path: |
@@ -62,105 +72,10 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --exclude mkui-py --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   test:
     name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --exclude mkui-py --locked
-
-  test-doc:
-    name: test-doc
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-test-doc-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-doc-
-      - run: cargo test --workspace --exclude mkui-py --doc --locked
-
-  build-release:
-    name: build-release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-build-release-
-      - run: cargo build --workspace --exclude mkui-py --release --locked
-
-  msrv:
-    # MSRV gate: `Cargo.toml` declares the workspace's minimum supported Rust
-    # version, but every other job uses `dtolnay/rust-toolchain@stable`, which
-    # floats to whatever stable is current and never exercises the promised
-    # floor. This job pins the toolchain to the declared MSRV so a dep that
-    # silently requires a newer compiler fails here instead of on a user's
-    # fresh-MSRV install. Keep this pin in lockstep with
-    # `[workspace.package].rust-version` in Cargo.toml.
-    #
-    # `cargo check` (not `test`) is enough to catch the compile-floor break
-    # without paying the full test-suite CI time. `mkui-py` is excluded for the
-    # same PyO3 linkage reason the main `clippy` / `test` / `build-release` jobs
-    # exclude it (re-merge tracked alongside those jobs).
-    name: msrv
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87.0
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-msrv-
-      - run: cargo check --workspace --exclude mkui-py --locked
-
-  mkui-py-parity:
-    # Codex round-8 P1 #1 fix: byte-identical Rust/C/Py snapshot parity.
-    # The Rust and C halves run in the main `test` job (mkui-c parity test
-    # in `crates/mkui-c/tests/parity.rs`); the Py half lives in
-    # `crates/mkui-py/tests/parity.rs` and runs here against a real
-    # Python interpreter. The test asserts full string equality between
-    # the JSON snapshot built via `mkui_py::App` and the same tree built
-    # directly through `mkui_runtime::AppTree`.
-    #
-    # macOS is skipped via `#[cfg(not(target_os = "macos"))]` because
-    # PyO3 cdylib link on macOS hosts requires extra setup; CI is Linux,
-    # so the gate runs.
-    name: mkui-py-parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -175,10 +90,121 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-py-parity-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-py-parity-
-      - name: Run mkui-py byte-identical parity test
+            ${{ runner.os }}-cargo-test-
+      - run: cargo test --workspace --locked
+
+  test-doc:
+    name: test-doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-test-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-doc-
+      - run: cargo test --workspace --doc --locked
+
+  build-release:
+    name: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-release-
+      - run: cargo build --workspace --release --locked
+
+  msrv:
+    # MSRV gate: `Cargo.toml` declares the workspace's minimum supported Rust
+    # version, but every other job uses `dtolnay/rust-toolchain@stable`, which
+    # floats to whatever stable is current and never exercises the promised
+    # floor. This job pins the toolchain to the declared MSRV so a dep that
+    # silently requires a newer compiler fails here instead of on a user's
+    # fresh-MSRV install. Keep this pin in lockstep with
+    # `[workspace.package].rust-version` in Cargo.toml.
+    #
+    # `cargo check` (not `test`) is enough to catch the compile-floor break
+    # without paying the full test-suite CI time. `mkui-py` is included now
+    # that the PyO3 0.28.3 bump cleared the build-script rejection (#5); the
+    # default `extension-module` path only needs a Python interpreter on
+    # PATH, supplied by `actions/setup-python`.
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+      - run: cargo check --workspace --locked
+
+  mkui-py-bindings:
+    # The interpreter-LINKED Python binding tests. Two suites live under
+    # the `parity-test` feature:
+    #   * `tests/parity.rs`  — byte-identical Rust/C/Py snapshot parity
+    #     (Codex round-8 P1 #1). The Rust and C halves run in the main
+    #     `test` job (mkui-c parity test in `crates/mkui-c/tests/parity.rs`);
+    #     this asserts the `mkui_py::App` JSON snapshot equals the same tree
+    #     built directly through `mkui_runtime::AppTree`.
+    #   * `tests/smoke_py.rs` — a live `import mkui_py` smoke (#5): registers
+    #     the extension module into an embedded interpreter and builds +
+    #     fires a tree through the real Python dispatch path.
+    #
+    # macOS is skipped (CI is Linux) because the PyO3 cdylib link on macOS
+    # hosts requires extra setup; the parity test additionally guards with
+    # `#[cfg(not(target_os = "macos"))]` where relevant.
+    name: mkui-py-bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-py-bindings-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-py-bindings-
+      - name: Run mkui-py interpreter-linked binding tests
         # `--no-default-features` turns off `extension-module` so PyO3
         # links against libpython (the test binary EMBEDS Python). The
         # `parity-test` feature pulls `pyo3/auto-initialize`; `console`
@@ -187,9 +213,10 @@ jobs:
         # against. Without it (or without `--no-default-features`) the
         # round-8 CI fired `rust-lld: error: undefined symbol: PyExc_*`
         # because `extension-module` deliberately skips libpython linkage.
+        # No `--test` filter: runs both `parity` and `smoke_py`.
         env:
           PYO3_PYTHON: python3
-        run: cargo test -p mkui-py --no-default-features --features "parity-test,console" --test parity --locked
+        run: cargo test -p mkui-py --no-default-features --features "parity-test,console" --locked
 
   cbindgen-header-clean:
     # Codex round-8 P2 follow-up: prove the checked-in
