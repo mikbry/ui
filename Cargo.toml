@@ -6,8 +6,7 @@ members = [
     "crates/mkui-text",        # Text-system trait + from-scratch bitmap prototype
     "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
     "crates/mkui-rsx",         # Future RSX macro support
-    "crates/mkui-web",         # Web/WASM renderer  
-    "crates/mkui-native",      # Future WGPU renderer
+    "crates/mkui-web",         # Web/WASM renderer
     "crates/mkui-console",     # Terminal/TUI renderer
     "crates/mkui-c",           # C/C++ bindings
     "crates/mkui-py",          # Python bindings
