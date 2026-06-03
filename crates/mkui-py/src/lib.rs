@@ -362,8 +362,13 @@ fn run_showcase() -> PyResult<()> {
 }
 
 /// Python module definition.
+///
+/// `pub` so the embedded-interpreter smoke test (`tests/smoke_py.rs`) can
+/// register it via `pyo3::append_to_inittab!` and `import mkui_py` from a
+/// live interpreter. The `maturin develop` cdylib path uses the same
+/// `#[pymodule]`-generated entry point.
 #[pymodule]
-fn mkui_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub fn mkui_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<App>()?;
     m.add_class::<PyNodeId>()?;
     m.add_class::<PyActionId>()?;

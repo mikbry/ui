@@ -65,7 +65,16 @@ shape matches every other binding (`mkui_app_view_child` in C,
 
 ## CI status
 
-`mkui-py` is currently excluded from CI build/test jobs while the PyO3
-0.28.3 + Python 3.14 link path on the CI image is sorted out (tracked
-as a Sprint 5 follow-up). Local development with `maturin develop` works
-on Python 3.10+ Linux/macOS hosts.
+`mkui-py` is in the CI build/test matrix. Its default test path does not
+link `libpython` (PyO3's `extension-module` provides the symbols at load
+time), so `cargo test --workspace` covers it with no Python toolchain. The
+two interpreter-linked tests (snapshot parity + `import mkui_py` smoke) are
+feature-gated behind `parity-test` and run against any Python 3.9–3.14:
+
+```bash
+PYO3_PYTHON=$(which python3) cargo test -p mkui-py \
+  --no-default-features --features "parity-test,console" --locked
+```
+
+Local development with `maturin develop` works on Python 3.9–3.14
+Linux/macOS hosts.
