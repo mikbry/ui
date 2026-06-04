@@ -10,6 +10,18 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+### Removed
+- **Deleted the unused `mkui-native` placeholder crate.** `mkui-native` was a
+  Sprint-2-era scene-walker placeholder that walked the shared
+  `mkui_runtime::AppTree` but rendered nothing and had no consumer — no crate or
+  example depended on it, and `mkui` exposed no `native` feature. Sprint 5's
+  `mkui-wgpu` is the production native backend with a real `AppTree`-consuming
+  bridge (ADR 0006), so the placeholder was pure workspace bloat. The crate
+  directory, its `Cargo.toml` workspace-member entry, and the README crate-status
+  row are removed; stale doc-comment references to `mkui-native` as a backend now
+  point at `mkui-wgpu`. Closes the original Sprint-1 tracker #9; round-5 audit
+  Cat 1 + Phase 1 Task 1.3 (#73).
+
 ### Tooling
 - **CI: new `msrv` job pins `dtolnay/rust-toolchain@1.87.0`** and runs
   `cargo check --workspace --exclude mkui-py --locked`. Every other job floats

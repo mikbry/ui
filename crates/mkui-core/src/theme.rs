@@ -4,7 +4,7 @@
 //! dark / system) and a [`ColorTheme`] catalog entry. Backends are
 //! responsible for translating these into platform-specific colors, CSS
 //! classes, or terminal styles — those translations live in `mkui-web`,
-//! `mkui-console`, `mkui-native`, etc., never here.
+//! `mkui-console`, `mkui-wgpu`, etc., never here.
 
 use std::fmt;
 use std::str::FromStr;

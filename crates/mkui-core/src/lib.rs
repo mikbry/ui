@@ -23,7 +23,7 @@
 //! `mkui-core` deliberately avoids depending on `wasm-bindgen`, `web-sys`,
 //! `crossterm`, `ratatui`, `wgpu`, or any other backend-facing crate. The
 //! whole point of the contract crate is that each backend
-//! (`mkui-web`, `mkui-console`, `mkui-native`, ...) can compile against the
+//! (`mkui-web`, `mkui-console`, `mkui-wgpu`, ...) can compile against the
 //! same model without pulling the others in.
 //!
 //! Rendering logic, terminal styles, DOM construction, and GPU scene
