@@ -95,6 +95,30 @@ the load-bearing wgpu-specific layer, and giving it a public
 constructor is the right way to expose it without re-exporting the
 tessellator's internals.
 
+### Resize behaviour contract
+
+The two construction paths above carry **different** resize contracts, and
+the `WindowEvent::Resized` handler must honour both (this was left implicit
+in Sprint 5 and broke the raw-scene path — #93):
+
+- **Declarative / AppTree path** (`Mkui::new` / `from_core`): the scene is a
+  per-frame projection of the runtime tree. On resize the handler discards
+  the scene, marks the tree dirty, and **eagerly rebuilds** from the tree
+  against the new viewport — consistent with the eager-rebuild-on-dirty model
+  above. Primitives that depend on the viewport re-flow correctly because the
+  walker re-runs.
+- **Raw-scene escape hatch** (`Mkui::with_scene`): the user owns the scene.
+  Its contract is "I handed you primitives; render them across resizes." The
+  handler must **preserve** those primitives and only update `Scene::viewport`
+  in place — it must not replace the scene with a fresh empty one (there is no
+  tree to rebuild from, so a replacement is a permanent wipe). Tessellation
+  does not read the viewport (NDC mapping uses the surface config size in
+  `Renderer::render`), so an in-place viewport update is sufficient.
+
+Future work that touches the resize handler must keep both branches intact;
+the `WgpuApp::resize_scene_viewport` helper is the single seam that encodes
+this contract, and the #93 regression tests assert each branch.
+
 ### Layout v1
 
 The walker implements a deliberately small layout: top-down vertical
