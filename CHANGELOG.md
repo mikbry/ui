@@ -10,6 +10,11 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+## [0.9.0] — 2026-06-04
+
+### Added
+- (no functional additions in this release — Sprint 6 Phase B was hygiene + deletions)
+
 ### Removed
 - **Deleted the unused `mkui-native` placeholder crate.** `mkui-native` was a
   Sprint-2-era scene-walker placeholder that walked the shared
