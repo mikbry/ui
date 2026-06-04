@@ -154,7 +154,6 @@ Backend-specific code never leaks into the contract.
 | `mkui-wgpu`   | WGPU scene primitives + declarative builders + `winit` `ApplicationHandler` shell. Backs the HUD-style 2D pipeline.             | Experimental (shipping; declarative `AppTree` bridge per ADR 0006) |
 | `mkui-web`    | Web/WASM backend. Translates the shared component tree into DOM via `web-sys`.                                                  | Stable                                                        |
 | `mkui-console`| Terminal backend. Translates the shared component tree into `crossterm` output.                                                 | Stable                                                        |
-| `mkui-native` | Scene-walker contract for native backends — collects `mkui-core` component trees into draw records that `mkui-wgpu` can render. | Experimental                                                  |
 | `mkui`        | Bridge crate. Re-exports the backend chosen by Cargo features and presents a single `Mkui` entry point.                         | Stable                                                        |
 | `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
 | `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |

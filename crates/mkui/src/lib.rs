@@ -16,14 +16,14 @@
 //!                  |   exports Mkui)        |  `mkui::Mkui` type.
 //!                  +-----------+------------+
 //!                              |
-//!                +-------------+-------------+----------------+
-//!                |             |             |                |
-//!         +------v-----+ +-----v------+ +----v-------+ +------v-----+
-//!         |  mkui-web  | |mkui-console| |  mkui-wgpu | | mkui-native|
-//!         |  (DOM)     | | (crossterm)| | (scene)    | | (WGPU WIP) |
-//!         +------+-----+ +-----+------+ +-----+------+ +------+-----+
-//!                |             |             |                |
-//!                +-------------+-------------+----------------+
+//!                +-------------+-------------+
+//!                |             |             |
+//!         +------v-----+ +-----v------+ +----v-------+
+//!         |  mkui-web  | |mkui-console| |  mkui-wgpu |
+//!         |  (DOM)     | | (crossterm)| | (scene)    |
+//!         +------+-----+ +-----+------+ +-----+------+
+//!                |             |             |
+//!                +-------------+-------------+
 //!                              |
 //!                  +-----------v------------+
 //!                  |       mkui-core        |  Contract: components, headless
@@ -34,8 +34,8 @@
 //! - **Contract crate** ([`mkui_core`]) — defines `View` / `Text` / `Button`,
 //!   headless logic, theme primitives, layout, input events. Depends on no
 //!   backend.
-//! - **Backend crates** (`mkui-web`, `mkui-console`, `mkui-wgpu`,
-//!   `mkui-native`) — each exposes the same five-module shape:
+//! - **Backend crates** (`mkui-web`, `mkui-console`, `mkui-wgpu`) — each
+//!   exposes the same five-module shape:
 //!   `app` (backend state), `renderer` (output surface), `components`
 //!   (backend-specific projections of the contract), `high_level` (the
 //!   `Mkui` entry point), and `prelude`. Depends on [`mkui_core`] only.

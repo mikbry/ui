@@ -1,7 +1,7 @@
 //! Backend-agnostic smoke tests for the `mkui-core` component contract.
 //!
 //! These tests exist so the shared component model — used by every backend
-//! crate (`mkui-web`, `mkui-console`, `mkui-native`, …) — catches basic
+//! crate (`mkui-web`, `mkui-console`, `mkui-wgpu`, …) — catches basic
 //! regressions in construction and traversal before they leak into a
 //! downstream backend or example.
 //!
