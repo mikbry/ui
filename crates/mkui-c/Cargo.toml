@@ -19,9 +19,6 @@ mkui-console = { path = "../mkui-console", optional = true }
 # For C string handling
 libc = { workspace = true }
 
-# For FFI safety
-safer-ffi = { workspace = true, features = ["proc_macros"] }
-
 [features]
 default = ["console"]
 web = ["mkui/web"]

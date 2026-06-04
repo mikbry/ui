@@ -1,16 +1,12 @@
 # cargo-audit configuration
 #
 # Sprint 4 (issue #51) cleared the `atty` and PyO3 0.22 advisories via the
-# cbindgen 0.26 → 0.29.2 and PyO3 0.22 → 0.28.3 bumps. Remaining ignores
-# are confined to `safer-ffi`'s transitive deps (`paste`, `stabby` →
-# `rand 0.8`) and tracked as a Sprint 5+ follow-up.
+# cbindgen 0.26 → 0.29.2 and PyO3 0.22 → 0.28.3 bumps. Issue #54 cleared the
+# last two (`paste` unmaintained + `stabby` → `rand 0.8` unsound) by dropping
+# the unused `safer-ffi` dep from mkui-c — the Sprint 4 rewrite uses raw
+# opaque pointers + handle indices, so the FFI sugar was never load-bearing.
 #
 # This mirrors the `[advisories].ignore` list in `deny.toml`.
 
 [advisories]
-ignore = [
-    # `paste` unmaintained — safer-ffi (mkui-c).
-    "RUSTSEC-2024-0436",
-    # `rand` 0.8 unsound with custom logger — safer-ffi → stabby (mkui-c).
-    "RUSTSEC-2026-0097",
-]
+ignore = []
