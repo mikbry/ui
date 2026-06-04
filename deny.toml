@@ -23,12 +23,11 @@ yanked = "warn"
 #   - The `clap 3` / `bitflags 1` / `syn 1` transitive duplicate cluster
 #     pruned by the same cbindgen bump (not advisory-tagged, but cleared
 #     by the dep graph collapse).
-# `paste` (RUSTSEC-2024-0436) remains until `safer-ffi` ships a revision
-# without it; tracked as a Sprint 5+ follow-up.
-ignore = [
-    # `paste` is unmaintained; pulled in by safer-ffi (mkui-c).
-    "RUSTSEC-2024-0436",
-]
+# Issue #54 cleared the `safer-ffi` advisory chain (`paste` unmaintained
+# RUSTSEC-2024-0436 + `stabby` → `rand 0.8` unsound RUSTSEC-2026-0097): the
+# Sprint 4 mkui-c rewrite uses raw opaque pointers + handle indices, so the
+# unused `safer-ffi` dep was dropped entirely.
+ignore = []
 
 [licenses]
 version = 2
