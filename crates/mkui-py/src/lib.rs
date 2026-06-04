@@ -25,6 +25,14 @@
 //! the older `&PyAny` patterns no longer compile. This bump unblocks Python
 //! 3.14 (audit Phase 5 Task 24).
 
+// mkui-py drives the entire PyO3 surface through the safe `Bound` API and
+// holds zero `unsafe` blocks. `forbid` (not `deny`) locks that in: the
+// sibling `mkui-c` crate carries hand-audited `unsafe` FFI, so it can only
+// reach for `deny(unsafe_op_in_unsafe_fn)`; mkui-py has no such regions, so
+// it makes the stronger promise and fails the build if any `unsafe` ever
+// appears (audit round 4 §3 Rec 1).
+#![forbid(unsafe_code)]
+
 use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeId, StyleClass, TextVariant};
 use pyo3::prelude::*;
 use std::cell::RefCell;
@@ -122,11 +130,6 @@ struct PyCallback {
 
 #[pymethods]
 impl App {
-    // allow: `#[new]` is the PyO3 constructor; a parallel `impl Default` would
-    // either duplicate the body or fight the `#[pyclass]` toolchain that does
-    // not expect it to coexist with `#[new]`. Cleanup tracked in
-    // https://github.com/mikbry/ui/issues/53 (Codex round-11 P2 #4).
-    #[allow(clippy::new_without_default)]
     #[new]
     pub fn new() -> Self {
         Self {
@@ -298,6 +301,12 @@ impl App {
         Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
             "mkui-py was built without the `console` feature",
         ))
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
