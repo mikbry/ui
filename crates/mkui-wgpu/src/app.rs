@@ -84,11 +84,11 @@ pub struct WgpuApp {
     #[cfg(not(target_arch = "wasm32"))]
     first_paint_skip_retries: u8,
     /// Resize-active redraw pump (#99). Armed to [`RESIZE_REDRAW_PUMP_TICKS`]
-    /// on `Resized` + `ScaleFactorChanged`; each `about_to_wait` tick
-    /// decrements it and requests a redraw while armed, then it decays to
-    /// `0` so idle windows stay quiescent. Deliberately independent of the
-    /// first-paint state machine — `RenderOutcome::Drawn` does NOT clear it
-    /// (a drawn frame proves one frame presented, not that the live-resize
+    /// on `Resized` + `ScaleFactorChanged`; `about_to_wait` requests redraws
+    /// while armed, and successful `RenderOutcome::Drawn` frames decrement it
+    /// until idle windows return to quiescence. Deliberately independent of
+    /// the first-paint state machine — `RenderOutcome::Drawn` does NOT clear
+    /// it (a drawn frame proves one frame presented, not that the live-resize
     /// gesture has gone quiet). See ADR 0006 §"Resize-active redraw pump".
     #[cfg(not(target_arch = "wasm32"))]
     resize_redraw_pending: u8,
@@ -106,16 +106,23 @@ const FIRST_PAINT_MAX_SKIP_RETRIES: u8 = 8;
 /// without spinning redraws on an idle window. Analogous to
 /// [`FIRST_PAINT_MAX_SKIP_RETRIES`] — a cap that decays cleanly.
 ///
-/// Set to 60 (round-N+1 BLOCK scope-fix): a 4-tick window kept up with
-/// slow drags but exhausted faster than `Resized` events re-armed it during
-/// *fast* macOS live-resize, so the jerk persisted on quick right→left /
-/// bottom→top gestures. 60 matches an upstream wgpu+winit reference's
-/// proven accumulation-frame cap for active-redraw windows — ~1s at 60Hz to
-/// return to idle quiescence after the last `Resized` (each event re-arms to
-/// the cap, so the pump stays saturated for the whole gesture and only
-/// decays once the drag stops). Still fits `u8`.
+/// Tuned upward across Sprint 6.5 (#99 → #100) as operator visual verify
+/// narrowed the residual symptom:
+/// - **4** (round-N F4): kept up with slow drags but exhausted faster than
+///   `Resized` events re-armed it during *fast* macOS live-resize, so the
+///   jerk persisted on quick right→left / bottom→top gestures.
+/// - **60** (round-N+1 BLOCK): matched an upstream wgpu+winit reference's
+///   proven accumulation-frame cap; symptom dropped from a full jerk to a
+///   small residual vibration on fast drags.
+/// - **120** (round-N+2): doubles the active-redraw window to close the
+///   residual fast-drag vibration. After the last `Resized` the pump decays
+///   in ~120 presented frames (~2s at 60Hz) back to idle quiescence — still
+///   acceptable for the UI-framework idle requirement, and 120 still fits
+///   `u8` (max 255). If residual vibration survives this, the next step is a
+///   shape change (`CursorMoved`-armed bridge) as a fresh substrate-tier
+///   issue, not a further cap bump.
 #[cfg(not(target_arch = "wasm32"))]
-const RESIZE_REDRAW_PUMP_TICKS: u8 = 60;
+const RESIZE_REDRAW_PUMP_TICKS: u8 = 120;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -366,6 +373,33 @@ impl WgpuApp {
         }
     }
 
+    /// Last chance sync before drawing. During fast macOS live-resize the
+    /// platform layer can advance before the matching `Resized` event has
+    /// drained through winit. If we acquire/present against the stale surface
+    /// config in that window, CoreAnimation may scale the previous drawable
+    /// for a frame. Query the authoritative window size at redraw time and
+    /// bring both renderer config and logical scene viewport forward before
+    /// we build vertices.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_renderer_to_current_window_size(&mut self) {
+        let new_viewport = {
+            let Some(state) = self.state.as_mut() else {
+                return;
+            };
+            let size = state.window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return;
+            }
+            if state.renderer.size() == (size.width, size.height) {
+                return;
+            }
+            state.renderer.resize(size.width, size.height);
+            logical_viewport_from_physical_size(size, state.window.scale_factor())
+        };
+        self.resize_scene_viewport(new_viewport);
+        self.arm_resize_redraw_pump();
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn window_attributes(&self) -> WindowAttributes {
         let viewport = self.scene.viewport;
@@ -504,18 +538,15 @@ impl ApplicationHandler for WgpuApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                let (new_viewport, window) = {
+                let new_viewport = {
                     let Some(state) = self.state.as_mut() else {
                         return;
                     };
                     state.renderer.resize(size.width, size.height);
-                    let viewport =
-                        logical_viewport_from_physical_size(size, state.window.scale_factor());
-                    (viewport, Arc::clone(&state.window))
+                    logical_viewport_from_physical_size(size, state.window.scale_factor())
                 };
                 self.resize_scene_viewport(new_viewport);
                 self.arm_resize_redraw_pump();
-                window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // A window dragged between displays of different DPIs keeps
@@ -524,21 +555,29 @@ impl ApplicationHandler for WgpuApp {
                 // (Codex Q3). We deliberately do not touch `inner_size_writer`
                 // — forcing a window size is a UX decision out of scope here
                 // (Codex Q9 anti-pattern).
-                let (new_viewport, window) = {
+                let new_viewport = {
                     let Some(state) = self.state.as_mut() else {
                         return;
                     };
                     let size = state.window.inner_size();
                     state.renderer.resize(size.width, size.height);
-                    let viewport = logical_viewport_from_physical_size(size, scale_factor);
-                    (viewport, Arc::clone(&state.window))
+                    logical_viewport_from_physical_size(size, scale_factor)
                 };
                 self.resize_scene_viewport(new_viewport);
                 self.arm_resize_redraw_pump();
-                window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer.update_cursor(position);
+                // StoneSketch requests redraw on cursor moves. Keep mkui
+                // quiescent normally, but during an armed live-resize pump
+                // let cursor events inside the resize batch renew the active
+                // redraw window and drive a frame.
+                if self.resize_redraw_pump_armed() {
+                    self.arm_resize_redraw_pump();
+                    if let Some(state) = self.state.as_ref() {
+                        state.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::CursorLeft { .. } => {
                 // Mouse left the window: cancel any armed press without
@@ -599,6 +638,7 @@ impl ApplicationHandler for WgpuApp {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.sync_renderer_to_current_window_size();
                 // If the tree dirtied between events, rebuild before painting.
                 let needs_rebuild = self
                     .core
@@ -648,9 +688,11 @@ impl ApplicationHandler for WgpuApp {
     /// the pump is armed (set on `Resized` / `ScaleFactorChanged`), drive a
     /// burst of redraws so frames keep pace with the Metal swapchain
     /// transition, then let the pump decay so idle windows stay quiescent.
-    /// The pump decays on *presented* frames (consumed in
-    /// `handle_render_outcome_for_redraw` on `Drawn`), not on these ticks —
-    /// see ADR 0006 §"Resize-active redraw pump".
+    /// Cursor moves while armed also renew the pump and request redraw,
+    /// mirroring StoneSketch's input-event path without redrawing on ordinary
+    /// idle pointer motion. The pump decays on *presented* frames (consumed
+    /// in `handle_render_outcome_for_redraw` on `Drawn`), not on these ticks
+    /// — see ADR 0006 §"Resize-active redraw pump".
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if self.resize_redraw_pump_armed() {
             if let Some(state) = self.state.as_ref() {

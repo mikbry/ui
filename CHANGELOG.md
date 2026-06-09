@@ -19,18 +19,29 @@ breaking changes can land on minor bumps).
   frames at the new layer size before the next rendered frame caught
   up — visible as a Metal swapchain transition stretch.
 
-  Adds a narrow `about_to_wait`-driven resize redraw pump (60-frame cap,
+  Adds a narrow `about_to_wait`-driven resize redraw pump (120-frame cap,
   arm on `Resized` + `ScaleFactorChanged`). The pump's decay measures
   *presented* frames (`RenderOutcome::Drawn`) rather than event-loop ticks,
   so skipped frames under GPU pressure don't accidentally drain the bridge
-  during fast live-resize gestures. The 60-frame cap (~1s at 60Hz) keeps
+  during fast live-resize gestures. The 120-frame cap (~2s at 60Hz) keeps
   the pump saturated through fast gestures — each `Resized` re-arms it —
   then decays back to idle once the drag stops; a smaller cap, or a
   tick-counted one, exhausted faster than fast drags presented frames and
-  left the jerk visible. Independent of the first-paint state machine;
-  idle windows stay idle. ADR 0006 §"Resize-active redraw pump" documents
-  the design + the load-bearing "`Drawn` decrements but does not clear the
-  pump" invariant.
+  left the jerk visible (tuned upward 4 → 60 → 120 across Sprint 6.5 as
+  operator visual verify narrowed the residual fast-drag vibration). Resize handlers only arm the pump; `about_to_wait`
+  drives redraws after the resize event batch drains, and cursor movement
+  while the pump is armed re-arms the pump and requests a redraw immediately
+  to mirror StoneSketch's input-event redraw path during fast edge/corner
+  drags. `RedrawRequested` also performs a final `window.inner_size()` sync
+  before rendering so a frame is not acquired/presented against stale surface
+  dimensions when AppKit has advanced the native layer before the matching
+  winit resize event drains. The renderer also mirrors the upstream
+  reference's `Suboptimal` swapchain handling: render/present the frame, then
+  reconfigure the surface so fast live-resize does not keep presenting
+  against a stale surface state.
+  Independent of the first-paint state machine; idle windows stay idle. ADR
+  0006 §"Resize-active redraw pump" documents the design + the load-bearing
+  "`Drawn` decrements but does not clear the pump" invariant.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and
