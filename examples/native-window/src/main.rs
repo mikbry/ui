@@ -14,12 +14,22 @@ use mkui_wgpu::{Color, CornerRadii, Mkui, Point, Primitive, Quad, Rect, Scene, S
 fn build_scene() -> Scene {
     let viewport = Size::new(800.0, 600.0);
     let mut scene = Scene::new(viewport);
+
+    // RELATIVE-COORD TEST (do NOT merge — investigation only for #101 /
+    // fast-drag vibration root-cause).
+    // Center a quad at 50% width, 50% height, 50% the viewport's dimensions.
+    let quad_w = viewport.width * 0.5;
+    let quad_h = viewport.height * 0.5;
+    let quad_x = (viewport.width - quad_w) * 0.5;
+    let quad_y = (viewport.height - quad_h) * 0.5;
+
     scene.push(Primitive::Quad(Quad {
-        rect: Rect::new(Point::new(200.0, 150.0), Size::new(400.0, 300.0)),
+        rect: Rect::new(Point::new(quad_x, quad_y), Size::new(quad_w, quad_h)),
         fill: Color::rgba(0.42, 0.66, 0.84, 1.0),
         corner_radii: CornerRadii::all(0.0),
         stroke: None,
     }));
+
     scene
 }
 
