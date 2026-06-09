@@ -104,9 +104,18 @@ const FIRST_PAINT_MAX_SKIP_RETRIES: u8 = 8;
 /// after each `Resized` / `ScaleFactorChanged` event (#99). Bounds the
 /// pump so it bridges the Metal swapchain transition during live-resize
 /// without spinning redraws on an idle window. Analogous to
-/// [`FIRST_PAINT_MAX_SKIP_RETRIES`] — a small cap that decays cleanly.
+/// [`FIRST_PAINT_MAX_SKIP_RETRIES`] — a cap that decays cleanly.
+///
+/// Set to 60 (round-N+1 BLOCK scope-fix): a 4-tick window kept up with
+/// slow drags but exhausted faster than `Resized` events re-armed it during
+/// *fast* macOS live-resize, so the jerk persisted on quick right→left /
+/// bottom→top gestures. 60 matches an upstream wgpu+winit reference's
+/// proven accumulation-frame cap for active-redraw windows — ~1s at 60Hz to
+/// return to idle quiescence after the last `Resized` (each event re-arms to
+/// the cap, so the pump stays saturated for the whole gesture and only
+/// decays once the drag stops). Still fits `u8`.
 #[cfg(not(target_arch = "wasm32"))]
-const RESIZE_REDRAW_PUMP_TICKS: u8 = 4;
+const RESIZE_REDRAW_PUMP_TICKS: u8 = 60;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]

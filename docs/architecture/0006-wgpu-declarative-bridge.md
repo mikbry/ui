@@ -195,13 +195,23 @@ framework where idle windows must idle (not a 3D editor with continuous
 accumulation).
 
 The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
-`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 4`);
+`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 60`);
 each `about_to_wait` tick decrements the counter and calls
 `window.request_redraw()` while armed. The pump decays only via these
 ticks — `RenderOutcome::Drawn` does NOT clear it, because mkui draws
 once per resize event; clearing on `Drawn` would make the pump a no-op
 (the very first frame would clear it before bridging the Metal
 swapchain transition).
+
+The cap is **60**, not a handful of ticks. A 4-tick window kept up with
+slow drags but exhausted faster than `Resized` events re-armed it during
+*fast* gestures, so the jerk persisted on quick right→left / bottom→top
+resizes. 60 matches an upstream wgpu+winit reference's proven
+accumulation-frame cap for active-redraw windows: it gives a ~1s
+(at 60Hz) active-redraw window. Each `Resized` event re-arms to the cap,
+so the pump stays saturated for the whole live-resize gesture and only
+begins decaying once the drag stops — then returns to idle quiescence
+within ~1s. The value still fits `u8`.
 
 The pump is **independent** of the first-paint state machine
 (`first_paint_pending`). Both live on `WgpuApp` but never interact:
