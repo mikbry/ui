@@ -65,9 +65,22 @@ use crate::{tessellate_scene_with_text, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
-/// Preferred MSAA sample count for the UI pass. 4× on adapters that
-/// support it for the swapchain color format; 1× fallback otherwise.
-const MSAA_SAMPLE_COUNT_PREF: u32 = 4;
+/// Preferred MSAA sample count for the UI pass.
+///
+/// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
+/// path added in Sprint 5 has no StoneSketch parent (the upstream HUD
+/// pipeline runs at `MultisampleState::default()` = `sample_count=1`) and
+/// is the suspected source of two #93 symptoms on macOS Metal: the gray
+/// backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
+/// despite emitting 9012 valid triangles at the CPU stage — both consistent
+/// with the MSAA-resolve-into-sRGB step double-applying sRGB encoding.
+/// `sample_count=1` is the StoneSketch-proven, visually-correct path; it
+/// writes the swapchain view directly with no resolve step.
+///
+/// The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
+/// `msaa_color_view` attachment) is retained but dormant so the follow-up
+/// can re-enable it with correct sRGB orchestration — see #95.
+const MSAA_SAMPLE_COUNT_PREF: u32 = 1;
 
 /// Outcome of a single `Renderer::render` call. Mirrors the upstream
 /// reference's contract so the event-loop shell knows when to reconfigure
@@ -502,9 +515,91 @@ fn srgb_to_linear(component: f32) -> f32 {
     }
 }
 
+/// CPU-stage render-input counts for a scene: how many `Primitive`s it
+/// holds, how many `GuiTriangle`s they tessellate into, and how many GPU
+/// `Vertex`es those triangles map to. This is the displayless proxy the
+/// #93 regression tests assert on — "render input would draw" without a
+/// GPU surface or display server. It deliberately re-runs the same
+/// `tessellate_scene_with_text` → `gui_vertices` pipeline `render` drives,
+/// so a future tessellation/vertex regression trips the count assertions.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RenderInputCounts {
+    primitives: usize,
+    triangles: usize,
+    vertices: usize,
+}
+
+#[cfg(test)]
+fn render_input_counts(
+    scene: &Scene,
+    text_system: &dyn TextSystem,
+    width: f32,
+    height: f32,
+    target_is_srgb: bool,
+) -> RenderInputCounts {
+    let triangles = tessellate_scene_with_text(scene, text_system);
+    let vertices = gui_vertices(&triangles, width, height, target_is_srgb);
+    RenderInputCounts {
+        primitives: scene.primitives.len(),
+        triangles: triangles.len(),
+        vertices: vertices.len(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkui_text::BitmapTextSystem;
+
+    #[test]
+    fn msaa_pref_is_off_pending_srgb_orchestration() {
+        // #93: MSAA is pinned off (sample_count=1) — the StoneSketch-proven
+        // path — until #95 re-introduces it with correct sRGB resolve.
+        assert_eq!(MSAA_SAMPLE_COUNT_PREF, 1);
+        assert_eq!(
+            pick_sample_count(
+                wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4,
+                MSAA_SAMPLE_COUNT_PREF
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn render_input_counts_native_window_quad_is_non_empty() {
+        // native-window's `with_scene` quad must reach the GPU stage as
+        // non-empty triangles + vertices (#93 — empty here would mean a
+        // tessellation regression, not the resize clobber).
+        let mut scene = Scene::new(crate::Size::new(800.0, 600.0));
+        scene.push(crate::Primitive::Quad(crate::Quad {
+            rect: crate::Rect::new(
+                crate::Point::new(200.0, 150.0),
+                crate::Size::new(400.0, 300.0),
+            ),
+            fill: crate::Color::rgba(0.42, 0.66, 0.84, 1.0),
+            corner_radii: crate::CornerRadii::all(0.0),
+            stroke: None,
+        }));
+        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0, true);
+        assert_eq!(counts.primitives, 1);
+        assert_eq!(counts.triangles, 2, "one quad → two triangles");
+        assert_eq!(counts.vertices, 6, "two triangles → six vertices");
+    }
+
+    #[test]
+    fn render_input_counts_empty_scene_is_zero() {
+        let scene = Scene::new(crate::Size::new(800.0, 600.0));
+        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0, true);
+        assert_eq!(
+            counts,
+            RenderInputCounts {
+                primitives: 0,
+                triangles: 0,
+                vertices: 0
+            }
+        );
+    }
 
     #[test]
     fn sample_count_picks_preferred_when_color_format_supports_it() {

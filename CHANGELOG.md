@@ -10,6 +10,42 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+### Fixed
+- **wgpu examples render their primitives again; gray backdrop no longer
+  darkens on resize (#93).** Two regressions, silently present since the
+  Sprint 5 bridge merge (v0.6.0), left both `native-window` and
+  `atoms-on-wgpu` showing only the clear color:
+  - **Resize clobbered the raw-scene escape hatch.** `WindowEvent::Resized`
+    unconditionally replaced the scene with a fresh empty one, which is
+    correct for the declarative AppTree path (rebuilt from the tree) but
+    wiped the user's primitives in `with_scene` mode before first paint —
+    macOS fires a `Resized` post-creation, so `native-window`'s quad was
+    gone before it ever drew. The resize handler now honours a per-path
+    contract (ADR 0006 §"Resize behaviour contract"): AppTree scenes rebuild
+    from the tree; raw scenes keep their primitives and only update the
+    viewport in place.
+  - **MSAA disabled pending correct sRGB orchestration.** The Sprint 5 4×
+    MSAA path (no StoneSketch upstream parent) is the suspected source of
+    the resize-time darkening and of `atoms-on-wgpu` rendering empty despite
+    emitting 9012 valid triangles — consistent with the MSAA-resolve-into-
+    sRGB step double-applying sRGB encoding on macOS Metal. The UI pass now
+    runs at `sample_count=1` (the StoneSketch-proven direct-write path) as a
+    deliberate temporary policy (ADR 0006 §"MSAA disabled pending correct
+    sRGB orchestration"); re-introducing MSAA with a correct sRGB resolve is
+    tracked in #95, and anti-aliasing is intentionally off until then.
+  - **Blank first paint until resize.** `resumed()` schedules a single
+    redraw; wgpu returns `Skipped` when the surface isn't ready yet, and an
+    idle UI event loop had no other redraw trigger, so the window stayed
+    blank-gray until the user resized or interacted. The first paint now
+    retries on `Skipped` until a frame is `Drawn` (capped to avoid an
+    occluded-window spin); once drawn, `Skipped` returns to a no-op so idle
+    frames idle (ADR 0006 §"First-paint render scheduling").
+
+  Adds displayless regression tests (raw-scene survives resize, declarative
+  resize rebuilds from tree, non-empty render input for both examples'
+  scenes, and the first-paint retry state machine) so the empty-render class
+  can't reach a release visually-unverified again.
+
 ## [0.9.0] — 2026-06-04
 
 ### Added
