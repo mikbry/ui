@@ -19,15 +19,18 @@ breaking changes can land on minor bumps).
   frames at the new layer size before the next rendered frame caught
   up — visible as a Metal swapchain transition stretch.
 
-  Adds a narrow `about_to_wait`-driven resize redraw pump (60-tick cap,
-  arm on `Resized` + `ScaleFactorChanged`, decay only via `about_to_wait`
-  ticks). The 60-tick cap (~1s at 60Hz) keeps the pump saturated through
-  fast live-resize gestures — each `Resized` re-arms it — then decays
-  back to idle once the drag stops; a smaller cap exhausted faster than
-  fast drags re-armed it and left the jerk visible. Independent of the
-  first-paint state machine; idle windows stay idle. ADR 0006
-  §"Resize-active redraw pump" documents the design + the load-bearing
-  "`Drawn` does not clear the pump" invariant.
+  Adds a narrow `about_to_wait`-driven resize redraw pump (60-frame cap,
+  arm on `Resized` + `ScaleFactorChanged`). The pump's decay measures
+  *presented* frames (`RenderOutcome::Drawn`) rather than event-loop ticks,
+  so skipped frames under GPU pressure don't accidentally drain the bridge
+  during fast live-resize gestures. The 60-frame cap (~1s at 60Hz) keeps
+  the pump saturated through fast gestures — each `Resized` re-arms it —
+  then decays back to idle once the drag stops; a smaller cap, or a
+  tick-counted one, exhausted faster than fast drags presented frames and
+  left the jerk visible. Independent of the first-paint state machine;
+  idle windows stay idle. ADR 0006 §"Resize-active redraw pump" documents
+  the design + the load-bearing "`Drawn` decrements but does not clear the
+  pump" invariant.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and

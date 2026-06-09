@@ -195,29 +195,39 @@ framework where idle windows must idle (not a 3D editor with continuous
 accumulation).
 
 The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
-`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 60`);
-each `about_to_wait` tick decrements the counter and calls
-`window.request_redraw()` while armed. The pump decays only via these
-ticks — `RenderOutcome::Drawn` does NOT clear it, because mkui draws
-once per resize event; clearing on `Drawn` would make the pump a no-op
-(the very first frame would clear it before bridging the Metal
-swapchain transition).
+`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 60`).
+While armed, `about_to_wait` calls `window.request_redraw()` — a pure
+read of the pump state, it does not drain the budget. The budget is
+consumed one frame at a time on each successful `RenderOutcome::Drawn`
+(in `handle_render_outcome_for_redraw`). `Skipped` and `NeedsReconfigure`
+do **not** consume budget. `RenderOutcome::Drawn` decrements the pump by
+one but does NOT clear it: mkui draws once per resize event, so clearing
+on the first `Drawn` would make the pump a no-op (it would reset to idle
+before bridging the Metal swapchain transition).
 
-The cap is **60**, not a handful of ticks. A 4-tick window kept up with
+This matches a proven upstream wgpu+winit reference's accumulation-frame-cap
+mechanism, where the active-redraw window measures **successful presented
+frames, not event-loop ticks**. Under GPU pressure during fast resize,
+some frames skip; if skipped frames burned the budget, the bridge would
+exhaust before the gesture ends and the visible jerk would persist.
+
+The cap is **60**, not a handful of frames. A 4-frame window kept up with
 slow drags but exhausted faster than `Resized` events re-armed it during
 *fast* gestures, so the jerk persisted on quick right→left / bottom→top
-resizes. 60 matches an upstream wgpu+winit reference's proven
-accumulation-frame cap for active-redraw windows: it gives a ~1s
-(at 60Hz) active-redraw window. Each `Resized` event re-arms to the cap,
-so the pump stays saturated for the whole live-resize gesture and only
-begins decaying once the drag stops — then returns to idle quiescence
-within ~1s. The value still fits `u8`.
+resizes. 60 matches the upstream reference's proven cap: a ~1s (at 60Hz)
+active-redraw window. Each `Resized` event re-arms to the cap, so the pump
+stays saturated for the whole live-resize gesture and only begins decaying
+once the drag stops — then returns to idle quiescence within ~60 presented
+frames. The value still fits `u8`.
 
 The pump is **independent** of the first-paint state machine
-(`first_paint_pending`). Both live on `WgpuApp` but never interact:
-`Drawn` clears `first_paint_pending` only; the resize pump's only decay
-is `about_to_wait`. This independence is asserted by a unit test
-(`drawn_does_not_clear_resize_redraw_pending`).
+(`first_paint_pending`). Both live on `WgpuApp` and both observe the same
+`Drawn` outcome, but they track orthogonal state: `Drawn` clears
+`first_paint_pending` (a one-shot flag) AND decrements `resize_redraw_pending`
+(a frame counter) — neither reads the other. A `Skipped` frame may retry
+first-paint while leaving the resize pump untouched. These invariants are
+asserted by unit tests (`drawn_decrements_resize_redraw_pending`,
+`skipped_does_not_consume_resize_redraw_budget`).
 
 ### MSAA disabled pending correct sRGB orchestration
 

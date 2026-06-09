@@ -306,9 +306,13 @@ impl WgpuApp {
     /// resized or interacted. The fix reschedules on `Skipped` **only while
     /// first paint is pending** (capped to avoid an occluded-window spin):
     ///
-    /// - `Drawn`: first paint succeeded — clear the flag; idle afterwards.
+    /// - `Drawn`: first paint succeeded — clear the flag; also consume one
+    ///   frame of the resize pump budget (#99: the pump decays on presented
+    ///   frames, not `about_to_wait` ticks). Idle afterwards.
     /// - `Skipped`: retry while `first_paint_pending` and retries remain;
     ///   once the flag is cleared, `Skipped` is a no-op so idle frames idle.
+    ///   `Skipped` never touches the resize pump — skipped frames don't burn
+    ///   its budget (StoneSketch-style).
     /// - `NeedsReconfigure`: surface was reconfigured by the caller; drive
     ///   another frame and keep first paint pending.
     #[cfg(not(target_arch = "wasm32"))]
@@ -316,6 +320,7 @@ impl WgpuApp {
         match outcome {
             RenderOutcome::Drawn => {
                 self.first_paint_pending = false;
+                self.consume_resize_redraw_frame();
                 false
             }
             RenderOutcome::Skipped => {
@@ -339,18 +344,26 @@ impl WgpuApp {
         self.resize_redraw_pending = RESIZE_REDRAW_PUMP_TICKS;
     }
 
-    /// Consume one pump tick. Returns `true` (and decrements) while the pump
-    /// is armed, `false` once it has decayed to `0`. The `about_to_wait`
-    /// handler calls this to decide whether to request another redraw. The
-    /// saturating check prevents underflow once the pump is exhausted, so an
-    /// idle window stays quiescent.
+    /// True while the resize pump is armed — i.e. `about_to_wait` should
+    /// drive another redraw this tick. A pure read: the pump is *not*
+    /// drained by being asked whether to redraw (StoneSketch-style — the
+    /// budget is measured in presented frames, not event-loop ticks).
     #[cfg(not(target_arch = "wasm32"))]
-    fn take_resize_redraw_request(&mut self) -> bool {
-        if self.resize_redraw_pending == 0 {
-            return false;
+    fn resize_redraw_pump_armed(&self) -> bool {
+        self.resize_redraw_pending > 0
+    }
+
+    /// Consume one frame of the resize pump budget. Called only on a
+    /// successful `RenderOutcome::Drawn` (operator's 2026-06-09 StoneSketch
+    /// deep-read): the active-redraw window measures *presented* frames, so
+    /// `Skipped` frames under GPU pressure during fast resize do not burn the
+    /// budget — otherwise the bridge exhausts before the gesture ends and the
+    /// jerk persists. The saturating check prevents underflow at `0`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn consume_resize_redraw_frame(&mut self) {
+        if self.resize_redraw_pending > 0 {
+            self.resize_redraw_pending -= 1;
         }
-        self.resize_redraw_pending -= 1;
-        true
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -633,12 +646,13 @@ impl ApplicationHandler for WgpuApp {
     /// frame at the new layer size before the next rendered frame catches
     /// up, producing a visible scale-snap jerk on shrinking gestures. While
     /// the pump is armed (set on `Resized` / `ScaleFactorChanged`), drive a
-    /// short burst of redraws so frames keep pace with the Metal swapchain
+    /// burst of redraws so frames keep pace with the Metal swapchain
     /// transition, then let the pump decay so idle windows stay quiescent.
-    /// The only decay is this per-tick decrement — see ADR 0006
-    /// §"Resize-active redraw pump".
+    /// The pump decays on *presented* frames (consumed in
+    /// `handle_render_outcome_for_redraw` on `Drawn`), not on these ticks —
+    /// see ADR 0006 §"Resize-active redraw pump".
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if self.take_resize_redraw_request() {
+        if self.resize_redraw_pump_armed() {
             if let Some(state) = self.state.as_ref() {
                 state.window.request_redraw();
             }
@@ -869,44 +883,65 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn take_resize_redraw_request_decrements_and_returns_true() {
+    fn consume_resize_redraw_frame_decrements() {
+        // The pump is armed by being asked (read-only) but drained only by
+        // consuming a presented frame.
         let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
         app.arm_resize_redraw_pump();
-        let expected = RESIZE_REDRAW_PUMP_TICKS - 1;
-        assert!(app.take_resize_redraw_request());
-        assert_eq!(app.resize_redraw_pending, expected);
+        assert!(app.resize_redraw_pump_armed());
+        app.consume_resize_redraw_frame();
+        assert_eq!(app.resize_redraw_pending, RESIZE_REDRAW_PUMP_TICKS - 1);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn take_resize_redraw_request_caps_at_zero() {
-        // Cap prevents unbounded redraw spinning — decrement N+1 times,
-        // pump must not underflow + must return false after exhaustion.
+    fn consume_resize_redraw_frame_caps_at_zero() {
+        // Cap prevents unbounded redraw spinning — consume N+1 frames, pump
+        // must decay to 0, report disarmed, and not underflow.
         let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
         app.arm_resize_redraw_pump();
         for _ in 0..RESIZE_REDRAW_PUMP_TICKS {
-            assert!(app.take_resize_redraw_request());
+            app.consume_resize_redraw_frame();
         }
         assert_eq!(app.resize_redraw_pending, 0);
-        assert!(!app.take_resize_redraw_request());
-        assert_eq!(app.resize_redraw_pending, 0); // no underflow
+        assert!(!app.resize_redraw_pump_armed());
+        app.consume_resize_redraw_frame(); // safe; no underflow
+        assert_eq!(app.resize_redraw_pending, 0);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn drawn_does_not_clear_resize_redraw_pending() {
-        // Codex Q3 + Q5 correction: Drawn clears first_paint_pending ONLY,
-        // not resize_redraw_pending. This invariant must hold or the pump
-        // becomes a no-op (mkui draws once per resize event; if Drawn cleared
-        // the pump, the very first frame would clear it before bridging the
-        // swapchain transition).
+    fn drawn_decrements_resize_redraw_pending() {
+        // StoneSketch-style (operator's 2026-06-09 deep-read): the pump
+        // decays on presented frames, so a `Drawn` outcome consumes exactly
+        // one frame of the budget. Note this DECREMENTS by one — it does not
+        // CLEAR the pump (the earlier Codex Q3 "Drawn does not clear" still
+        // holds; "decrement by 1" is the corrected mechanism).
         let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
         app.arm_resize_redraw_pump();
         let pre = app.resize_redraw_pending;
         let _ = app.handle_render_outcome_for_redraw(crate::render::RenderOutcome::Drawn);
         assert_eq!(
+            app.resize_redraw_pending,
+            pre - 1,
+            "Drawn must decrement the resize pump by exactly one frame"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn skipped_does_not_consume_resize_redraw_budget() {
+        // StoneSketch-style: skipped frames don't burn the pump budget.
+        // Critical for fast-drag scenarios where GPU pressure may cause
+        // some frames to skip — the pump must keep retrying without
+        // counting skipped frames against the active-redraw window.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        let pre = app.resize_redraw_pending;
+        let _ = app.handle_render_outcome_for_redraw(crate::render::RenderOutcome::Skipped);
+        assert_eq!(
             app.resize_redraw_pending, pre,
-            "Drawn must not touch resize pump"
+            "Skipped must not decrement resize pump"
         );
     }
 }
