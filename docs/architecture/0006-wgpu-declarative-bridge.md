@@ -119,6 +119,47 @@ Future work that touches the resize handler must keep both branches intact;
 the `WgpuApp::resize_scene_viewport` helper is the single seam that encodes
 this contract, and the #93 regression tests assert each branch.
 
+### First-paint render scheduling
+
+`resumed()` creates the window and schedules exactly one redraw. wgpu's
+`Renderer::render` returns `RenderOutcome::Skipped` when the surface is not
+yet ready (Timeout / Occluded / Validation), and a UI-framework event loop
+has no other redraw trigger while idle — so a `Skipped` first frame left both
+examples blank-gray until the user resized or interacted (#93 round-N+1).
+
+The contract: **the first successfully-`Drawn` frame is guaranteed to be
+scheduled.** While `first_paint_pending`, a `Skipped` outcome reschedules
+another redraw (capped by `FIRST_PAINT_MAX_SKIP_RETRIES` so a permanently
+occluded surface can't spin). The first `Drawn` clears the flag, after which
+`Skipped` returns to a no-op so a quiescent UI idles rather than busy-redraws.
+`NeedsReconfigure` always drives another frame. This logic lives in the
+`WgpuApp::handle_render_outcome_for_redraw` seam, asserted by unit tests; it
+deliberately does **not** adopt StoneSketch's redraw-after-every-input-event
+pattern, which would defeat idle-frame quiescence for a UI framework.
+
+### MSAA disabled pending correct sRGB orchestration
+
+The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
+in `render/mod.rs`). This is a **deliberate temporary policy**, not the target
+state:
+
+- The Sprint 5 4× MSAA path has **no StoneSketch upstream parent** — the
+  reference HUD pipeline runs at `MultisampleState::default()` (`sample_count
+  = 1`). MSAA was a mkui-wgpu-local addition.
+- It is the suspected source of two #93 symptoms on macOS Metal: the gray
+  backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
+  despite emitting thousands of valid triangles at the CPU stage — both
+  consistent with the MSAA-resolve-into-sRGB step double-applying sRGB
+  encoding (`srgb_encode(srgb_to_linear(c))`).
+- `sample_count = 1` writes the swapchain view directly with no resolve step,
+  which is the StoneSketch-proven, visually-correct path.
+
+The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
+`msaa_color_view` attachment) is retained but dormant so the policy can be
+reversed cleanly. Re-introducing MSAA with a non-sRGB color view + manual
+fragment-stage sRGB encode (or a verified-correct sRGB resolve) is tracked in
+**#95**; until that lands, anti-aliasing is intentionally off.
+
 ### Layout v1
 
 The walker implements a deliberately small layout: top-down vertical

@@ -71,7 +71,25 @@ pub struct WgpuApp {
     hit_tests: Vec<HitTestEntry>,
     #[cfg(not(target_arch = "wasm32"))]
     pointer: PointerState,
+    /// True until the freshly-created window has produced its first
+    /// successfully-`Drawn` frame. While set, a `Skipped` render outcome
+    /// (surface not yet ready) reschedules another redraw instead of
+    /// idling — otherwise the window stays blank-gray until the user
+    /// resizes or interacts (#93 round-N+1).
+    #[cfg(not(target_arch = "wasm32"))]
+    first_paint_pending: bool,
+    /// Remaining `Skipped`→retry reschedules allowed during first paint.
+    /// Caps the retry loop so a genuinely occluded window doesn't spin
+    /// redraws forever.
+    #[cfg(not(target_arch = "wasm32"))]
+    first_paint_skip_retries: u8,
 }
+
+/// Cap on first-paint `Skipped`→retry reschedules before giving up, so a
+/// genuinely occluded or never-ready surface doesn't spin redraws forever
+/// (#93 round-N+1).
+#[cfg(not(target_arch = "wasm32"))]
+const FIRST_PAINT_MAX_SKIP_RETRIES: u8 = 8;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -98,6 +116,10 @@ impl WgpuApp {
             hit_tests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
             pointer: PointerState::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            first_paint_pending: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            first_paint_skip_retries: FIRST_PAINT_MAX_SKIP_RETRIES,
         }
     }
 
@@ -242,6 +264,41 @@ impl WgpuApp {
             self.rebuild_scene_from_tree();
         } else {
             self.scene.viewport = new_viewport;
+        }
+    }
+
+    /// Advance first-paint retry state for a completed render outcome and
+    /// report whether the caller should schedule another `request_redraw()`.
+    ///
+    /// Background (#93 round-N+1): `resumed()` schedules exactly one redraw
+    /// after creating the window. wgpu returns [`RenderOutcome::Skipped`]
+    /// when the surface isn't ready yet (Timeout / Occluded / Validation),
+    /// and the event loop has no other redraw trigger on an idle UI — so a
+    /// `Skipped` first frame left the window blank-gray until the user
+    /// resized or interacted. The fix reschedules on `Skipped` **only while
+    /// first paint is pending** (capped to avoid an occluded-window spin):
+    ///
+    /// - `Drawn`: first paint succeeded — clear the flag; idle afterwards.
+    /// - `Skipped`: retry while `first_paint_pending` and retries remain;
+    ///   once the flag is cleared, `Skipped` is a no-op so idle frames idle.
+    /// - `NeedsReconfigure`: surface was reconfigured by the caller; drive
+    ///   another frame and keep first paint pending.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_render_outcome_for_redraw(&mut self, outcome: RenderOutcome) -> bool {
+        match outcome {
+            RenderOutcome::Drawn => {
+                self.first_paint_pending = false;
+                false
+            }
+            RenderOutcome::Skipped => {
+                if self.first_paint_pending && self.first_paint_skip_retries > 0 {
+                    self.first_paint_skip_retries -= 1;
+                    true
+                } else {
+                    false
+                }
+            }
+            RenderOutcome::NeedsReconfigure => true,
         }
     }
 
@@ -451,19 +508,32 @@ impl ApplicationHandler for WgpuApp {
                 if needs_rebuild {
                     self.rebuild_scene_from_tree();
                 }
-                if let Some(state) = self.state.as_mut() {
-                    let outcome = state.renderer.render(&self.scene, &*self.text_system);
-                    match outcome {
-                        Ok(RenderOutcome::Drawn) | Ok(RenderOutcome::Skipped) => {}
+                // Render inside a scoped borrow, reconfiguring in place on
+                // `NeedsReconfigure`, then drop the borrow so the first-paint
+                // retry bookkeeping can take `&mut self`.
+                let outcome = {
+                    let Some(state) = self.state.as_mut() else {
+                        return;
+                    };
+                    match state.renderer.render(&self.scene, &*self.text_system) {
                         Ok(RenderOutcome::NeedsReconfigure) => {
                             let (w, h) = state.renderer.size();
                             state.renderer.resize(w, h);
-                            state.window.request_redraw();
+                            RenderOutcome::NeedsReconfigure
                         }
+                        Ok(outcome) => outcome,
                         Err(error) => {
                             eprintln!("mkui-wgpu: render error: {error}");
                             event_loop.exit();
+                            return;
                         }
+                    }
+                };
+                // Schedule another redraw when the outcome warrants it — a
+                // reconfigure, or a first-paint `Skipped` retry (#93).
+                if self.handle_render_outcome_for_redraw(outcome) {
+                    if let Some(state) = self.state.as_ref() {
+                        state.window.request_redraw();
                     }
                 }
             }
@@ -553,6 +623,76 @@ mod tests {
             app.scene().viewport,
             Size::new(1024.0, 768.0),
             "rebuilt scene must adopt the new viewport"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn first_paint_skipped_requests_retry() {
+        // #93 round-N+1: a Skipped first frame (surface not ready) must
+        // reschedule a redraw, otherwise the window stays blank-gray until
+        // the user resizes.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        assert!(app.first_paint_pending);
+        assert!(
+            app.handle_render_outcome_for_redraw(RenderOutcome::Skipped),
+            "first-paint Skipped must request a retry redraw"
+        );
+        assert!(app.first_paint_pending, "still pending until a Drawn frame");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn first_paint_drawn_clears_pending() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        assert!(
+            !app.handle_render_outcome_for_redraw(RenderOutcome::Drawn),
+            "a Drawn frame does not force another redraw"
+        );
+        assert!(!app.first_paint_pending, "first paint succeeded");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn skipped_after_first_paint_is_a_noop() {
+        // Once first paint succeeds, Skipped must idle so a quiescent UI
+        // doesn't spin redraws.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.handle_render_outcome_for_redraw(RenderOutcome::Drawn);
+        assert!(
+            !app.handle_render_outcome_for_redraw(RenderOutcome::Skipped),
+            "Skipped after a successful first paint must not request a retry"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn first_paint_retry_is_capped() {
+        // A surface that never becomes ready must not spin redraws forever.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        let mut retries = 0usize;
+        while app.handle_render_outcome_for_redraw(RenderOutcome::Skipped) {
+            retries += 1;
+            assert!(
+                retries <= FIRST_PAINT_MAX_SKIP_RETRIES as usize,
+                "retry loop must be bounded by the cap"
+            );
+        }
+        assert_eq!(retries, FIRST_PAINT_MAX_SKIP_RETRIES as usize);
+        assert!(
+            app.first_paint_pending,
+            "cap exhausted without a Drawn frame leaves first paint pending"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn needs_reconfigure_always_requests_redraw() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.handle_render_outcome_for_redraw(RenderOutcome::Drawn);
+        assert!(
+            app.handle_render_outcome_for_redraw(RenderOutcome::NeedsReconfigure),
+            "a reconfigured surface must drive another frame even post-first-paint"
         );
     }
 
