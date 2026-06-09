@@ -106,23 +106,29 @@ const FIRST_PAINT_MAX_SKIP_RETRIES: u8 = 8;
 /// without spinning redraws on an idle window. Analogous to
 /// [`FIRST_PAINT_MAX_SKIP_RETRIES`] — a cap that decays cleanly.
 ///
-/// Tuned upward across Sprint 6.5 (#99 → #100) as operator visual verify
-/// narrowed the residual symptom:
+/// Tuned across Sprint 6.5 (#99 → #100) as operator visual verify narrowed
+/// the residual symptom:
 /// - **4** (round-N F4): kept up with slow drags but exhausted faster than
 ///   `Resized` events re-armed it during *fast* macOS live-resize, so the
 ///   jerk persisted on quick right→left / bottom→top gestures.
 /// - **60** (round-N+1 BLOCK): matched an upstream wgpu+winit reference's
 ///   proven accumulation-frame cap; symptom dropped from a full jerk to a
-///   small residual vibration on fast drags.
-/// - **120** (round-N+2): doubles the active-redraw window to close the
-///   residual fast-drag vibration. After the last `Resized` the pump decays
-///   in ~120 presented frames (~2s at 60Hz) back to idle quiescence — still
-///   acceptable for the UI-framework idle requirement, and 120 still fits
-///   `u8` (max 255). If residual vibration survives this, the next step is a
-///   shape change (`CursorMoved`-armed bridge) as a fresh substrate-tier
-///   issue, not a further cap bump.
+///   small residual vibration on fast drags. **This is the value shipped.**
+/// - **120** (round-N+2): tried to close the residual by doubling the
+///   active-redraw window — but operator visual verify found 120 *worse*
+///   than 60, refuting the "more budget = smoother" hypothesis. Likely the
+///   pump over-fires redraws during fast drag, queueing frames against stale
+///   surface configs and saturating the swapchain-transition cost. Reverted.
+///
+/// 60 hits the balance between "enough redraws to bridge swapchain
+/// transitions" and "few enough not to saturate the GPU". After the last
+/// `Resized` the pump decays in ~60 presented frames (~1s at 60Hz) back to
+/// idle quiescence. The residual fast-drag vibration at 60 is NOT pump
+/// exhaustion (refuted by the 120 result); it is tracked as #101 for a
+/// shape change — a `CursorMoved`-armed bridge during the active-resize
+/// window — not a further cap tune.
 #[cfg(not(target_arch = "wasm32"))]
-const RESIZE_REDRAW_PUMP_TICKS: u8 = 120;
+const RESIZE_REDRAW_PUMP_TICKS: u8 = 60;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]

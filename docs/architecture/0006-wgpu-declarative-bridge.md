@@ -195,7 +195,7 @@ framework where idle windows must idle (not a 3D editor with continuous
 accumulation).
 
 The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
-`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 120`).
+`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 60`).
 The resize handlers only arm the pump; they do not directly call
 `window.request_redraw()`. While armed, `about_to_wait` calls
 `window.request_redraw()` after the current event batch drains — a pure read
@@ -226,19 +226,22 @@ frames, not event-loop ticks**. Under GPU pressure during fast resize,
 some frames skip; if skipped frames burned the budget, the bridge would
 exhaust before the gesture ends and the visible jerk would persist.
 
-The cap is **120**, not a handful of frames. It was tuned upward during
-Sprint 6.5 (#99 → #100) as operator visual verify narrowed the residual
-symptom: a 4-frame window kept up with slow drags but exhausted faster than
-`Resized` events re-armed it during *fast* gestures (full jerk); 60 matched
-the upstream reference's proven cap and dropped the symptom to a small
-residual vibration on fast drags; 120 doubles the active-redraw window to
-close that residual. Each `Resized` event re-arms to the cap, so the pump
-stays saturated for the whole live-resize gesture and only begins decaying
-once the drag stops — then returns to idle quiescence within ~120 presented
-frames (~2s at 60Hz). The value still fits `u8` (max 255). If residual
-vibration survives the 120-frame window, the next step is a shape change
-(a `CursorMoved`-armed bridge) raised as a fresh substrate-tier issue with
-its own Codex round-N design review — not a further cap bump.
+The cap is **60**, not a handful of frames. It was tuned during Sprint 6.5
+(#99 → #100) as operator visual verify narrowed the residual symptom: a
+4-frame window kept up with slow drags but exhausted faster than `Resized`
+events re-armed it during *fast* gestures (full jerk); 60 matched the
+upstream reference's proven cap and dropped the symptom to a small residual
+vibration on fast drags. The cap was briefly raised to 120 during the
+iteration, but operator visual verify showed 120 was **worse** than 60 —
+likely GPU/swapchain saturation from over-queued redraws presenting against
+stale surface configs — so the cap reverted to 60. Each `Resized` event
+re-arms to the cap, so the pump stays saturated for the whole live-resize
+gesture and only begins decaying once the drag stops — then returns to idle
+quiescence within ~60 presented frames (~1s at 60Hz). The value fits `u8`.
+The 120 result refutes "pump exhaustion" as the residual root cause; the
+remaining fast-drag vibration is tracked as **#101** for a shape change (a
+`CursorMoved`-armed bridge during the active-resize window) with its own
+Codex round-N design review — not a further cap tune.
 
 The renderer also treats `CurrentSurfaceTexture::Suboptimal` as a resize-
 recovery signal: it renders and presents the frame, then immediately
