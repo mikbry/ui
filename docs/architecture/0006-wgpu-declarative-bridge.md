@@ -111,13 +111,54 @@ in Sprint 5 and broke the raw-scene path — #93):
   Its contract is "I handed you primitives; render them across resizes." The
   handler must **preserve** those primitives and only update `Scene::viewport`
   in place — it must not replace the scene with a fresh empty one (there is no
-  tree to rebuild from, so a replacement is a permanent wipe). Tessellation
-  does not read the viewport (NDC mapping uses the surface config size in
-  `Renderer::render`), so an in-place viewport update is sufficient.
+  tree to rebuild from, so a replacement is a permanent wipe). An in-place
+  `Scene::viewport` update is sufficient — and, since #97, also *necessary*:
+  `Renderer::render` projects against `Scene::viewport` (see §"Viewport units
+  contract"), so the in-place update keeps the projection denominator current.
 
 Future work that touches the resize handler must keep both branches intact;
 the `WgpuApp::resize_scene_viewport` helper is the single seam that encodes
 this contract, and the #93 regression tests assert each branch.
+
+### Viewport units contract
+
+`Scene::viewport` and all primitive coordinates (`Quad::rect`, `Text::rect`,
+`Icon::rect`, custom-node `x`/`y` props, walker layout positions) are in
+**logical pixels**. This matches:
+
+- `mkui-web`'s CSS-pixel convention (DOM positioning)
+- `mkui-console`'s character-grid logical convention
+- The cross-binding identity contract: the same primitive at logical
+  `(200, 150)` lands at the same visible-screen position on web, console,
+  and wgpu (modulo each backend's pixel-density characteristics).
+
+The wgpu backend reconciles this with the GPU's physical-pixel surface as
+follows:
+
+- `Renderer::config.{width, height}` configure the wgpu surface in
+  **physical pixels** (required by wgpu's `surface.configure` contract).
+- `gui_vertices` projects logical-pixel coordinates to NDC using
+  `scene.viewport.{width, height}` (logical) as the denominator. wgpu /
+  the rasterizer then maps NDC to device pixels.
+- On `WindowEvent::Resized`, the resize handler reconfigures the surface
+  in physical pixels AND updates `Scene::viewport` to the new logical
+  viewport (`physical / scale_factor`).
+- On `WindowEvent::ScaleFactorChanged`, the same conversion runs with the
+  new `scale_factor` so a window dragged between displays of different
+  DPIs stays correctly proportioned.
+
+The `physical / scale_factor` conversion lives in one place — the
+`logical_viewport_from_physical_size` free function in `app.rs` — shared by
+both the `Resized` and `ScaleFactorChanged` arms. Fractional scale factors
+(e.g. 1.5×) are preserved as f32 floats; we do not round to integer logical
+pixels.
+
+Before #97, `Renderer::render` mistakenly projected against
+`self.config.{width, height}` (physical), so on any `scale_factor > 1`
+display, logical-pixel primitives mis-projected into the upper-left quadrant.
+The fix was a single load-bearing change at the projection call site — the
+renderer already received the logical viewport via `scene.viewport`; it just
+stopped reading the wrong field.
 
 ### First-paint render scheduling
 

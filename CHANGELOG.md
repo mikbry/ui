@@ -11,6 +11,20 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Fixed
+- **wgpu primitives now land at logical-pixel positions on HiDPI displays
+  (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
+  primitives were authored in logical pixels (matching web's CSS-pixel and
+  console's character-grid conventions) but `Renderer::render` projected
+  vertices against the physical-pixel surface config. On Retina
+  (`scale_factor=2.0`), a logical-200 coord projected to NDC -0.75 instead
+  of -0.5 → primitives landed in the upper-left quadrant. Each resize
+  surfaced a 1-2 frame scale-snap as walker and renderer briefly desynced.
+  Fix: `Renderer::render` now uses `scene.viewport.{width, height}` (logical)
+  as the projection denominator instead of `self.config.{width, height}`
+  (physical). `WindowEvent::ScaleFactorChanged` is now handled so windows
+  dragged between displays of different DPIs reproject correctly. ADR 0006
+  §"Viewport units contract" makes the logical-pixel convention explicit
+  across the cross-binding API surface. No public API change.
 - **wgpu examples render their primitives again; gray backdrop no longer
   darkens on resize (#93).** Two regressions, silently present since the
   Sprint 5 bridge merge (v0.6.0), left both `native-window` and
