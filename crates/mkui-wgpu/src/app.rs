@@ -83,6 +83,15 @@ pub struct WgpuApp {
     /// redraws forever.
     #[cfg(not(target_arch = "wasm32"))]
     first_paint_skip_retries: u8,
+    /// Resize-active redraw pump (#99). Armed to [`RESIZE_REDRAW_PUMP_TICKS`]
+    /// on `Resized` + `ScaleFactorChanged`; each `about_to_wait` tick
+    /// decrements it and requests a redraw while armed, then it decays to
+    /// `0` so idle windows stay quiescent. Deliberately independent of the
+    /// first-paint state machine — `RenderOutcome::Drawn` does NOT clear it
+    /// (a drawn frame proves one frame presented, not that the live-resize
+    /// gesture has gone quiet). See ADR 0006 §"Resize-active redraw pump".
+    #[cfg(not(target_arch = "wasm32"))]
+    resize_redraw_pending: u8,
 }
 
 /// Cap on first-paint `Skipped`→retry reschedules before giving up, so a
@@ -90,6 +99,14 @@ pub struct WgpuApp {
 /// (#93 round-N+1).
 #[cfg(not(target_arch = "wasm32"))]
 const FIRST_PAINT_MAX_SKIP_RETRIES: u8 = 8;
+
+/// Number of `about_to_wait` redraw ticks the resize-active pump drives
+/// after each `Resized` / `ScaleFactorChanged` event (#99). Bounds the
+/// pump so it bridges the Metal swapchain transition during live-resize
+/// without spinning redraws on an idle window. Analogous to
+/// [`FIRST_PAINT_MAX_SKIP_RETRIES`] — a small cap that decays cleanly.
+#[cfg(not(target_arch = "wasm32"))]
+const RESIZE_REDRAW_PUMP_TICKS: u8 = 4;
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
@@ -120,6 +137,8 @@ impl WgpuApp {
             first_paint_pending: true,
             #[cfg(not(target_arch = "wasm32"))]
             first_paint_skip_retries: FIRST_PAINT_MAX_SKIP_RETRIES,
+            #[cfg(not(target_arch = "wasm32"))]
+            resize_redraw_pending: 0,
         }
     }
 
@@ -302,6 +321,29 @@ impl WgpuApp {
         }
     }
 
+    /// Arm the resize-active redraw pump (#99). Called from the `Resized`
+    /// and `ScaleFactorChanged` handlers. Subsequent arms reset the counter
+    /// to the cap rather than stacking (Codex Q2) — a fresh resize event
+    /// renews the recovery window, it doesn't extend it unbounded.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn arm_resize_redraw_pump(&mut self) {
+        self.resize_redraw_pending = RESIZE_REDRAW_PUMP_TICKS;
+    }
+
+    /// Consume one pump tick. Returns `true` (and decrements) while the pump
+    /// is armed, `false` once it has decayed to `0`. The `about_to_wait`
+    /// handler calls this to decide whether to request another redraw. The
+    /// saturating check prevents underflow once the pump is exhausted, so an
+    /// idle window stays quiescent.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn take_resize_redraw_request(&mut self) -> bool {
+        if self.resize_redraw_pending == 0 {
+            return false;
+        }
+        self.resize_redraw_pending -= 1;
+        true
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn window_attributes(&self) -> WindowAttributes {
         let viewport = self.scene.viewport;
@@ -450,6 +492,7 @@ impl ApplicationHandler for WgpuApp {
                     (viewport, Arc::clone(&state.window))
                 };
                 self.resize_scene_viewport(new_viewport);
+                self.arm_resize_redraw_pump();
                 window.request_redraw();
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -469,6 +512,7 @@ impl ApplicationHandler for WgpuApp {
                     (viewport, Arc::clone(&state.window))
                 };
                 self.resize_scene_viewport(new_viewport);
+                self.arm_resize_redraw_pump();
                 window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -572,6 +616,23 @@ impl ApplicationHandler for WgpuApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Resize-active redraw pump (#99). macOS fires `Resized` continuously
+    /// during a live-resize gesture; between events the OS may present a
+    /// frame at the new layer size before the next rendered frame catches
+    /// up, producing a visible scale-snap jerk on shrinking gestures. While
+    /// the pump is armed (set on `Resized` / `ScaleFactorChanged`), drive a
+    /// short burst of redraws so frames keep pace with the Metal swapchain
+    /// transition, then let the pump decay so idle windows stay quiescent.
+    /// The only decay is this per-tick decrement — see ADR 0006
+    /// §"Resize-active redraw pump".
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if self.take_resize_redraw_request() {
+            if let Some(state) = self.state.as_ref() {
+                state.window.request_redraw();
+            }
         }
     }
 }
@@ -767,5 +828,76 @@ mod tests {
             .iter()
             .any(|p| matches!(p, crate::types::Primitive::Text(_)));
         assert!(has_text, "walker should emit at least one text primitive");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn resize_redraw_pump_starts_idle() {
+        // A freshly-constructed app has a quiescent pump — no redraw is
+        // requested until a resize event arms it.
+        let app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        assert_eq!(app.resize_redraw_pending, 0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn arm_resize_redraw_pump_sets_to_max() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        assert_eq!(app.resize_redraw_pending, RESIZE_REDRAW_PUMP_TICKS);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn arm_resize_redraw_pump_resets_not_stacks() {
+        // Codex Q2: subsequent arms reset to max, no stacking.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        app.arm_resize_redraw_pump();
+        app.arm_resize_redraw_pump();
+        assert_eq!(app.resize_redraw_pending, RESIZE_REDRAW_PUMP_TICKS);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn take_resize_redraw_request_decrements_and_returns_true() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        let expected = RESIZE_REDRAW_PUMP_TICKS - 1;
+        assert!(app.take_resize_redraw_request());
+        assert_eq!(app.resize_redraw_pending, expected);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn take_resize_redraw_request_caps_at_zero() {
+        // Cap prevents unbounded redraw spinning — decrement N+1 times,
+        // pump must not underflow + must return false after exhaustion.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        for _ in 0..RESIZE_REDRAW_PUMP_TICKS {
+            assert!(app.take_resize_redraw_request());
+        }
+        assert_eq!(app.resize_redraw_pending, 0);
+        assert!(!app.take_resize_redraw_request());
+        assert_eq!(app.resize_redraw_pending, 0); // no underflow
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn drawn_does_not_clear_resize_redraw_pending() {
+        // Codex Q3 + Q5 correction: Drawn clears first_paint_pending ONLY,
+        // not resize_redraw_pending. This invariant must hold or the pump
+        // becomes a no-op (mkui draws once per resize event; if Drawn cleared
+        // the pump, the very first frame would clear it before bridging the
+        // swapchain transition).
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        let pre = app.resize_redraw_pending;
+        let _ = app.handle_render_outcome_for_redraw(crate::render::RenderOutcome::Drawn);
+        assert_eq!(
+            app.resize_redraw_pending, pre,
+            "Drawn must not touch resize pump"
+        );
     }
 }

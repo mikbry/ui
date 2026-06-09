@@ -11,6 +11,20 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Fixed
+- **wgpu live-resize jerk eliminated on macOS (#99).** PR #98 (#97) fixed
+  the HiDPI viewport-units math but the visible scale-snap on shrinking
+  resize gestures (right→left, bottom→top) persisted. Root cause was at
+  the event-loop redraw-cadence layer: mkui-wgpu had no `about_to_wait`
+  handler, so during continuous resize gestures the OS could present
+  frames at the new layer size before the next rendered frame caught
+  up — visible as a Metal swapchain transition stretch.
+
+  Adds a narrow `about_to_wait`-driven resize redraw pump (4-tick cap,
+  arm on `Resized` + `ScaleFactorChanged`, decay only via `about_to_wait`
+  ticks). Independent of the first-paint state machine; idle windows
+  stay idle. ADR 0006 §"Resize-active redraw pump" documents the
+  design + the load-bearing "`Drawn` does not clear the pump"
+  invariant.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and

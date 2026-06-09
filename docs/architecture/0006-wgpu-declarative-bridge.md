@@ -178,6 +178,37 @@ occluded surface can't spin). The first `Drawn` clears the flag, after which
 deliberately does **not** adopt StoneSketch's redraw-after-every-input-event
 pattern, which would defeat idle-frame quiescence for a UI framework.
 
+### Resize-active redraw pump
+
+macOS fires `WindowEvent::Resized` continuously during live-resize gestures.
+Each event triggers `Renderer::resize` (which reconfigures the surface) plus
+`window.request_redraw()`. The OS may present a frame between the
+reconfiguration and the next rendered output — on shrinking gestures
+(bottom→top, right→left) this produces a visible "scale-snap" jerk as
+the Metal swapchain transitions before the next frame at the new size
+is ready.
+
+A wgpu+winit upstream reference does not have this jerk because it drives
+continuous redraws via `about_to_wait` while a progressive accumulator
+is active. mkui-wgpu cannot follow that pattern directly — it's a UI
+framework where idle windows must idle (not a 3D editor with continuous
+accumulation).
+
+The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
+`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 4`);
+each `about_to_wait` tick decrements the counter and calls
+`window.request_redraw()` while armed. The pump decays only via these
+ticks — `RenderOutcome::Drawn` does NOT clear it, because mkui draws
+once per resize event; clearing on `Drawn` would make the pump a no-op
+(the very first frame would clear it before bridging the Metal
+swapchain transition).
+
+The pump is **independent** of the first-paint state machine
+(`first_paint_pending`). Both live on `WgpuApp` but never interact:
+`Drawn` clears `first_paint_pending` only; the resize pump's only decay
+is `about_to_wait`. This independence is asserted by a unit test
+(`drawn_does_not_clear_resize_redraw_pending`).
+
 ### MSAA disabled pending correct sRGB orchestration
 
 The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
