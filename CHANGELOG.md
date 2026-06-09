@@ -46,6 +46,23 @@ breaking changes can land on minor bumps).
   Independent of the first-paint state machine; idle windows stay idle. ADR
   0006 §"Resize-active redraw pump" documents the design + the load-bearing
   "`Drawn` decrements but does not clear the pump" invariant.
+
+  **Known issue (residual):** fast shrink-direction drags (right→left,
+  bottom→top) still show a small residual vibration that is NOT fully
+  resolved by this pump. Three hypotheses were ruled out during the
+  v0.9.3 cycle (Sprint 6.5 close, 2026-06-09):
+  - Pump-cap exhaustion (cap=60 and cap=120 produced the same residual;
+    cap=120 was actually worse, suggesting GPU/swapchain saturation
+    above the operator-verified sweet spot)
+  - Scene-complexity by primitive count (native-showcase has the largest
+    tree but vibrates least among the three wgpu examples)
+  - Absolute-vs-relative primitive coords during resize (modifying
+    native-window's quad to viewport-relative coords did not change the
+    visible vibration)
+
+  The residual root cause remains undiagnosed at v0.9.3 ship time. See
+  #101 for the continuing investigation and the substrate-tier C2
+  (CursorMoved-armed bridge during active-resize window) candidate.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and
