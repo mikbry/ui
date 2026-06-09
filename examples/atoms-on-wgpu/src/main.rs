@@ -138,6 +138,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use mkui_runtime::NodeKind;
+    use mkui_wgpu::{
+        tessellate_scene, walk_app_tree, Size, WalkOptions, WgpuRendererRegistry, WgpuTheme,
+    };
 
     #[test]
     fn build_tree_emits_title_and_twelve_badges_and_dots() {
@@ -157,5 +160,31 @@ mod tests {
         assert_eq!(badges, 12, "6 variants × 2 sizes");
         // 4 variants × 4 animations × 2 (halo + no-halo) = 32 dots.
         assert_eq!(dots, 32);
+    }
+
+    #[test]
+    fn tree_walks_through_default_registry_to_non_empty_render_input() {
+        // #93 regression gate: the declarative tree must walk through the
+        // default registry (BadgeRenderer + DotRenderer) into a non-empty
+        // scene that tessellates to non-empty triangles — the displayless
+        // proof that the GPU stage would draw. atoms-on-wgpu rendered empty
+        // despite this producing thousands of triangles; the visual fault
+        // was the MSAA resolve path (now disabled), not the walker.
+        let core = CoreMkui::with_tree(build_tree());
+        let registry = WgpuRendererRegistry::with_defaults();
+        let options = WalkOptions {
+            viewport: Size::new(1280.0, 720.0),
+            theme: WgpuTheme::default(),
+        };
+        let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
+        assert!(
+            !out.scene.primitives.is_empty(),
+            "walker must emit primitives for the badge/dot tree"
+        );
+        let triangles = tessellate_scene(&out.scene);
+        assert!(
+            !triangles.is_empty(),
+            "tessellation must yield non-empty render input"
+        );
     }
 }
