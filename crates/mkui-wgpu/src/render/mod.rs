@@ -264,10 +264,17 @@ impl Renderer {
         let clear = clear_color(target_is_srgb);
 
         let triangles = tessellate_scene_with_text(scene, text_system);
+        // Project against the logical-pixel viewport, NOT the physical-pixel
+        // surface config. `self.config.{width, height}` are physical pixels
+        // (wgpu's `surface.configure` contract); scene primitives are authored
+        // in logical pixels, so the NDC denominator must be logical too. Using
+        // physical pixels here mis-projected primitives into the upper-left
+        // quadrant on HiDPI displays (#97). See ADR 0006 §"Viewport units
+        // contract".
         let vertices = gui_vertices(
             &triangles,
-            self.config.width as f32,
-            self.config.height as f32,
+            scene.viewport.width,
+            scene.viewport.height,
             target_is_srgb,
         );
 
@@ -642,6 +649,28 @@ mod tests {
         assert_eq!(vertices[0].position, [-1.0, 1.0, 0.0]);
         assert_eq!(vertices[1].position, [1.0, 1.0, 0.0]);
         assert_eq!(vertices[2].position, [-1.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn gui_vertices_project_against_logical_viewport_not_physical_surface() {
+        // #97: project against the logical viewport (800×600), NOT the
+        // physical surface (which on a 2× Retina display would be 1600×1200).
+        // A logical x=200 must map to NDC -0.5 — i.e. (200/800)*2 - 1 — so the
+        // primitive lands centered, not in the upper-left quadrant. The render
+        // path now feeds `scene.viewport.{width,height}` (logical) here; this
+        // test pins the math the call site depends on.
+        let triangle = GuiTriangle {
+            points: [
+                crate::Point::new(200.0, 0.0),
+                crate::Point::new(200.0, 100.0),
+                crate::Point::new(300.0, 0.0),
+            ],
+            color: crate::Color::rgba(1.0, 1.0, 1.0, 1.0),
+        };
+        let vertices = gui_vertices(&[triangle], 800.0, 600.0, false);
+        // x=200 in a 800-wide logical viewport → (200/800)*2 - 1 = -0.5,
+        // independent of the physical surface size.
+        assert!((vertices[0].position[0] - (-0.5)).abs() < f32::EPSILON);
     }
 
     #[test]

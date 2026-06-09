@@ -356,6 +356,26 @@ impl std::fmt::Debug for WgpuApp {
     }
 }
 
+/// Convert a physical-pixel window size into the logical-pixel viewport
+/// that `Scene::viewport` carries (ADR 0006 §"Viewport units contract").
+///
+/// wgpu configures its surface in physical pixels, but scene primitives are
+/// authored in logical pixels (matching web's CSS-pixel and console's
+/// character-grid conventions), so the resize/scale-change boundary divides
+/// the physical size by `scale_factor`. Free function, not a method, per the
+/// helper-not-API convention (#96): it has no `self` dependency and keeps the
+/// `physical / scale_factor` conversion in one testable place. Fractional
+/// scale factors (e.g. 1.5×) are preserved as f32 — we do not round to
+/// integer logical pixels (Codex Q8).
+#[cfg(not(target_arch = "wasm32"))]
+fn logical_viewport_from_physical_size(
+    size: winit::dpi::PhysicalSize<u32>,
+    scale_factor: f64,
+) -> Size {
+    let scale = (scale_factor as f32).max(f32::EPSILON);
+    Size::new(size.width as f32 / scale, size.height as f32 / scale)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler for WgpuApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -425,14 +445,28 @@ impl ApplicationHandler for WgpuApp {
                         return;
                     };
                     state.renderer.resize(size.width, size.height);
-                    let scale = state.window.scale_factor() as f32;
-                    (
-                        Size::new(
-                            size.width as f32 / scale.max(f32::EPSILON),
-                            size.height as f32 / scale.max(f32::EPSILON),
-                        ),
-                        Arc::clone(&state.window),
-                    )
+                    let viewport =
+                        logical_viewport_from_physical_size(size, state.window.scale_factor());
+                    (viewport, Arc::clone(&state.window))
+                };
+                self.resize_scene_viewport(new_viewport);
+                window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // A window dragged between displays of different DPIs keeps
+                // its physical size but changes scale_factor; recompute the
+                // logical viewport so primitives stay correctly proportioned
+                // (Codex Q3). We deliberately do not touch `inner_size_writer`
+                // — forcing a window size is a UX decision out of scope here
+                // (Codex Q9 anti-pattern).
+                let (new_viewport, window) = {
+                    let Some(state) = self.state.as_mut() else {
+                        return;
+                    };
+                    let size = state.window.inner_size();
+                    state.renderer.resize(size.width, size.height);
+                    let viewport = logical_viewport_from_physical_size(size, scale_factor);
+                    (viewport, Arc::clone(&state.window))
                 };
                 self.resize_scene_viewport(new_viewport);
                 window.request_redraw();
@@ -569,6 +603,27 @@ mod tests {
         let app = WgpuApp::with_app_tree(core, registry);
         assert!(app.core().is_some());
         assert!(app.registry().is_some());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn logical_viewport_handles_integer_scale_factor() {
+        // Retina 2× display: 1600×1200 physical → 800×600 logical (#97).
+        let viewport =
+            logical_viewport_from_physical_size(winit::dpi::PhysicalSize::new(1600, 1200), 2.0);
+        assert_eq!(viewport.width, 800.0);
+        assert_eq!(viewport.height, 600.0);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn logical_viewport_handles_fractional_scale_factor() {
+        // Fractional scale (1.5×) is preserved, not rounded (Codex Q8):
+        // 1200×900 physical → 800×600 logical.
+        let viewport =
+            logical_viewport_from_physical_size(winit::dpi::PhysicalSize::new(1200, 900), 1.5);
+        assert_eq!(viewport.width, 800.0);
+        assert_eq!(viewport.height, 600.0);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
