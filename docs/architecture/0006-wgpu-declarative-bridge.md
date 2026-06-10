@@ -178,6 +178,86 @@ occluded surface can't spin). The first `Drawn` clears the flag, after which
 deliberately does **not** adopt StoneSketch's redraw-after-every-input-event
 pattern, which would defeat idle-frame quiescence for a UI framework.
 
+### Resize-active redraw pump
+
+macOS fires `WindowEvent::Resized` continuously during live-resize gestures.
+Each event triggers `Renderer::resize` (which reconfigures the surface) plus
+`window.request_redraw()`. The OS may present a frame between the
+reconfiguration and the next rendered output — on shrinking gestures
+(bottom→top, right→left) this produces a visible "scale-snap" jerk as
+the Metal swapchain transitions before the next frame at the new size
+is ready.
+
+A wgpu+winit upstream reference does not have this jerk because it drives
+continuous redraws via `about_to_wait` while a progressive accumulator
+is active. mkui-wgpu cannot follow that pattern directly — it's a UI
+framework where idle windows must idle (not a 3D editor with continuous
+accumulation).
+
+The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
+`ScaleFactorChanged` to a fixed cap (`RESIZE_REDRAW_PUMP_TICKS = 60`).
+The resize handlers only arm the pump; they do not directly call
+`window.request_redraw()`. While armed, `about_to_wait` calls
+`window.request_redraw()` after the current event batch drains — a pure read
+of the pump state, it does not drain the budget. Cursor movement while the
+pump is armed also re-arms the pump and requests a redraw immediately:
+StoneSketch resets its accumulator and requests redraw on `CursorMoved`, and
+macOS live-resize can produce cursor-position changes relative to the content
+area during fast edge/corner drags. mkui keeps that path gated behind the
+resize pump so ordinary idle pointer motion does not redraw.
+
+The budget is consumed one frame at a time on each successful
+`RenderOutcome::Drawn` (in `handle_render_outcome_for_redraw`). `Skipped`
+and `NeedsReconfigure` do **not** consume budget. `RenderOutcome::Drawn`
+decrements the pump by one but does NOT clear it: mkui draws once per resize
+event, so clearing on the first `Drawn` would make the pump a no-op (it would
+reset to idle before bridging the Metal swapchain transition).
+
+`RedrawRequested` also performs a final size sync before rendering: it reads
+the current `window.inner_size()`, and if the renderer config is stale, it
+reconfigures the surface and updates the logical scene viewport before
+building vertices. This covers the fast-drag race where AppKit/CoreAnimation
+has already advanced the native layer size but the matching winit `Resized`
+event has not yet drained through the application handler.
+
+This matches a proven upstream wgpu+winit reference's accumulation-frame-cap
+mechanism, where the active-redraw window measures **successful presented
+frames, not event-loop ticks**. Under GPU pressure during fast resize,
+some frames skip; if skipped frames burned the budget, the bridge would
+exhaust before the gesture ends and the visible jerk would persist.
+
+The cap is **60**, not a handful of frames. It was tuned during Sprint 6.5
+(#99 → #100) as operator visual verify narrowed the residual symptom: a
+4-frame window kept up with slow drags but exhausted faster than `Resized`
+events re-armed it during *fast* gestures (full jerk); 60 matched the
+upstream reference's proven cap and dropped the symptom to a small residual
+vibration on fast drags. The cap was briefly raised to 120 during the
+iteration, but operator visual verify showed 120 was **worse** than 60 —
+likely GPU/swapchain saturation from over-queued redraws presenting against
+stale surface configs — so the cap reverted to 60. Each `Resized` event
+re-arms to the cap, so the pump stays saturated for the whole live-resize
+gesture and only begins decaying once the drag stops — then returns to idle
+quiescence within ~60 presented frames (~1s at 60Hz). The value fits `u8`.
+The 120 result refutes "pump exhaustion" as the residual root cause; the
+remaining fast-drag vibration is tracked as **#101** for a shape change (a
+`CursorMoved`-armed bridge during the active-resize window) with its own
+Codex round-N design review — not a further cap tune.
+
+The renderer also treats `CurrentSurfaceTexture::Suboptimal` as a resize-
+recovery signal: it renders and presents the frame, then immediately
+reconfigures the surface against the current config. That mirrors the
+upstream reference and prevents a live-resize sequence from continuing to
+present against a surface wgpu has already marked as no longer ideal.
+
+The pump is **independent** of the first-paint state machine
+(`first_paint_pending`). Both live on `WgpuApp` and both observe the same
+`Drawn` outcome, but they track orthogonal state: `Drawn` clears
+`first_paint_pending` (a one-shot flag) AND decrements `resize_redraw_pending`
+(a frame counter) — neither reads the other. A `Skipped` frame may retry
+first-paint while leaving the resize pump untouched. These invariants are
+asserted by unit tests (`drawn_decrements_resize_redraw_pending`,
+`skipped_does_not_consume_resize_redraw_budget`).
+
 ### MSAA disabled pending correct sRGB orchestration
 
 The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
