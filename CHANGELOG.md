@@ -11,6 +11,58 @@ breaking changes can land on minor bumps).
 - (next sprint's additions land here)
 
 ### Fixed
+- **wgpu live-resize jerk eliminated on macOS (#99).** PR #98 (#97) fixed
+  the HiDPI viewport-units math but the visible scale-snap on shrinking
+  resize gestures (right→left, bottom→top) persisted. Root cause was at
+  the event-loop redraw-cadence layer: mkui-wgpu had no `about_to_wait`
+  handler, so during continuous resize gestures the OS could present
+  frames at the new layer size before the next rendered frame caught
+  up — visible as a Metal swapchain transition stretch.
+
+  Adds a narrow `about_to_wait`-driven resize redraw pump (60-frame cap,
+  arm on `Resized` + `ScaleFactorChanged`). The pump's decay measures
+  *presented* frames (`RenderOutcome::Drawn`) rather than event-loop ticks,
+  so skipped frames under GPU pressure don't accidentally drain the bridge
+  during fast live-resize gestures. The 60-frame cap (~1s at 60Hz) keeps
+  the pump saturated through fast gestures — each `Resized` re-arms it —
+  then decays back to idle once the drag stops; a smaller cap, or a
+  tick-counted one, exhausted faster than fast drags presented frames and
+  left the jerk visible (tuned 4 → 60 across Sprint 6.5; a 120-frame cap was
+  tested and found *worse* by operator visual verify — likely swapchain
+  saturation from over-queued redraws — so the cap stayed at 60). A small
+  residual fast-drag vibration remains at 60; it is **not** pump exhaustion
+  (the 120 result refutes that) and is tracked as a known issue (#101) for a
+  follow-up `CursorMoved`-armed bridge during the active-resize window. Resize handlers only arm the pump; `about_to_wait`
+  drives redraws after the resize event batch drains, and cursor movement
+  while the pump is armed re-arms the pump and requests a redraw immediately
+  to mirror StoneSketch's input-event redraw path during fast edge/corner
+  drags. `RedrawRequested` also performs a final `window.inner_size()` sync
+  before rendering so a frame is not acquired/presented against stale surface
+  dimensions when AppKit has advanced the native layer before the matching
+  winit resize event drains. The renderer also mirrors the upstream
+  reference's `Suboptimal` swapchain handling: render/present the frame, then
+  reconfigure the surface so fast live-resize does not keep presenting
+  against a stale surface state.
+  Independent of the first-paint state machine; idle windows stay idle. ADR
+  0006 §"Resize-active redraw pump" documents the design + the load-bearing
+  "`Drawn` decrements but does not clear the pump" invariant.
+
+  **Known issue (residual):** fast shrink-direction drags (right→left,
+  bottom→top) still show a small residual vibration that is NOT fully
+  resolved by this pump. Three hypotheses were ruled out during the
+  v0.9.3 cycle (Sprint 6.5 close, 2026-06-09):
+  - Pump-cap exhaustion (cap=60 and cap=120 produced the same residual;
+    cap=120 was actually worse, suggesting GPU/swapchain saturation
+    above the operator-verified sweet spot)
+  - Scene-complexity by primitive count (native-showcase has the largest
+    tree but vibrates least among the three wgpu examples)
+  - Absolute-vs-relative primitive coords during resize (modifying
+    native-window's quad to viewport-relative coords did not change the
+    visible vibration)
+
+  The residual root cause remains undiagnosed at v0.9.3 ship time. See
+  #101 for the continuing investigation and the substrate-tier C2
+  (CursorMoved-armed bridge during active-resize window) candidate.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and

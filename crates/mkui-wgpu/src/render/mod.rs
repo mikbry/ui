@@ -246,9 +246,9 @@ impl Renderer {
         scene: &Scene,
         text_system: &dyn TextSystem,
     ) -> Result<RenderOutcome, MkuiError> {
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+        let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
             wgpu::CurrentSurfaceTexture::Timeout
             | wgpu::CurrentSurfaceTexture::Occluded
             | wgpu::CurrentSurfaceTexture::Validation => return Ok(RenderOutcome::Skipped),
@@ -330,7 +330,11 @@ impl Renderer {
         }
 
         self.queue.submit(Some(encoder.finish()));
+        drop(view);
         frame.present();
+        if reconfigure_after_present {
+            self.surface.configure(&self.device, &self.config);
+        }
         Ok(RenderOutcome::Drawn)
     }
 }
