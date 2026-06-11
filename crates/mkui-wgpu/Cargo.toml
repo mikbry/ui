@@ -7,6 +7,15 @@ license.workspace = true
 repository.workspace = true
 description = "WGPU-oriented scene primitives and declarative builders for mkui"
 
+[features]
+# Surfaceless offscreen GPU test harness (`render::offscreen`) + its readback
+# tests. Off by default so the displayless default CI `test` job needs no
+# Vulkan ICD installed; the dedicated Lavapipe GPU job (`.github/workflows`)
+# turns it on. The harness selects `Backends::VULKAN` and asserts a
+# Vulkan + CPU adapter, so it only runs where Mesa/Lavapipe is provisioned.
+# See issue #106.
+gpu-tests = []
+
 [dependencies]
 mkui-core = { path = "../mkui-core" }
 mkui-runtime = { path = "../mkui-runtime" }
