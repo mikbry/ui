@@ -112,6 +112,31 @@ breaking changes can land on minor bumps).
   scenes, and the first-paint retry state machine) so the empty-render class
   can't reach a release visually-unverified again.
 
+### Tooling
+- **Surfaceless offscreen GPU readback harness (#106).** Adds
+  `mkui_wgpu::render::offscreen::OffscreenRenderer`, a reusable
+  window-less renderer that owns a surfaceless adapter/device/queue, an
+  `Rgba8Unorm` render target with `RENDER_ATTACHMENT | COPY_SRC`, and a
+  readback buffer padded to `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT` (256-byte)
+  row alignment. It exposes submission, explicit device polling, buffer
+  mapping, and row-unpadding so native WGPU pipelines can be tested
+  deterministically without opening a window (the window-bound `Renderer`
+  exits before adapter creation under `HEADLESS=1`). The window-bound
+  `Renderer` API is unchanged; the shared `DeviceDescriptor` is the only
+  refactor.
+
+  The harness and its tests are gated behind the `gpu-tests` cargo feature
+  so the default displayless CI `test` job needs no Vulkan ICD. A dedicated
+  `gpu-offscreen` CI job provisions `mesa-vulkan-drivers vulkan-tools` and
+  pins `VK_ICD_FILENAMES` to Mesa/Lavapipe; the harness selects
+  `Backends::VULKAN`, asserts a Vulkan + CPU adapter (logging the adapter
+  name diagnostically), and treats adapter/device unavailability as a test
+  failure rather than a silent skip. Generic tests cover clear-and-read-back,
+  a solid-color triangle vs. a clear-only baseline, non-256-aligned row
+  widths, and map completion via explicit polling. Unblocks the GPU
+  acceptance tests in #66 (Slug pipeline) and #67 (TTF/font), which own
+  their own backend-specific tests.
+
 ## [0.9.0] — 2026-06-04
 
 ### Added

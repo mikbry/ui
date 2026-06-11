@@ -71,6 +71,8 @@ pub use app::WgpuApp;
 pub use bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable, WgpuRendererRegistry};
 pub use high_level::Mkui;
 pub use pointer::{hit_test, ClickHit, PointerState};
+#[cfg(all(not(target_arch = "wasm32"), feature = "gpu-tests"))]
+pub use render::offscreen::{OffscreenError, OffscreenRenderer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{RenderOutcome, Renderer};
 pub use renderer::WgpuRenderer;

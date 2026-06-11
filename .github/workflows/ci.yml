@@ -95,6 +95,46 @@ jobs:
             ${{ runner.os }}-cargo-test-
       - run: cargo test --workspace --locked
 
+  gpu-offscreen:
+    # Surfaceless offscreen GPU readback tests (#106). These exercise a real
+    # WGPU pipeline — adapter/device negotiation, clear, draw, and 256-byte
+    # row-aligned readback — without opening a window. They are gated behind
+    # the `gpu-tests` feature so the default `test` job above stays displayless
+    # and needs no Vulkan ICD.
+    #
+    # The runner is still displayless: Mesa/Lavapipe is a CPU software
+    # rasterizer reached through the pinned `VK_ICD_FILENAMES` — no X11/Wayland
+    # server is required. The harness selects `Backends::VULKAN` and asserts a
+    # Vulkan + CPU adapter; adapter/device unavailability fails the test (no
+    # silent skip), so a missing ICD surfaces here loudly instead of passing
+    # vacuously.
+    name: gpu-offscreen
+    runs-on: ubuntu-latest
+    env:
+      # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so the
+      # adapter is deterministically Vulkan + CPU regardless of runner GPU.
+      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Mesa/Lavapipe Vulkan ICD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          # Diagnostic: confirm the loader sees the Lavapipe adapter.
+          vulkaninfo --summary || true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-gpu-offscreen-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-gpu-offscreen-
+      - run: cargo test -p mkui-wgpu --features gpu-tests --locked
+
   test-doc:
     name: test-doc
     runs-on: ubuntu-latest
