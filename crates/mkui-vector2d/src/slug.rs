@@ -12,20 +12,36 @@
 //! resolved outline. Screen-space y-down conversion and GPU packing are #66's
 //! responsibility; this encoder never sees a pixel size or a WGPU type.
 //!
+//! # Attribution (Sprint 7 plan §3.4)
+//!
+//! The curve/band encoding reproduces the contract of the **Slug** algorithm
+//! by Eric Lengyel (<https://github.com/EricLengyel/Slug>). Lengyel published
+//! the Slug reference encoding into the public domain. This is a from-scratch
+//! CPU encoder that honours the documented record/band invariants — it copies
+//! no Slug source.
+//!
 //! # Record layout (versioned via [`SlugConfig::revision`])
 //!
-//! - [`SlugGlyph::curves`]: every segment as a quadratic `(p0, p1, p2)`. Line
-//!   segments are encoded as a degenerate quadratic whose control point is the
-//!   midpoint of the endpoints, so #66 can treat the whole stream uniformly.
+//! - [`SlugGlyph::curves`]: every segment as a quadratic `(p0, p1, p2)`. A
+//!   straight line uses the Slug **duplicated-endpoint sentinel** `p1 == p2`
+//!   (never the midpoint), so the shader can branch on `p1 == p2` to take its
+//!   line path instead of evaluating a quadratic.
 //! - [`SlugGlyph::horizontal_bands`]: the glyph's y-range split into
-//!   `SlugConfig::horizontal_bands` equal rows. Band *i* lists every curve
-//!   whose y-extent overlaps the row, via `[first_curve, first_curve +
-//!   curve_count)` into [`SlugGlyph::horizontal_curve_indices`].
+//!   `SlugConfig::horizontal_bands` equal rows. A row lists every curve whose
+//!   y-extent overlaps it **and** that is not axis-parallel to the scan
+//!   direction — segments with `|dy| < ε` (horizontal/near-horizontal) are
+//!   excluded so they cannot corrupt the horizontal-ray winding count. Members
+//!   are referenced via `[first_curve, first_curve + curve_count)` into
+//!   [`SlugGlyph::horizontal_curve_indices`].
 //! - [`SlugGlyph::vertical_bands`] / [`SlugGlyph::vertical_curve_indices`]: the
-//!   same, for the x-range split into columns.
+//!   same, for the x-range split into columns, excluding `|dx| < ε`
+//!   (vertical/near-vertical) segments.
 //!
-//! Within a band, curve indices are sorted ascending. The encoding is a pure
-//! function of `(path, config)`, so re-encoding is byte-identical.
+//! Within each band the members are ordered by **descending scan-axis top
+//! endpoint** (descending `max(p0.y, p2.y)` for rows, descending
+//! `max(p0.x, p2.x)` for columns) as Slug's scanline rasterizer requires;
+//! exact ties break by ascending curve index for determinism. The encoding is
+//! a pure function of `(path, config)`, so re-encoding is byte-identical.
 //!
 //! # What #66 may and may not do
 //!
@@ -93,8 +109,12 @@ pub struct SlugGlyphKey {
     pub outline_transform: Affine2Fixed,
 }
 
-/// A single quadratic curve record `(p0, p1, p2)` in font units, y-up. A line
-/// segment is stored as a degenerate quadratic (`p1` == midpoint of `p0`/`p2`).
+/// A single quadratic curve record `(p0, p1, p2)` in font units, y-up.
+///
+/// A straight line segment is stored with the Slug **duplicated-endpoint
+/// sentinel**: `p1 == p2`. The Slug shader keys on `p1 == p2` to take its line
+/// branch instead of evaluating a quadratic, so the control point must be the
+/// terminal endpoint — never the midpoint.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlugCurve {
     pub p0: Vec2,
@@ -104,11 +124,9 @@ pub struct SlugCurve {
 
 impl SlugCurve {
     fn line(p0: Vec2, p2: Vec2) -> Self {
-        Self {
-            p0,
-            p1: Vec2::new((p0.x + p2.x) * 0.5, (p0.y + p2.y) * 0.5),
-            p2,
-        }
+        // Duplicated-endpoint sentinel (control == terminal endpoint): the Slug
+        // shader distinguishes a line from a real quadratic by `p1 == p2`.
+        Self { p0, p1: p2, p2 }
     }
 
     fn quad(p0: Vec2, p1: Vec2, p2: Vec2) -> Self {
@@ -249,6 +267,7 @@ pub fn encode_slug_glyph(
         bounds.y_max,
         config.horizontal_bands(),
         SlugCurve::y_extent,
+        |c| c.p0.y.max(c.p2.y),
     );
     let (vertical_bands, vertical_curve_indices) = build_bands(
         &curves,
@@ -256,6 +275,7 @@ pub fn encode_slug_glyph(
         bounds.x_max,
         config.vertical_bands(),
         SlugCurve::x_extent,
+        |c| c.p0.x.max(c.p2.x),
     );
 
     Ok(SlugGlyph {
@@ -306,18 +326,28 @@ fn flatten_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, SlugEncodeError> 
     Ok(curves)
 }
 
-/// Partition `[lo, hi]` into `count` equal bands and assign each curve to every
-/// band whose range overlaps the curve's extent along the chosen axis.
+/// Segments whose extent along the scan axis is below this threshold are
+/// axis-parallel and excluded from that axis's bands — including them would
+/// corrupt the Slug winding count for rays cast along the axis.
+const AXIS_PARALLEL_EPSILON: f32 = 1e-6;
+
+/// Partition `[lo, hi]` into `count` equal bands. A curve joins a band when its
+/// scan-axis extent overlaps the band **and** the curve is not axis-parallel
+/// (`extent_span >= ε`). Members are ordered by descending `sort_key` (the
+/// scan-axis top endpoint), ties broken by ascending curve index, per the Slug
+/// scanline-rasterization invariant.
 fn build_bands(
     curves: &[SlugCurve],
     lo: f32,
     hi: f32,
     count: u16,
     extent: impl Fn(&SlugCurve) -> (f32, f32),
+    sort_key: impl Fn(&SlugCurve) -> f32,
 ) -> (Vec<BandRange>, Vec<u32>) {
     let count = count.max(1) as usize;
     // A zero or negative span still yields `count` zero-width bands so the
-    // table shape is config-stable; every curve then overlaps every band.
+    // table shape is config-stable; every non-axis-parallel curve then overlaps
+    // every band.
     let span = (hi - lo).max(0.0);
     let step = span / count as f32;
 
@@ -331,15 +361,33 @@ fn build_bands(
             lo + step * (i + 1) as f32
         };
         let first_curve = stream.len() as u32;
+
+        let mut members: Vec<u32> = Vec::new();
         for (idx, curve) in curves.iter().enumerate() {
             let (c_lo, c_hi) = extent(curve);
+            // Directional exclusion: axis-parallel segments do not cross a ray
+            // cast along this axis, so they never enter the band.
+            if c_hi - c_lo < AXIS_PARALLEL_EPSILON {
+                continue;
+            }
             // Conservative inclusive overlap: a curve on a shared edge lands in
             // both neighbouring bands.
             if c_hi >= lower && c_lo <= upper {
-                stream.push(idx as u32);
+                members.push(idx as u32);
             }
         }
-        let curve_count = stream.len() as u32 - first_curve;
+        // Descending scan-axis top endpoint; ascending index breaks exact ties
+        // so the output stays deterministic and byte-stable.
+        members.sort_by(|&a, &b| {
+            let ka = sort_key(&curves[a as usize]);
+            let kb = sort_key(&curves[b as usize]);
+            kb.partial_cmp(&ka)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+        });
+
+        let curve_count = members.len() as u32;
+        stream.extend_from_slice(&members);
         bands.push(BandRange {
             lower,
             upper,
@@ -479,15 +527,15 @@ mod tests {
             }
         );
 
-        // curve0: bottom line (0,0)->(100,0), control = midpoint.
+        // curve0: bottom line (0,0)->(100,0), duplicated-endpoint sentinel.
         // curve1: quadratic (100,0),(100,50),(0,100).
-        // curve2: closing line (0,100)->(0,0), control = midpoint.
+        // curve2: closing line (0,100)->(0,0), duplicated-endpoint sentinel.
         assert_eq!(
             glyph.curves,
             vec![
                 SlugCurve {
                     p0: Vec2::new(0.0, 0.0),
-                    p1: Vec2::new(50.0, 0.0),
+                    p1: Vec2::new(100.0, 0.0),
                     p2: Vec2::new(100.0, 0.0),
                 },
                 SlugCurve {
@@ -497,13 +545,15 @@ mod tests {
                 },
                 SlugCurve {
                     p0: Vec2::new(0.0, 100.0),
-                    p1: Vec2::new(0.0, 50.0),
+                    p1: Vec2::new(0.0, 0.0),
                     p2: Vec2::new(0.0, 0.0),
                 },
             ]
         );
 
-        // Horizontal bands (y): row0 [0,50] = {0,1,2}; row1 [50,100] = {1,2}.
+        // Horizontal bands (y): curve0 is horizontal (|dy|=0) → excluded. Both
+        // remaining curves overlap both rows; they share a top-endpoint y of
+        // 100, so ascending index breaks the tie → [1, 2].
         assert_eq!(
             glyph.horizontal_bands,
             vec![
@@ -511,19 +561,20 @@ mod tests {
                     lower: 0.0,
                     upper: 50.0,
                     first_curve: 0,
-                    curve_count: 3
+                    curve_count: 2
                 },
                 BandRange {
                     lower: 50.0,
                     upper: 100.0,
-                    first_curve: 3,
+                    first_curve: 2,
                     curve_count: 2
                 },
             ]
         );
-        assert_eq!(glyph.horizontal_curve_indices, vec![0, 1, 2, 1, 2]);
+        assert_eq!(glyph.horizontal_curve_indices, vec![1, 2, 1, 2]);
 
-        // Vertical bands (x): col0 [0,50] = {0,1,2}; col1 [50,100] = {0,1}.
+        // Vertical bands (x): curve2 is vertical (|dx|=0) → excluded. curve0 and
+        // curve1 share a right-endpoint x of 100 → ascending index → [0, 1].
         assert_eq!(
             glyph.vertical_bands,
             vec![
@@ -531,17 +582,77 @@ mod tests {
                     lower: 0.0,
                     upper: 50.0,
                     first_curve: 0,
-                    curve_count: 3
+                    curve_count: 2
                 },
                 BandRange {
                     lower: 50.0,
                     upper: 100.0,
-                    first_curve: 3,
+                    first_curve: 2,
                     curve_count: 2
                 },
             ]
         );
-        assert_eq!(glyph.vertical_curve_indices, vec![0, 1, 2, 0, 1]);
+        assert_eq!(glyph.vertical_curve_indices, vec![0, 1, 0, 1]);
+    }
+
+    #[test]
+    fn slug_contract_line_sentinel_exclusion_and_descending_order() {
+        // One horizontal line, one diagonal line, one quadratic — open path so
+        // each command maps to exactly one curve index.
+        let path = VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                // curve0: horizontal line (|dy| == 0).
+                PathCommand::LineTo(Vec2::new(100.0, 0.0)),
+                // curve1: diagonal line — changes x and y.
+                PathCommand::LineTo(Vec2::new(0.0, 100.0)),
+                // curve2: quadratic rising to the top of the glyph.
+                PathCommand::QuadTo {
+                    control: Vec2::new(50.0, 150.0),
+                    to: Vec2::new(100.0, 200.0),
+                },
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 200.0)),
+        );
+        let glyph = encode_slug_glyph(&path, &SlugConfig::new(2, 2, 1)).unwrap();
+
+        // Diagonal line carries the duplicated-endpoint sentinel (p1 == p2).
+        let diagonal = glyph.curves[1];
+        assert_eq!(diagonal.p1, diagonal.p2);
+        assert_eq!(diagonal.p1, Vec2::new(0.0, 100.0));
+
+        // The horizontal segment (curve index 0) appears in no horizontal band.
+        assert!(
+            !glyph.horizontal_curve_indices.contains(&0),
+            "horizontal segment must be excluded from band rows"
+        );
+
+        // Within every horizontal band, members are ordered by descending
+        // scan-axis top endpoint y. curve2 (top y = 200) precedes curve1
+        // (top y = 100).
+        for band in &glyph.horizontal_bands {
+            let start = band.first_curve as usize;
+            let end = start + band.curve_count as usize;
+            let row = &glyph.horizontal_curve_indices[start..end];
+            let tops: Vec<f32> = row
+                .iter()
+                .map(|&i| {
+                    let c = glyph.curves[i as usize];
+                    c.p0.y.max(c.p2.y)
+                })
+                .collect();
+            let mut sorted = tops.clone();
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            assert_eq!(tops, sorted, "band rows must be sorted descending by y");
+            if row.len() == 2 {
+                assert_eq!(
+                    row,
+                    &[2, 1],
+                    "curve2 (top y=200) precedes curve1 (top y=100)"
+                );
+            }
+        }
     }
 
     #[test]
