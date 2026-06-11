@@ -4,7 +4,7 @@ This directory tracks the load-bearing architectural decisions in mkui's
 history. Each record (ADR) documents one decision: why it was made, what was
 considered, and what the consequences are. New contributors and reviewers
 should be able to understand the shape of the workspace by reading this index
-and the six records below.
+and the seven records below.
 
 ## Index
 
@@ -32,6 +32,11 @@ and the six records below.
   primary path; `Mkui::with_scene` is a retained low-level raw-scene escape
   hatch (renderer tests, custom HUDs, headless tessellation demos, future
   direct-GPU experiments), not deprecated.
+- [ADR 0007 — GPU resource ownership for wgpu text and `mkui-vector2d`](0007-gpu-resource-ownership-text-vector2d.md)
+  — A strictly acyclic four-crate split: `mkui-text` and `mkui-vector2d` own
+  the backend-neutral CPU contracts (font/outline, Slug encoding), while
+  `mkui-vector2d-wgpu` and `mkui-wgpu` own the GPU resources and surface/frame
+  lifecycle. Bitmap stays the v0.10.0 default; the `slug` feature is default-off.
 
 ## ADR format conventions
 
