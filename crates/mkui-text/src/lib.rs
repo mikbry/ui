@@ -57,5 +57,5 @@ pub use font_id::{FontId, FontIdAllocator};
 pub use outline::{GlyphOutline, OutlineBounds, OutlineCommand, OutlineKey};
 pub use system::{
     FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, HintingMode, LayoutGlyph, LayoutRun,
-    LayoutSpec, TextAlign, TextError, TextRenderClass, TextSystem,
+    LayoutSpec, ShapedGlyph, ShapedText, TextAlign, TextError, TextRenderClass, TextSystem,
 };

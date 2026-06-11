@@ -1,11 +1,12 @@
 //! Cached text preparation + width-dependent layout.
 //!
-//! [`TextEngine`] separates **preparation** (parse/normalize a string under a
-//! [`LayoutSpec`], compute size-independent intrinsic metrics) from
-//! **width-dependent layout** (wrapping + positioning at a given max width). A
-//! [`PreparedText`] holds the preparation result and caches each
-//! [`TextLayout`] it produces, so repeatedly laying the same text out at
-//! different widths never re-prepares the text.
+//! [`TextEngine`] separates **preparation** (shape a string under a
+//! [`LayoutSpec`] into width-invariant glyphs + metrics) from
+//! **width-dependent layout** (line breaking + positioning at a given max
+//! width). A [`PreparedText`] holds the [`ShapedText`] produced **once** by
+//! [`TextSystem::prepare`] and caches each [`TextLayout`] it produces, so
+//! laying the same text out at many widths re-shapes nothing — each new width
+//! only runs [`TextSystem::wrap`] over the already-shaped glyphs.
 //!
 //! No renderer resource is involved — the engine wraps an
 //! `Arc<dyn TextSystem>` and returns plain CPU-side metrics and positioned
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use crate::system::{LayoutRun, LayoutSpec, TextSystem};
+use crate::system::{LayoutRun, LayoutSpec, ShapedText, TextSystem};
 
 /// Engine that prepares text once and lays it out at many widths.
 ///
@@ -36,32 +37,40 @@ impl TextEngine {
         &self.system
     }
 
-    /// Prepare `text` under `spec`. This performs the size-independent work
-    /// (intrinsic, unwrapped layout + metrics) once; subsequent
-    /// [`PreparedText::layout`] calls reuse it.
-    pub fn prepare(&self, text: impl Into<String>, spec: LayoutSpec) -> PreparedText {
-        let text = text.into();
-        // Intrinsic layout: unwrapped (no max width), so wrapping never
-        // splits the content. This is the "prepared" form every width-bounded
-        // layout is derived from.
-        let intrinsic_runs = self.system.layout(&text, &spec, None);
+    /// Prepare `text` under `spec`. This runs the width-invariant shaping
+    /// ([`TextSystem::prepare`]) **once**; subsequent [`PreparedText::layout`]
+    /// calls reuse the shaped glyphs and only line-break at each width.
+    pub fn prepare(&self, text: impl AsRef<str>, spec: LayoutSpec) -> PreparedText {
+        let shaped = self.system.prepare(text.as_ref(), &spec);
+        // The intrinsic (unwrapped) layout is the `None`-width wrap of the
+        // already-shaped glyphs — still no re-shaping.
+        let intrinsic_runs = self.system.wrap(&shaped, None);
         let intrinsic_width_px = max_run_width(&intrinsic_runs);
-        let intrinsic = Arc::new(build_layout(intrinsic_runs, intrinsic_width_px, &spec));
+        let intrinsic = Arc::new(build_layout(
+            intrinsic_runs,
+            intrinsic_width_px,
+            &shaped.spec,
+        ));
         PreparedText {
             system: Arc::clone(&self.system),
-            text,
-            spec,
+            shaped,
             intrinsic,
             cache: Mutex::new(HashMap::new()),
         }
     }
 }
 
-/// Size-independent preparation of a string, plus a per-width layout cache.
+/// Width-invariant preparation of a string, plus a per-width layout cache.
+///
+/// The text is shaped exactly once (at construction). Every [`layout`] call
+/// reuses that shaping and only performs width-dependent line breaking, with
+/// results memoized per width.
+///
+/// [`layout`]: PreparedText::layout
 pub struct PreparedText {
     system: Arc<dyn TextSystem>,
-    text: String,
-    spec: LayoutSpec,
+    /// The width-invariant shaping — produced once, reused at every width.
+    shaped: ShapedText,
     /// The unwrapped (intrinsic) layout — also the `None`-width result.
     intrinsic: Arc<TextLayout>,
     /// Memoized width-bounded layouts, keyed by the `f32` width bit pattern.
@@ -71,12 +80,17 @@ pub struct PreparedText {
 impl PreparedText {
     /// The original source text.
     pub fn text(&self) -> &str {
-        &self.text
+        &self.shaped.text
     }
 
     /// The spec this text was prepared under.
     pub fn spec(&self) -> &LayoutSpec {
-        &self.spec
+        &self.shaped.spec
+    }
+
+    /// The width-invariant shaped glyphs + metrics this text was prepared into.
+    pub fn shaped(&self) -> &ShapedText {
+        &self.shaped
     }
 
     /// Intrinsic (unwrapped) logical width in pixels — the width the content
@@ -91,8 +105,9 @@ impl PreparedText {
     }
 
     /// Lay the prepared text out at `max_width_px`, wrapping as needed. Results
-    /// are cached per width, so calling this repeatedly — including at many
-    /// different widths — never re-prepares the text.
+    /// are cached per width, and the shaping done at construction is reused —
+    /// so calling this repeatedly, at any number of widths, never re-shapes the
+    /// text.
     pub fn layout(&self, max_width_px: Option<f32>) -> Arc<TextLayout> {
         let Some(width) = max_width_px else {
             return Arc::clone(&self.intrinsic);
@@ -106,9 +121,11 @@ impl PreparedText {
         if let Some(found) = self.cache.lock().unwrap().get(&key) {
             return Arc::clone(found);
         }
-        let runs = self.system.layout(&self.text, &self.spec, Some(width));
+        // Width-dependent line breaking only — `wrap` consumes the shaped
+        // glyphs; it does not re-shape.
+        let runs = self.system.wrap(&self.shaped, Some(width));
         let logical_width = max_run_width(&runs);
-        let layout = Arc::new(build_layout(runs, logical_width, &self.spec));
+        let layout = Arc::new(build_layout(runs, logical_width, &self.shaped.spec));
         let mut cache = self.cache.lock().unwrap();
         // Another thread may have inserted between our miss and now; keep the
         // first winner so identical widths share one allocation.
@@ -285,5 +302,76 @@ mod tests {
         let layout = prepared.layout(None);
         let total: usize = layout.runs.iter().map(|r| r.glyphs.len()).sum();
         assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn shaping_runs_once_across_many_widths() {
+        use crate::system::{ShapedText, TextSystem};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A counting mock that delegates shaping/breaking to the bitmap system
+        // but records how often each half is invoked.
+        struct Counting {
+            inner: BitmapTextSystem,
+            prepares: AtomicUsize,
+            wraps: AtomicUsize,
+        }
+        impl TextSystem for Counting {
+            fn resolve_font(&self, q: &crate::system::FontQuery) -> Option<crate::FontId> {
+                self.inner.resolve_font(q)
+            }
+            fn register_font_bytes(
+                &self,
+                b: Arc<[u8]>,
+                i: u32,
+            ) -> Result<crate::FontId, crate::TextError> {
+                self.inner.register_font_bytes(b, i)
+            }
+            fn layout(&self, text: &str, spec: &LayoutSpec, w: Option<f32>) -> Vec<LayoutRun> {
+                let shaped = self.prepare(text, spec);
+                self.wrap(&shaped, w)
+            }
+            fn prepare(&self, text: &str, spec: &LayoutSpec) -> ShapedText {
+                self.prepares.fetch_add(1, Ordering::Relaxed);
+                self.inner.prepare(text, spec)
+            }
+            fn wrap(&self, shaped: &ShapedText, w: Option<f32>) -> Vec<LayoutRun> {
+                self.wraps.fetch_add(1, Ordering::Relaxed);
+                self.inner.wrap(shaped, w)
+            }
+            fn rasterize(
+                &self,
+                k: crate::GlyphCacheKey,
+            ) -> Result<crate::GlyphImage, crate::TextError> {
+                self.inner.rasterize(k)
+            }
+            fn families(&self) -> Vec<String> {
+                self.inner.families()
+            }
+        }
+
+        let system = Arc::new(Counting {
+            inner: BitmapTextSystem::new(),
+            prepares: AtomicUsize::new(0),
+            wraps: AtomicUsize::new(0),
+        });
+        let eng = TextEngine::new(system.clone());
+        let prepared = eng.prepare("the quick brown fox", LayoutSpec::default());
+        // Two distinct widths.
+        let _ = prepared.layout(Some(200.0));
+        let _ = prepared.layout(Some(40.0));
+
+        // Preparation (shaping) ran exactly once; only line breaking repeats.
+        assert_eq!(
+            system.prepares.load(Ordering::Relaxed),
+            1,
+            "prepare must run once across widths"
+        );
+        // One wrap at construction (intrinsic) + one per distinct width.
+        assert_eq!(
+            system.wraps.load(Ordering::Relaxed),
+            3,
+            "wrap runs per width without re-preparing"
+        );
     }
 }

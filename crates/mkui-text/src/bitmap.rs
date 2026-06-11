@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::canonical::{Affine2Fixed, VariationSettings};
 use crate::system::{
     FontId, FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, HintingMode, LayoutGlyph, LayoutRun,
-    LayoutSpec, TextAlign, TextError, TextRenderClass, TextSystem,
+    LayoutSpec, ShapedGlyph, ShapedText, TextAlign, TextError, TextRenderClass, TextSystem,
 };
 
 /// Family name reported by [`TextSystem::families`] for the bitmap face.
@@ -65,10 +65,54 @@ impl TextSystem for BitmapTextSystem {
     }
 
     fn layout(&self, text: &str, spec: &LayoutSpec, max_width_px: Option<f32>) -> Vec<LayoutRun> {
+        // One-shot path: shape once, then break at the requested width. The
+        // engine's cached path calls `prepare` + `wrap` directly so the shaping
+        // here happens only once across many widths.
+        let shaped = self.prepare(text, spec);
+        self.wrap(&shaped, max_width_px)
+    }
+
+    fn prepare(&self, text: &str, spec: &LayoutSpec) -> ShapedText {
+        // Width-invariant work: per-character normalization, glyph-id mapping,
+        // advance, and vertical metrics. None of this depends on wrap width.
+        let scale = bitmap_scale(spec.font_size_px);
+        let advance = GLYPH_ADVANCE_PX * scale;
+        let glyph_height = GLYPH_CELL_HEIGHT_PX * scale;
+
+        let glyphs = text
+            .chars()
+            .enumerate()
+            .map(|(cluster, ch)| {
+                let normalized = normalize_bitmap_char(ch);
+                ShapedGlyph {
+                    glyph_id: normalized as u32,
+                    x_advance_px: advance,
+                    cluster: cluster as u32,
+                    format: GlyphFormat::Alpha,
+                    ch: normalized,
+                }
+            })
+            .collect();
+
+        ShapedText {
+            text: text.to_string(),
+            spec: spec.clone(),
+            glyphs,
+            line_ascent_px: glyph_height,
+            line_descent_px: 0.0,
+            glyph_height_px: glyph_height,
+        }
+    }
+
+    fn wrap(&self, shaped: &ShapedText, max_width_px: Option<f32>) -> Vec<LayoutRun> {
+        // Width-dependent work only: line breaking + positioning. The shaped
+        // glyphs (and their normalized chars/advances) are reused as-is — no
+        // re-shaping happens here.
+        let spec = &shaped.spec;
         let scale = bitmap_scale(spec.font_size_px);
         let advance = GLYPH_ADVANCE_PX * scale;
         let glyph_width = GLYPH_CELL_WIDTH_PX * scale;
-        let glyph_height = GLYPH_CELL_HEIGHT_PX * scale;
+        let glyph_height = shaped.glyph_height_px;
         let line_height = spec.line_height_px.max(1.0);
 
         let max_glyphs = match max_width_px {
@@ -77,7 +121,15 @@ impl TextSystem for BitmapTextSystem {
             }
             _ => usize::MAX,
         };
-        let wrapped_lines = wrap_text_lines(text, max_glyphs, spec.max_lines.unwrap_or(usize::MAX));
+        // Reconstruct the (already-normalized) character stream from the
+        // prepared glyphs and break it into lines. Normalization and glyph
+        // mapping are not repeated.
+        let normalized: String = shaped.glyphs.iter().map(|g| g.ch).collect();
+        let wrapped_lines = wrap_text_lines(
+            &normalized,
+            max_glyphs,
+            spec.max_lines.unwrap_or(usize::MAX),
+        );
 
         let mut runs = Vec::with_capacity(wrapped_lines.len());
         for (line_index, line) in wrapped_lines.iter().enumerate() {

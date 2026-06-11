@@ -14,18 +14,36 @@ fn font_id_is_opaque_only_bitmap_is_constructible() {
     // The only publicly-constructible value is the reserved bitmap face.
     assert_eq!(FontId::BITMAP.raw(), 0);
     // Allocated ids are distinct, monotonic, and never the bitmap face.
-    let alloc = FontIdAllocator::new();
+    // (Isolated to keep the raw values deterministic regardless of other
+    // tests sharing the process-global counter.)
+    let alloc = FontIdAllocator::isolated();
     let a = alloc.allocate().unwrap();
     let b = alloc.allocate().unwrap();
     assert_eq!((a.raw(), b.raw()), (1, 2));
+    assert!(a.raw() < b.raw());
     assert_ne!(a, FontId::BITMAP);
 }
 
 #[test]
+fn independent_providers_get_globally_unique_ids() {
+    // Finding 2 guard: two providers, each with their own default allocator,
+    // each registering one font, must produce *distinct* ids — never both
+    // `FontId(1)`. The default allocator is process-global so this holds even
+    // across separate allocator handles.
+    let provider_a = FontIdAllocator::new();
+    let provider_b = FontIdAllocator::new();
+    let id_a = provider_a.allocate().unwrap();
+    let id_b = provider_b.allocate().unwrap();
+    assert_ne!(id_a, id_b);
+    assert_ne!(id_a, FontId::BITMAP);
+    assert_ne!(id_b, FontId::BITMAP);
+}
+
+#[test]
 fn font_id_overflow_is_an_error_not_a_wrap() {
-    // Exhaust a freshly-built allocator is impractical; the unit test in the
-    // crate drives the u64::MAX boundary directly. Here we just assert the
-    // error variant exists and is surfaced through the shared contract type.
+    // The unit test in the crate drives the u64::MAX boundary directly. Here we
+    // just assert the error variant exists and is surfaced through the shared
+    // contract type.
     let err: TextError = TextError::FontIdOverflow;
     assert_eq!(err, TextError::FontIdOverflow);
 }

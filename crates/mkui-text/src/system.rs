@@ -199,6 +199,66 @@ pub struct LayoutGlyph {
     pub format: GlyphFormat,
 }
 
+/// One width-invariant shaped glyph: the output of shaping that does **not**
+/// depend on the wrap width. Line breaking consumes these on each layout query
+/// without re-shaping.
+///
+/// `ch` is retained so width-dependent line breaking can find break
+/// opportunities (whitespace) and hard breaks (`'\n'`) without a second pass
+/// over the source string.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapedGlyph {
+    pub glyph_id: u32,
+    pub x_advance_px: f32,
+    pub cluster: u32,
+    pub format: GlyphFormat,
+    pub ch: char,
+}
+
+/// Width-invariant preparation of a string under a [`LayoutSpec`].
+///
+/// Produced once by [`TextSystem::prepare`] and consumed by
+/// [`TextSystem::wrap`] at every width, so repeated width-dependent layout
+/// never re-shapes the text. The `glyphs`, advances, and vertical line metrics
+/// here are all width-independent; only line breaking and positioning (done in
+/// `wrap`) depend on the wrap width.
+#[derive(Debug, Clone)]
+pub struct ShapedText {
+    /// Original source text — retained so the default [`TextSystem::wrap`] can
+    /// fall back to a full [`TextSystem::layout`] for implementations that do
+    /// not override the split.
+    pub text: String,
+    /// Spec the text was shaped under.
+    pub spec: LayoutSpec,
+    /// Width-invariant shaped glyphs, one per source character (including
+    /// whitespace and `'\n'` markers). Empty for the default passthrough
+    /// preparation.
+    pub glyphs: Vec<ShapedGlyph>,
+    /// Ascent above the baseline for every line in this shaping.
+    pub line_ascent_px: f32,
+    /// Descent below the baseline for every line in this shaping.
+    pub line_descent_px: f32,
+    /// Glyph cell height used for vertical centring.
+    pub glyph_height_px: f32,
+}
+
+impl ShapedText {
+    /// A trivial, unshaped preparation that simply retains the text and spec.
+    /// The default [`TextSystem::wrap`] re-lays this out via
+    /// [`TextSystem::layout`]; implementations that override `prepare`/`wrap`
+    /// replace it with real width-invariant glyph data.
+    pub fn unshaped(text: &str, spec: &LayoutSpec) -> Self {
+        Self {
+            text: text.to_string(),
+            spec: spec.clone(),
+            glyphs: Vec::new(),
+            line_ascent_px: 0.0,
+            line_descent_px: 0.0,
+            glyph_height_px: 0.0,
+        }
+    }
+}
+
 /// 10-field cache key capturing every dimension along which two
 /// rasterizations of the "same glyph" could legitimately differ.
 ///
@@ -295,7 +355,38 @@ pub trait TextSystem: Send + Sync + 'static {
 
     /// Lay out `text` under `spec`, wrapping at `max_width_px` if set.
     /// Returns one [`LayoutRun`] per produced line.
+    ///
+    /// This is the one-shot composition of [`prepare`](Self::prepare) +
+    /// [`wrap`](Self::wrap). Callers that lay the same text out at multiple
+    /// widths should instead prepare once and wrap many times (see
+    /// [`TextEngine`](crate::TextEngine)) so shaping is not repeated per width.
     fn layout(&self, text: &str, spec: &LayoutSpec, max_width_px: Option<f32>) -> Vec<LayoutRun>;
+
+    /// Perform the **width-invariant** half of layout: shape `text` under
+    /// `spec` into glyphs, advances, and vertical line metrics. The result is
+    /// reused by [`wrap`](Self::wrap) at every width, so width-dependent layout
+    /// never re-shapes.
+    ///
+    /// The default returns an unshaped passthrough and pairs with the default
+    /// [`wrap`](Self::wrap) (which re-lays the retained text out via
+    /// [`layout`](Self::layout)). Implementations that want genuine cross-width
+    /// caching override **both** `prepare` and `wrap`.
+    fn prepare(&self, text: &str, spec: &LayoutSpec) -> ShapedText {
+        ShapedText::unshaped(text, spec)
+    }
+
+    /// Perform the **width-dependent** half of layout: line-break and position
+    /// the already-[`prepare`](Self::prepare)d glyphs at `max_width_px`,
+    /// returning one [`LayoutRun`] per produced line. Never re-shapes.
+    ///
+    /// The default falls back to a full [`layout`](Self::layout) of the
+    /// retained source text — correct, but not cached. There is no recursion:
+    /// `layout` is an independently-implemented method, not a wrapper around
+    /// `wrap`. Implementations overriding `prepare` must also override `wrap`
+    /// to consume the prepared glyphs.
+    fn wrap(&self, shaped: &ShapedText, max_width_px: Option<f32>) -> Vec<LayoutRun> {
+        self.layout(&shaped.text, &shaped.spec, max_width_px)
+    }
 
     /// Rasterize the glyph identified by `key` to a CPU-side [`GlyphImage`].
     fn rasterize(&self, key: GlyphCacheKey) -> Result<GlyphImage, TextError>;
