@@ -203,6 +203,7 @@ are documented as ADRs (Architecture Decision Records) under
 - [ADR 0004 — `mkui-wgpu` 2D HUD pipeline port](docs/architecture/0004-mkui-wgpu-2d-hud-pipeline-port.md)
 - [ADR 0005 — `mkui-runtime` as the portable AppTree substrate](docs/architecture/0005-mkui-runtime-portable-substrate.md)
 - [ADR 0006 — `mkui-wgpu` declarative bridge over `mkui-runtime::AppTree`](docs/architecture/0006-wgpu-declarative-bridge.md)
+- [ADR 0007 — GPU resource ownership for wgpu text and `mkui-vector2d`](docs/architecture/0007-gpu-resource-ownership-text-vector2d.md)
 
 New contributors and reviewers should start with the
 [ADR index](docs/architecture/README.md) for the format conventions and
