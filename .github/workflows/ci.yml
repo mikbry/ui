@@ -110,10 +110,6 @@ jobs:
     # vacuously.
     name: gpu-offscreen
     runs-on: ubuntu-latest
-    env:
-      # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so the
-      # adapter is deterministically Vulkan + CPU regardless of runner GPU.
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -121,8 +117,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so
+          # the adapter is deterministically Vulkan + CPU regardless of runner
+          # GPU. The exact filename varies by Mesa version, so discover it
+          # rather than hardcoding the path; fail loudly if it is absent (no
+          # silent skip — a missing ICD must not let the GPU tests vanish).
+          echo "Installed Vulkan ICDs:"
+          ls -la /usr/share/vulkan/icd.d/ || true
+          icd="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)"
+          if [ -z "$icd" ]; then
+            echo "::error::Lavapipe ICD JSON not found after installing mesa-vulkan-drivers"
+            exit 1
+          fi
+          echo "Pinning VK_ICD_FILENAMES=$icd"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           # Diagnostic: confirm the loader sees the Lavapipe adapter.
-          vulkaninfo --summary || true
+          VK_ICD_FILENAMES="$icd" vulkaninfo --summary || true
       - uses: actions/cache@v4
         with:
           path: |
