@@ -65,6 +65,13 @@ use crate::{tessellate_scene_with_text, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
+/// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
+/// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
+/// ICD; the dedicated Lavapipe GPU job enables it. Reused by the #66 Slug and
+/// #67 font GPU acceptance tests.
+#[cfg(feature = "gpu-tests")]
+pub mod offscreen;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
@@ -144,14 +151,7 @@ impl Renderer {
             .map_err(|e| MkuiError::initialization(format!("request_adapter failed: {e}")))?;
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("mkui-wgpu Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            })
+            .request_device(&device_descriptor())
             .await
             .map_err(|e| MkuiError::initialization(format!("request_device failed: {e}")))?;
 
@@ -336,6 +336,21 @@ impl Renderer {
             self.surface.configure(&self.device, &self.config);
         }
         Ok(RenderOutcome::Drawn)
+    }
+}
+
+/// Shared `DeviceDescriptor` for the windowed [`Renderer`] and the surfaceless
+/// `offscreen::OffscreenRenderer`. Both request the same default-limits,
+/// no-extra-features device; factoring it here keeps the reusable device work
+/// out of the window-bound path without changing its behavior (#106).
+pub(crate) fn device_descriptor() -> wgpu::DeviceDescriptor<'static> {
+    wgpu::DeviceDescriptor {
+        label: Some("mkui-wgpu Device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: wgpu::Limits::default(),
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        memory_hints: wgpu::MemoryHints::Performance,
+        trace: wgpu::Trace::Off,
     }
 }
 

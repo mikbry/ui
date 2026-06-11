@@ -95,6 +95,56 @@ jobs:
             ${{ runner.os }}-cargo-test-
       - run: cargo test --workspace --locked
 
+  gpu-offscreen:
+    # Surfaceless offscreen GPU readback tests (#106). These exercise a real
+    # WGPU pipeline — adapter/device negotiation, clear, draw, and 256-byte
+    # row-aligned readback — without opening a window. They are gated behind
+    # the `gpu-tests` feature so the default `test` job above stays displayless
+    # and needs no Vulkan ICD.
+    #
+    # The runner is still displayless: Mesa/Lavapipe is a CPU software
+    # rasterizer reached through the pinned `VK_ICD_FILENAMES` — no X11/Wayland
+    # server is required. The harness selects `Backends::VULKAN` and asserts a
+    # Vulkan + CPU adapter; adapter/device unavailability fails the test (no
+    # silent skip), so a missing ICD surfaces here loudly instead of passing
+    # vacuously.
+    name: gpu-offscreen
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Mesa/Lavapipe Vulkan ICD
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so
+          # the adapter is deterministically Vulkan + CPU regardless of runner
+          # GPU. The exact filename varies by Mesa version, so discover it
+          # rather than hardcoding the path; fail loudly if it is absent (no
+          # silent skip — a missing ICD must not let the GPU tests vanish).
+          echo "Installed Vulkan ICDs:"
+          ls -la /usr/share/vulkan/icd.d/ || true
+          icd="$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -n1)"
+          if [ -z "$icd" ]; then
+            echo "::error::Lavapipe ICD JSON not found after installing mesa-vulkan-drivers"
+            exit 1
+          fi
+          echo "Pinning VK_ICD_FILENAMES=$icd"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          # Diagnostic: confirm the loader sees the Lavapipe adapter.
+          VK_ICD_FILENAMES="$icd" vulkaninfo --summary || true
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-gpu-offscreen-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-gpu-offscreen-
+      - run: cargo test -p mkui-wgpu --features gpu-tests --locked
+
   test-doc:
     name: test-doc
     runs-on: ubuntu-latest
