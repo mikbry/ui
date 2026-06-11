@@ -8,17 +8,47 @@
 //! crates appear here — the types are deliberately small and the trait is
 //! shaped to admit future SFNT-parser / outline-rasterizer / Slug-encoder
 //! implementations without changing consumer code.
+//!
+//! ## Identity domain
+//!
+//! [`FontId`] is the single public face identity; it is opaque and minted only
+//! by a [`FontIdAllocator`](crate::FontIdAllocator) (or the reserved
+//! [`FontId::BITMAP`]). Outline-affecting state — variation coordinates and the
+//! outline-local affine transform — is carried in canonical fixed-point form
+//! ([`VariationSettings`], [`Affine2Fixed`]) so it can key a cache directly.
+//!
+//! ## Render-lane propagation
+//!
+//! Each [`LayoutRun`] carries a [`TextRenderClass`] alongside its `font_id`, so
+//! a single render-lane signal flows from font resolution through layout into
+//! the renderer's command builder. Bitmap is the compatibility default.
 
 use std::sync::Arc;
 
-/// Opaque font handle returned by [`TextSystem::resolve_font`] and
-/// [`TextSystem::register_font_bytes`].
+use crate::canonical::{Affine2Fixed, OpenTypeTag, VariationSettings};
+use crate::outline::{GlyphOutline, OutlineKey};
+
+pub use crate::font_id::{FontId, FontIdAllocator};
+
+/// Backend-neutral render-lane signal carried by every [`LayoutRun`].
 ///
-/// `FontId(0)` is reserved for the bitmap face shipped by
-/// [`crate::BitmapTextSystem`]; future implementations are free to allocate
-/// the rest of the space however they like.
+/// A renderer reads this to route a run to the appropriate command builder.
+/// `Bitmap` is the compatibility default — backends that do not yet implement
+/// a non-bitmap lane (web, console in Sprint 7) may ignore the other variants
+/// without regressing, because the bitmap path always emits `Bitmap`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct FontId(pub u64);
+#[non_exhaustive]
+pub enum TextRenderClass {
+    /// Raster bitmap face — the permanent debug fallback / default lane.
+    #[default]
+    Bitmap,
+    /// Slug-style GPU vector encoding.
+    Slug,
+    /// CPU/GPU outline fill.
+    Outline,
+    /// Multi-channel signed-distance-field.
+    Msdf,
+}
 
 /// Horizontal alignment of a wrapped text block. The `Start`/`End` variants
 /// follow logical-direction conventions (LTR locales: left/right; RTL would
@@ -61,28 +91,9 @@ pub enum HintingMode {
     Autohint,
 }
 
-/// Reserved per-glyph 2×2 affine transform. The bitmap path never sets a
-/// non-identity transform — the field exists so future shears / italic
-/// synthesis / variable-axis skews flow through the cache key.
-///
-/// Storage is Q16.16 fixed-point so the value participates in `Hash`/`Eq`.
-/// `matrix == [0; 4]` is the sentinel for "identity".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct GlyphTransform {
-    pub matrix: [i32; 4],
-}
-
-impl GlyphTransform {
-    pub const IDENTITY: Self = Self { matrix: [0; 4] };
-
-    pub const fn is_identity(self) -> bool {
-        self.matrix[0] == 0 && self.matrix[1] == 0 && self.matrix[2] == 0 && self.matrix[3] == 0
-    }
-}
-
 /// Query passed to [`TextSystem::resolve_font`]. The Sprint 2 bitmap path
-/// ignores every field and always returns `FontId(0)`; the structure exists
-/// so consumers can already write production-shaped lookups.
+/// ignores every field and always returns [`FontId::BITMAP`]; the structure
+/// exists so consumers can already write production-shaped lookups.
 #[derive(Debug, Clone, Default)]
 pub struct FontQuery {
     pub family: Option<String>,
@@ -103,21 +114,22 @@ pub struct LayoutSpec {
     pub align: TextAlign,
     pub max_lines: Option<usize>,
     pub hinting: HintingMode,
-    pub variation_axes: u64,
+    /// Canonical variation coordinate, keyed into the glyph cache.
+    pub variations: VariationSettings,
     pub synthesis_flags: u32,
 }
 
 impl Default for LayoutSpec {
     fn default() -> Self {
         Self {
-            font_id: FontId(0),
+            font_id: FontId::BITMAP,
             font_generation: 0,
             font_size_px: 10.0,
             line_height_px: 14.0,
             align: TextAlign::Start,
             max_lines: None,
             hinting: HintingMode::None,
-            variation_axes: 0,
+            variations: VariationSettings::empty(),
             synthesis_flags: 0,
         }
     }
@@ -130,12 +142,16 @@ impl Default for LayoutSpec {
 /// Run-level positions (`origin_x_px`, `origin_y_px`, `line_y_baseline_px`)
 /// are expressed relative to the text box origin the caller passed to
 /// [`TextSystem::layout`] — the renderer translates them into surface space.
+///
+/// `render_class` is the per-run render-lane signal; the bitmap path always
+/// emits [`TextRenderClass::Bitmap`].
 #[derive(Debug, Clone)]
 pub struct LayoutRun {
     pub font_id: FontId,
+    pub render_class: TextRenderClass,
     pub font_generation: u32,
     pub font_size_px: f32,
-    pub variation_axes: u64,
+    pub variations: VariationSettings,
     pub synthesis_flags: u32,
     pub hinting: HintingMode,
     pub origin_x_px: f32,
@@ -156,12 +172,12 @@ impl LayoutRun {
             font_generation: self.font_generation,
             glyph_id: glyph.glyph_id,
             size_px_q26_6: (self.font_size_px * 64.0).round() as i32,
-            variation_axes: self.variation_axes,
+            variations: self.variations.clone(),
             format: glyph.format,
             subpixel_variant: glyph.subpixel_variant,
             synthesis_flags: self.synthesis_flags,
             hinting: self.hinting,
-            transform: GlyphTransform::IDENTITY,
+            transform: Affine2Fixed::IDENTITY,
         }
     }
 }
@@ -192,19 +208,20 @@ pub struct LayoutGlyph {
 ///
 /// `size_px_q26_6` is `font_size_px × 64` rounded to `i32`; the Q26.6 name
 /// matches the standard font-metric convention even though we never go
-/// negative in practice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// negative in practice. `variations` and `transform` are canonical
+/// fixed-point values, never pre-hashed summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphCacheKey {
     pub font_id: FontId,
     pub font_generation: u32,
     pub glyph_id: u32,
     pub size_px_q26_6: i32,
-    pub variation_axes: u64,
+    pub variations: VariationSettings,
     pub format: GlyphFormat,
     pub subpixel_variant: u8,
     pub synthesis_flags: u32,
     pub hinting: HintingMode,
-    pub transform: GlyphTransform,
+    pub transform: Affine2Fixed,
 }
 
 /// CPU-side rasterized glyph. `left_px` / `top_px` are the bearing offsets
@@ -243,6 +260,20 @@ pub enum TextError {
     /// implementation.
     #[error("unknown glyph: {0}")]
     UnknownGlyph(u32),
+    /// The `1..=u64::MAX` [`FontId`] space is exhausted; allocation never
+    /// wraps onto live or reserved ids.
+    #[error("font id space exhausted")]
+    FontIdOverflow,
+    /// This implementation does not support glyph-outline extraction (the
+    /// compatibility default; e.g. the raster-only bitmap path).
+    #[error("glyph outline not supported by this text system")]
+    UnsupportedOutline,
+    /// A [`VariationSettings`] construction saw the same axis tag twice.
+    #[error("duplicate variation axis: {0:?}")]
+    DuplicateVariationAxis(OpenTypeTag),
+    /// A fixed-point conversion received a non-finite or out-of-range value.
+    #[error("invalid fixed-point value")]
+    InvalidFixedPoint,
 }
 
 /// Domain-neutral text-system interface. Renderers consume the trait so the
@@ -253,8 +284,8 @@ pub enum TextError {
 /// `Arc<dyn TextSystem>` across threads.
 pub trait TextSystem: Send + Sync + 'static {
     /// Resolve a font query to a registered face. Returns `None` if no face
-    /// matches. The bitmap path always returns `Some(FontId(0))` because it
-    /// ships exactly one face.
+    /// matches. The bitmap path always returns `Some(FontId::BITMAP)` because
+    /// it ships exactly one face.
     fn resolve_font(&self, query: &FontQuery) -> Option<FontId>;
 
     /// Register a font from raw bytes. The bitmap path always returns
@@ -268,6 +299,16 @@ pub trait TextSystem: Send + Sync + 'static {
 
     /// Rasterize the glyph identified by `key` to a CPU-side [`GlyphImage`].
     fn rasterize(&self, key: GlyphCacheKey) -> Result<GlyphImage, TextError>;
+
+    /// Resolve the vector outline for `key`. The compatibility default returns
+    /// [`TextError::UnsupportedOutline`] so existing/custom implementors do not
+    /// break merely by omitting outline support; raster-only systems (the
+    /// bitmap path) keep this default. #62 routes this generically and #67
+    /// implements it for SFNT.
+    fn glyph_outline(&self, key: &OutlineKey) -> Result<GlyphOutline, TextError> {
+        let _ = key;
+        Err(TextError::UnsupportedOutline)
+    }
 
     /// List the human-readable family names this implementation exposes.
     fn families(&self) -> Vec<String>;

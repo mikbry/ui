@@ -20,9 +20,10 @@
 
 use std::sync::Arc;
 
+use crate::canonical::{Affine2Fixed, VariationSettings};
 use crate::system::{
     FontId, FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, HintingMode, LayoutGlyph, LayoutRun,
-    LayoutSpec, TextAlign, TextError, TextSystem,
+    LayoutSpec, TextAlign, TextError, TextRenderClass, TextSystem,
 };
 
 /// Family name reported by [`TextSystem::families`] for the bitmap face.
@@ -56,7 +57,7 @@ impl BitmapTextSystem {
 
 impl TextSystem for BitmapTextSystem {
     fn resolve_font(&self, _query: &FontQuery) -> Option<FontId> {
-        Some(FontId(0))
+        Some(FontId::BITMAP)
     }
 
     fn register_font_bytes(&self, _bytes: Arc<[u8]>, _index: u32) -> Result<FontId, TextError> {
@@ -113,9 +114,10 @@ impl TextSystem for BitmapTextSystem {
 
             runs.push(LayoutRun {
                 font_id: spec.font_id,
+                render_class: TextRenderClass::Bitmap,
                 font_generation: spec.font_generation,
                 font_size_px: spec.font_size_px,
-                variation_axes: spec.variation_axes,
+                variations: spec.variations.clone(),
                 synthesis_flags: spec.synthesis_flags,
                 hinting: spec.hinting,
                 origin_x_px,
@@ -406,16 +408,16 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
 /// and font size but do not have a [`LayoutRun`] handy.
 pub fn cache_key_for(ch: char, font_size_px: f32) -> GlyphCacheKey {
     GlyphCacheKey {
-        font_id: FontId(0),
+        font_id: FontId::BITMAP,
         font_generation: 0,
         glyph_id: ch as u32,
         size_px_q26_6: (font_size_px * 64.0).round() as i32,
-        variation_axes: 0,
+        variations: VariationSettings::empty(),
         format: GlyphFormat::Alpha,
         subpixel_variant: 0,
         synthesis_flags: 0,
         hinting: HintingMode::None,
-        transform: crate::system::GlyphTransform::IDENTITY,
+        transform: Affine2Fixed::IDENTITY,
     }
 }
 
@@ -460,7 +462,10 @@ mod tests {
     #[test]
     fn resolve_font_always_returns_face_zero() {
         let system = BitmapTextSystem::new();
-        assert_eq!(system.resolve_font(&FontQuery::default()), Some(FontId(0)));
+        assert_eq!(
+            system.resolve_font(&FontQuery::default()),
+            Some(FontId::BITMAP)
+        );
     }
 
     #[test]
