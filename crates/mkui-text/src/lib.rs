@@ -19,6 +19,12 @@
 //! - [`BitmapTextSystem`] — Sprint 2 implementation: 5×7 ASCII bit-pattern
 //!   port of an earlier reference prototype, behind the trait so it can
 //!   be swapped out without touching renderer code.
+//! - [`CompositeTextSystem`] — the font registry + backend-neutral router
+//!   that lets bitmap and Slug (and, from #67, outline) faces coexist in one
+//!   scene. It mints globally unique public [`FontId`] values through a
+//!   registry-owned [`FontIdAllocator`], keeps provider-local face IDs
+//!   private, and routes every request to the owning provider by reverse
+//!   lookup — the router itself never constructs a [`FontId`].
 //!
 //! The bitmap implementation is permanent debug-fallback and visual
 //! regression oracle — when Sprint 3+ Slug-style rendering lands it stays
@@ -36,11 +42,21 @@
 //! [`GlyphOutline`] contract lets a face expose vector outlines (default:
 //! [`TextError::UnsupportedOutline`]) without dragging renderer types into
 //! this crate.
+//!
+//! ## Render class is resolved, not switched
+//!
+//! [`TextRenderClass`] is selected by **font/style resolution** — i.e. which
+//! face a [`FontQuery`] resolves to — and is carried per-[`LayoutRun`]. It is
+//! **not** a renderer-global switch: a bitmap face and a Slug face can be live
+//! in the same scene at the same time, and the renderer dispatches per run
+//! rather than flipping a global mode. Font *source* ([`FontSource`]) is
+//! modeled separately from render class — the two axes are orthogonal.
 
 #![forbid(unsafe_code)]
 
 pub mod bitmap;
 pub mod canonical;
+pub mod composite;
 pub mod engine;
 pub mod font_id;
 pub mod outline;
@@ -52,6 +68,7 @@ pub use bitmap::{
     GLYPH_CELL_HEIGHT_PX, GLYPH_CELL_WIDTH_PX, REFERENCE_FONT_SIZE_PX,
 };
 pub use canonical::{Affine2Fixed, Fixed16_16, OpenTypeTag, VariationAxis, VariationSettings};
+pub use composite::{CompositeTextSystem, FontSource};
 pub use engine::{LineMetrics, PreparedText, TextEngine, TextLayout};
 pub use font_id::{FontId, FontIdAllocator};
 pub use outline::{GlyphOutline, OutlineBounds, OutlineCommand, OutlineKey};
