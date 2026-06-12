@@ -1,0 +1,13 @@
+[package]
+name = "mkui-vector2d"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Backend-neutral 2D path/curve model + deterministic Slug glyph curve/band encoder (no GPU deps)"
+
+[dependencies]
+thiserror = { workspace = true }
+mkui-text = { path = "../mkui-text" }
