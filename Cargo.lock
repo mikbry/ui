@@ -1059,6 +1059,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-vector2d"
+version = "0.9.3"
+dependencies = [
+ "mkui-text",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mkui-web"
 version = "0.9.3"
 dependencies = [

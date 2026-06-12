@@ -8,7 +8,18 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
-- (next sprint's additions land here)
+- **`mkui-vector2d` crate — backend-neutral 2D paths + Slug glyph encoder (#65).**
+  New workspace crate owning the CPU/path half of the Sprint 7 vector text
+  lane (per the #64 ownership ADR): a renderer-independent `VectorPath`
+  model and a deterministic Slug-style glyph curve/band encoder. The encoder
+  emits backend-neutral records — glyph bounds, quadratic curve records
+  `(p0, p1, p2)`, horizontal/vertical band ranges, and curve-index streams,
+  all in font units y-up — cached by the collision-free `SlugGlyphKey`. It
+  consumes `mkui-text`'s canonical identity and outline contract from #61
+  (`FontId`, `Fixed16_16`, `Affine2Fixed`, `VariationSettings`, `OutlineKey`,
+  `GlyphOutline`) rather than redefining them. Implements the public-domain
+  Slug algorithm by Eric Lengyel from scratch (no Slug source). No WGPU type
+  appears in the crate or its dependency tree; GPU packing is #66's scope.
 
 ### Security
 - **Bump pyo3 0.28.3 → 0.29.0 (#114).** Resolves two RUSTSEC advisories
