@@ -8,6 +8,21 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Composite text-system router + font registry in `mkui-text` (#62).**
+  `CompositeTextSystem` lets bitmap and Slug (and, from #67, outline) faces
+  coexist in one scene without renderer-global conditionals or provider-local
+  `FontId` collisions. The registry owns the shared `FontIdAllocator` handle
+  and is the only thing that mints public `FontId` values; it maps
+  `(ProviderId, LocalFontId) → FontId` and routes every request — `resolve_font`,
+  `layout`, `rasterize`, `glyph_outline` — by reverse lookup, handing providers
+  only their private `LocalFontId`. The router never constructs a `FontId`.
+  Provider-emitted mixed-fallback runs are preserved (a `RoutedRun` discriminator
+  keeps each run's validated face) so #67's layout-time SFNT/bitmap fallback
+  contract works end-to-end rather than being flattened onto one face.
+  `FontSource` models a face's origin separately from its `TextRenderClass`.
+  Consumes #61's canonical identity/render/outline contract rather than
+  redefining it. Generic-only: no SFNT parser, TTF bytes, Slug encoder, or WGPU
+  type lands here.
 - **`mkui-vector2d` crate — backend-neutral 2D paths + Slug glyph encoder (#65).**
   New workspace crate owning the CPU/path half of the Sprint 7 vector text
   lane (per the #64 ownership ADR): a renderer-independent `VectorPath`
