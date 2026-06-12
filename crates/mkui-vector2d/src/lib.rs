@@ -17,15 +17,19 @@
 //!   cubic/close commands plus fill, transform, and bounds. General icons,
 //!   strokes, and analytic primitives are *representable*; only the glyph lane
 //!   is implemented end-to-end in Sprint 7.
-//! - [`outline`] — the resolved [`outline::GlyphOutline`] input contract and
-//!   its faithful 1:1 conversion into a [`path::VectorPath`]. Conversion never
-//!   reapplies variation, synthesis, affine transform, or bounds — the outline
-//!   arrives fully resolved from `mkui-text`.
+//! - [`outline`] — the faithful 1:1 conversion of `mkui-text`'s resolved
+//!   [`GlyphOutline`] into a [`path::VectorPath`]
+//!   ([`outline::glyph_outline_to_path`]). Conversion never reapplies
+//!   variation, synthesis, affine transform, or bounds — the outline arrives
+//!   fully resolved from `mkui-text`.
 //! - [`slug`] — the deterministic [`slug::encode_slug_glyph`] encoder and the
 //!   [`slug::SlugBlobCache`], keyed by the collision-free
 //!   [`slug::SlugGlyphKey`].
-//! - [`fixed`] — canonical fixed-point identity values
-//!   ([`fixed::VariationSettings`], [`fixed::Affine2Fixed`]) used by the key.
+//!
+//! The canonical fixed-point identity values the key is built from
+//! ([`VariationSettings`], [`Affine2Fixed`]) and the outline request/data
+//! contract ([`GlyphOutline`], [`OutlineKey`]) are **owned by `mkui-text`**
+//! (#61); this crate consumes and re-exports them, it does not redefine them.
 //!
 //! ## What this crate must NOT own
 //!
@@ -52,29 +56,21 @@
 //! all in font units y-up — are the versioned contract. #66 may serialize and
 //! GPU-pack them but may not reimplement or reinterpret the band algorithm.
 //!
-//! ## Integration note
-//!
-//! The [`outline::GlyphOutline`] / [`outline::OutlineKey`] input types and the
-//! [`fixed`] identity values mirror the contract owned by `mkui-text` (#61).
-//! They are reproduced here so the crate builds and tests ahead of #61 landing;
-//! a follow-up integration replaces them with re-exports from `mkui-text`.
-
-pub mod fixed;
 pub mod outline;
 pub mod path;
 pub mod slug;
 
-pub use fixed::{
-    Affine2Fixed, Fixed16_16, FixedError, OpenTypeTag, VariationAxis, VariationError,
-    VariationSettings,
-};
-pub use outline::{GlyphOutline, OutlineBounds, OutlineCommand, OutlineKey};
+pub use outline::glyph_outline_to_path;
 pub use path::{Affine2, Bounds, FillRule, PathCommand, Vec2, VectorPath};
 pub use slug::{
     encode_slug_glyph, BandRange, GlyphBounds, SlugBlobCache, SlugConfig, SlugCurve,
     SlugEncodeError, SlugGlyph, SlugGlyphKey,
 };
 
-// Re-export the global font identity this crate keys on, so consumers need not
-// also depend on `mkui-text` just to name a `FontId`.
-pub use mkui_text::FontId;
+// Re-export the `mkui-text`-owned identity + outline contract this crate keys
+// on and consumes, so downstream consumers need not also name `mkui-text` for
+// these types. `mkui-text` remains their single source of truth (#61).
+pub use mkui_text::{
+    Affine2Fixed, Fixed16_16, FontId, FontIdAllocator, GlyphOutline, OpenTypeTag, OutlineBounds,
+    OutlineCommand, OutlineKey, VariationAxis, VariationSettings,
+};

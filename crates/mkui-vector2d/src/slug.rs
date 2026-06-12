@@ -55,9 +55,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::fixed::{Affine2Fixed, VariationSettings};
 use crate::path::{PathCommand, Vec2, VectorPath};
-use mkui_text::FontId;
+use mkui_text::{Affine2Fixed, FontId, VariationSettings};
 
 /// Immutable encoder configuration. Held by the owning [`SlugBlobCache`]; it is
 /// **not** part of [`SlugGlyphKey`] so two caches with different configs form
@@ -513,9 +512,16 @@ impl SlugBlobCache {
 mod tests {
     use super::*;
     use crate::path::{Bounds, FillRule};
+    use mkui_text::{Fixed16_16, FontIdAllocator, OpenTypeTag, VariationAxis};
 
-    fn tag(t: &[u8; 4]) -> crate::fixed::OpenTypeTag {
-        crate::fixed::OpenTypeTag::new(*t)
+    fn tag(t: &[u8; 4]) -> OpenTypeTag {
+        OpenTypeTag::new(*t)
+    }
+
+    /// Mint a fresh, process-unique `FontId` through the public allocator —
+    /// `FontId` is opaque (#61), so tests cannot forge raw values.
+    fn font_id() -> FontId {
+        FontIdAllocator::new().allocate().unwrap()
     }
 
     /// A closed triangle with one quadratic, sized so 2×2 bands fall on exact
@@ -540,9 +546,9 @@ mod tests {
         SlugConfig::new(2, 2, 1)
     }
 
-    fn golden_key() -> SlugGlyphKey {
+    fn golden_key(font_id: FontId) -> SlugGlyphKey {
         SlugGlyphKey {
-            font_id: FontId(1),
+            font_id,
             font_generation: 0,
             glyph_id: 42,
             variation_axes: VariationSettings::empty(),
@@ -741,8 +747,9 @@ mod tests {
     fn same_key_twice_hits_and_reuses_one_blob() {
         let mut cache = SlugBlobCache::new(golden_config());
         let path = golden_path();
-        let first = cache.encode(golden_key(), &path).unwrap();
-        let second = cache.encode(golden_key(), &path).unwrap();
+        let key = golden_key(font_id());
+        let first = cache.encode(key.clone(), &path).unwrap();
+        let second = cache.encode(key, &path).unwrap();
         assert_eq!(cache.hits(), 1);
         assert_eq!(cache.misses(), 1);
         assert_eq!(cache.len(), 1);
@@ -755,12 +762,13 @@ mod tests {
     #[test]
     fn identity_differences_each_miss() {
         let path = golden_path();
-        let base = golden_key();
+        let base = golden_key(font_id());
 
         // Each variant differs from `base` in exactly one identity field.
         let variants = vec![
+            // A different global FontId (freshly minted) must miss.
             SlugGlyphKey {
-                font_id: FontId(2),
+                font_id: font_id(),
                 ..base.clone()
             },
             SlugGlyphKey {
@@ -772,10 +780,10 @@ mod tests {
                 ..base.clone()
             },
             SlugGlyphKey {
-                variation_axes: VariationSettings::new(vec![crate::fixed::VariationAxis::new(
-                    tag(b"wght"),
-                    crate::fixed::Fixed16_16::from_f32(700.0).unwrap(),
-                )])
+                variation_axes: VariationSettings::new([VariationAxis {
+                    tag: tag(b"wght"),
+                    value: Fixed16_16::from_f32(700.0).unwrap(),
+                }])
                 .unwrap(),
                 ..base.clone()
             },
@@ -786,7 +794,7 @@ mod tests {
             // Translation-only affine difference must still miss.
             SlugGlyphKey {
                 outline_transform: Affine2Fixed {
-                    tx: crate::fixed::Fixed16_16::from_f32(1.0).unwrap(),
+                    tx: Fixed16_16::from_f32(1.0).unwrap(),
                     ..Affine2Fixed::IDENTITY
                 },
                 ..base.clone()
@@ -794,7 +802,7 @@ mod tests {
             // A linear-component affine difference must also miss.
             SlugGlyphKey {
                 outline_transform: Affine2Fixed {
-                    a: crate::fixed::Fixed16_16::from_f32(2.0).unwrap(),
+                    a: Fixed16_16::from_f32(2.0).unwrap(),
                     ..Affine2Fixed::IDENTITY
                 },
                 ..base.clone()
@@ -815,18 +823,23 @@ mod tests {
 
     #[test]
     fn reordered_axes_compare_equal_and_share_a_blob() {
-        let wght = crate::fixed::VariationAxis::new(
-            tag(b"wght"),
-            crate::fixed::Fixed16_16::from_f32(700.0).unwrap(),
-        );
-        let ital = crate::fixed::VariationAxis::new(tag(b"ital"), crate::fixed::Fixed16_16::ONE);
+        let wght = VariationAxis {
+            tag: tag(b"wght"),
+            value: Fixed16_16::from_f32(700.0).unwrap(),
+        };
+        let ital = VariationAxis {
+            tag: tag(b"ital"),
+            value: Fixed16_16::ONE,
+        };
+        // One shared base key so the two variants differ *only* in axis order.
+        let base = golden_key(font_id());
         let key_ab = SlugGlyphKey {
-            variation_axes: VariationSettings::new(vec![wght, ital]).unwrap(),
-            ..golden_key()
+            variation_axes: VariationSettings::new([wght, ital]).unwrap(),
+            ..base.clone()
         };
         let key_ba = SlugGlyphKey {
-            variation_axes: VariationSettings::new(vec![ital, wght]).unwrap(),
-            ..golden_key()
+            variation_axes: VariationSettings::new([ital, wght]).unwrap(),
+            ..base
         };
 
         let mut cache = SlugBlobCache::new(golden_config());
@@ -853,7 +866,7 @@ mod tests {
             Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(50.0, 40.0)),
         );
         let mut cache = SlugBlobCache::new(golden_config());
-        let err = cache.encode(golden_key(), &cubic).unwrap_err();
+        let err = cache.encode(golden_key(font_id()), &cubic).unwrap_err();
         assert_eq!(err, SlugEncodeError::UnsupportedSegment);
         assert!(cache.is_empty(), "errored encode does not poison the cache");
         assert_eq!(cache.misses(), 0);
@@ -867,7 +880,7 @@ mod tests {
             Bounds::new(Vec2::ZERO, Vec2::ZERO),
         );
         let mut cache = SlugBlobCache::new(golden_config());
-        let err = cache.encode(golden_key(), &empty).unwrap_err();
+        let err = cache.encode(golden_key(font_id()), &empty).unwrap_err();
         assert_eq!(err, SlugEncodeError::EmptyOutline);
         assert!(cache.is_empty());
     }
@@ -877,8 +890,9 @@ mod tests {
         let path = golden_path();
         let mut cache_a = SlugBlobCache::new(SlugConfig::new(2, 2, 1));
         let mut cache_b = SlugBlobCache::new(SlugConfig::new(4, 4, 1));
-        let a = cache_a.encode(golden_key(), &path).unwrap();
-        let b = cache_b.encode(golden_key(), &path).unwrap();
+        let key = golden_key(font_id());
+        let a = cache_a.encode(key.clone(), &path).unwrap();
+        let b = cache_b.encode(key, &path).unwrap();
         // Same key, but each cache owns its own config + blob.
         assert_ne!(a.horizontal_bands.len(), b.horizontal_bands.len());
         assert!(!Arc::ptr_eq(&a, &b));
