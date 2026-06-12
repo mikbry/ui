@@ -11,16 +11,20 @@ use mkui_text::{
 
 #[test]
 fn font_id_is_opaque_only_bitmap_is_constructible() {
-    // The only publicly-constructible value is the reserved bitmap face.
+    // The only publicly-constructible value is the reserved bitmap face; every
+    // other id must come from an allocator (no public raw constructor).
     assert_eq!(FontId::BITMAP.raw(), 0);
-    // Allocated ids are distinct, monotonic, and never the bitmap face.
-    // (Isolated to keep the raw values deterministic regardless of other
-    // tests sharing the process-global counter.)
-    let alloc = FontIdAllocator::isolated();
+    // Allocated ids are >= 1, distinct, monotonic, and never the bitmap face.
+    // This uses the public `new()` allocator (the only one downstream crates
+    // can reach — `isolated()` is test-only and crate-private), so it asserts
+    // ordering/distinctness rather than exact raw values, which depend on the
+    // shared process-global counter.
+    let alloc = FontIdAllocator::new();
     let a = alloc.allocate().unwrap();
     let b = alloc.allocate().unwrap();
-    assert_eq!((a.raw(), b.raw()), (1, 2));
-    assert!(a.raw() < b.raw());
+    assert!(a.raw() >= 1 && b.raw() >= 1);
+    assert!(a.raw() < b.raw(), "allocated ids must be monotonic");
+    assert_ne!(a, b);
     assert_ne!(a, FontId::BITMAP);
 }
 

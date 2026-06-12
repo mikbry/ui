@@ -34,10 +34,11 @@
 //! to each provider's registration call. Because the default allocator is
 //! global-backed, sharing is automatic and re-allocation is impossible.
 //!
-//! [`FontIdAllocator::isolated`] exists for tests and self-contained sandboxes
-//! that need a private, deterministic counter; an isolated allocator does
-//! **not** participate in the global space and must not mint ids that escape
-//! into shared registry/cache data.
+//! A test-only `FontIdAllocator::isolated` constructor (crate-private, behind
+//! `#[cfg(test)]`) gives in-crate unit tests a private, deterministic counter;
+//! it is deliberately unreachable from downstream crates so an isolated
+//! counter can never mint a public identity that escapes into shared
+//! registry/cache data.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -99,8 +100,9 @@ impl FontId {
 ///   returns [`TextError::FontIdOverflow`] rather than wrapping back onto
 ///   live (or reserved) ids.
 ///
-/// [`isolated`](Self::isolated) trades the global guarantee for a private,
-/// deterministic counter — for tests and sandboxes only.
+/// A test-only `isolated` constructor (crate-private) trades the global
+/// guarantee for a private, deterministic counter — for in-crate unit tests
+/// only, never reachable by downstream code.
 #[derive(Debug)]
 pub struct FontIdAllocator {
     /// `None` ⇒ draw from [`GLOBAL_FONT_ID_COUNTER`] (the default,
@@ -116,13 +118,17 @@ impl FontIdAllocator {
         Self { local: None }
     }
 
-    /// An **isolated** allocator with a private counter starting at raw `1`.
+    /// An **isolated** allocator with a private counter starting at raw `1`,
+    /// for deterministic in-crate unit tests only.
     ///
     /// Does **not** participate in the process-global space — two isolated
-    /// allocators will each begin at `1` and collide. Use only for tests and
-    /// self-contained sandboxes whose ids never reach shared registry/cache
-    /// data.
-    pub const fn isolated() -> Self {
+    /// allocators each begin at `1` and would mint colliding `FontId`s. Because
+    /// that defeats the global-uniqueness contract, the constructor is
+    /// **test-only and crate-private** (`#[cfg(test)] pub(crate)`): it is
+    /// invisible to downstream crates and cannot produce public identities.
+    /// Production code uses [`new`](Self::new).
+    #[cfg(test)]
+    pub(crate) fn isolated() -> Self {
         Self {
             local: Some(AtomicU64::new(1)),
         }

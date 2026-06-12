@@ -12,7 +12,7 @@
 //! ## Identity domain
 //!
 //! [`FontId`] is the single public face identity; it is opaque and minted only
-//! by a [`FontIdAllocator`](crate::FontIdAllocator) (or the reserved
+//! by a [`FontIdAllocator`] (or the reserved
 //! [`FontId::BITMAP`]). Outline-affecting state — variation coordinates and the
 //! outline-local affine transform — is carried in canonical fixed-point form
 //! ([`VariationSettings`], [`Affine2Fixed`]) so it can key a cache directly.
