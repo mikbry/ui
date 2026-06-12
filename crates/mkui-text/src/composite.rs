@@ -104,6 +104,51 @@ pub(crate) enum RegistryError {
     GenerationOverflow(FontId),
 }
 
+/// Non-forgeable proof that a fallback target is a registered face.
+///
+/// The registry is the single source of truth for every `(FontId,
+/// TextRenderClass)` binding, so a fallback route must not let a provider name
+/// an unregistered face or claim a render class that contradicts the registry.
+/// This module enforces both with the type system: [`ValidatedFallback`]'s
+/// field is private, so the **only** way to obtain one is [`validate`] — whose
+/// only caller is the registry ([`CompositeTextSystem::validated_fallback`]).
+/// The token carries just the target id; render class and generation are
+/// derived from the target's `FaceRecord` at dispatch, never supplied by the
+/// provider.
+mod fallback {
+    use super::RegistryError;
+    use crate::font_id::FontId;
+
+    /// A fallback target proven registered — mintable only via [`validate`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct ValidatedFallback(FontId);
+
+    impl ValidatedFallback {
+        /// The validated target id — always a registered face.
+        pub(crate) fn target(self) -> FontId {
+            self.0
+        }
+    }
+
+    /// Validate `target` against `is_registered` and mint a
+    /// [`ValidatedFallback`], or reject an unknown target with
+    /// [`RegistryError::UnknownFont`]. The private field makes this the only
+    /// construction path; providers and tests cannot bypass it.
+    #[allow(dead_code)]
+    pub(crate) fn validate(
+        target: FontId,
+        is_registered: impl FnOnce(FontId) -> bool,
+    ) -> Result<ValidatedFallback, RegistryError> {
+        if is_registered(target) {
+            Ok(ValidatedFallback(target))
+        } else {
+            Err(RegistryError::UnknownFont(target))
+        }
+    }
+}
+
+pub(crate) use fallback::ValidatedFallback;
+
 /// How the router should label one provider-emitted [`LayoutRun`].
 ///
 /// A provider that performs **layout-time fallback** — e.g. #67's SFNT face
@@ -122,16 +167,13 @@ pub(crate) enum RoutedRun {
     /// Render via the provider's primary (selected) face. The router stamps the
     /// selected `FontId`, its render class, and its registry generation.
     Primary,
-    /// Render via an already-registered cross-provider fallback the provider
-    /// validated at layout time. The router preserves `target_font_id` +
-    /// `render_class` — after confirming the target is registered — rather than
-    /// relabeling the run to the primary face. The provider supplies a real,
-    /// registered `FontId` here (commonly [`FontId::BITMAP`], the one publicly
-    /// constructible id); it never forges one, and the router re-validates it.
-    Fallback {
-        target_font_id: FontId,
-        render_class: TextRenderClass,
-    },
+    /// Render via a registry-validated cross-provider fallback. The target is a
+    /// [`ValidatedFallback`] (mintable only by the registry), so the route is
+    /// guaranteed valid by construction. The router derives the run's render
+    /// class and generation from the target's `FaceRecord` — the registry is
+    /// authoritative; the provider supplies no render class here and so can
+    /// never contradict it.
+    Fallback(ValidatedFallback),
 }
 
 /// A provider-emitted run plus its [`RoutedRun`] discriminator. The composite
@@ -394,6 +436,22 @@ impl CompositeTextSystem {
         Ok(next)
     }
 
+    /// Validate that `target` is a registered face and mint a
+    /// [`ValidatedFallback`] a provider can emit as a [`RoutedRun::Fallback`].
+    ///
+    /// This is the **setup-time** validation boundary: an unknown target is
+    /// rejected here with [`RegistryError::UnknownFont`], loudly, rather than
+    /// being silently coerced to bitmap at dispatch. Because the token is the
+    /// only way to construct a `Fallback` and it cannot be forged, an
+    /// unregistered fallback route is unrepresentable downstream.
+    #[allow(dead_code)]
+    pub(crate) fn validated_fallback(
+        &self,
+        target: FontId,
+    ) -> Result<ValidatedFallback, RegistryError> {
+        fallback::validate(target, |fid| self.registry.reverse.contains_key(&fid))
+    }
+
     /// Render lane selected for a registered face, or `None` if `font_id` is
     /// unknown. Render class is a property of font/style resolution — not a
     /// renderer-global switch.
@@ -485,31 +543,30 @@ impl TextSystem for CompositeTextSystem {
         let routed = self.providers[provider_id.0].layout_local(local, text, spec, max_width_px);
 
         // Apply each run's routing discriminator. `Primary` runs adopt the
-        // selected face; `Fallback` runs KEEP their provider-validated target so
-        // a mixed SFNT/bitmap layout (the #67 contract) is not flattened onto a
-        // single face. The router never invents a FontId — it only stamps the
-        // selected id, a re-validated fallback target, or the reserved
-        // FontId::BITMAP.
+        // selected face; `Fallback` runs KEEP their target so a mixed
+        // SFNT/bitmap layout (the #67 contract) is not flattened onto a single
+        // face. For BOTH arms every published `(FontId, TextRenderClass,
+        // generation)` tuple is derived from the registry's `FaceRecord` — the
+        // single source of truth — never from provider-supplied values. The
+        // router never invents a FontId.
         routed
             .into_iter()
             .map(|RoutedLayoutRun { routing, mut run }| {
                 let (font_id, render_class, font_generation) = match routing {
                     RoutedRun::Primary => (selected_id, selected_class, selected_generation),
-                    RoutedRun::Fallback {
-                        target_font_id,
-                        render_class,
-                    } => match self.registry.reverse.get(&target_font_id) {
-                        Some(rec) => (target_font_id, render_class, rec.generation),
-                        // Unknown fallback target: degrade to the bitmap face,
-                        // consistent with how this infallible API handles an
-                        // unknown *selected* id (the fallible rasterize /
-                        // glyph_outline paths return TextError::UnknownFont).
-                        None => (
-                            FontId::BITMAP,
-                            TextRenderClass::Bitmap,
-                            self.bitmap_generation(),
-                        ),
-                    },
+                    RoutedRun::Fallback(target) => {
+                        // The token is non-forgeable proof of registration, so
+                        // the lookup cannot miss (the registry has no unregister
+                        // path). Render class + generation come from the
+                        // FaceRecord — authoritative — not from the provider.
+                        let target_id = target.target();
+                        let rec = self
+                            .registry
+                            .reverse
+                            .get(&target_id)
+                            .expect("ValidatedFallback guarantees the target is registered");
+                        (target_id, rec.render_class, rec.generation)
+                    }
                 };
                 run.font_id = font_id;
                 run.render_class = render_class;
@@ -743,14 +800,14 @@ mod tests {
 
     /// A provider that performs **layout-time fallback**, like #67's SFNT face:
     /// it renders most glyphs through its own (primary) lane but emits a
-    /// cross-provider fallback run for `fallback_char` — tagged
-    /// [`RoutedRun::Fallback`] with an already-registered `fallback_target`.
+    /// cross-provider fallback run for `fallback_char`. It holds a
+    /// registry-issued [`ValidatedFallback`] token — it cannot name an
+    /// unregistered face and supplies no render class of its own.
     struct MixedProvider {
         primary_class: TextRenderClass,
         family: String,
         fallback_char: char,
-        fallback_target: FontId,
-        fallback_class: TextRenderClass,
+        fallback: ValidatedFallback,
     }
 
     impl FontProvider for MixedProvider {
@@ -777,14 +834,11 @@ mod tests {
             _max_width_px: Option<f32>,
         ) -> Vec<RoutedLayoutRun> {
             // One run per char: the unsupported `fallback_char` routes to the
-            // validated fallback target; every other char stays Primary.
+            // validated fallback token; every other char stays Primary.
             text.chars()
                 .map(|ch| {
                     let routing = if ch == self.fallback_char {
-                        RoutedRun::Fallback {
-                            target_font_id: self.fallback_target,
-                            render_class: self.fallback_class,
-                        }
+                        RoutedRun::Fallback(self.fallback)
                     } else {
                         RoutedRun::Primary
                     };
@@ -969,14 +1023,14 @@ mod tests {
             )
             .unwrap();
 
-        // Provider A must be configured with the *already-registered* fallback
-        // target — it never forges a FontId.
+        // Provider A is configured with a registry-issued, validated fallback
+        // token — it cannot forge or name an unregistered face.
+        let token = sys.validated_fallback(font_b).unwrap();
         let pa = sys.add_provider(Box::new(MixedProvider {
             primary_class: TextRenderClass::Outline,
             family: "Primary".into(),
             fallback_char: '🌟',
-            fallback_target: font_b,
-            fallback_class: TextRenderClass::Bitmap,
+            fallback: token,
         }));
         let font_a = sys
             .register_face(
@@ -1008,26 +1062,40 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fallback_target_degrades_to_bitmap_not_panic() {
-        // A provider that names an UNREGISTERED fallback target must degrade to
-        // the reserved bitmap face in the infallible layout path — never panic,
-        // never emit an unregistered id.
+    fn fallback_to_unregistered_target_is_rejected_at_setup() {
+        // The registry refuses to mint a fallback token for an unregistered
+        // FontId — loudly, at setup — rather than silently coercing to bitmap
+        // later. Because the token is the only way to build a Fallback route,
+        // an unregistered fallback is unrepresentable downstream.
+        let sys = CompositeTextSystem::new();
+        let bogus = FontIdAllocator::new().allocate().unwrap();
+        assert_eq!(
+            sys.validated_fallback(bogus),
+            Err(RegistryError::UnknownFont(bogus))
+        );
+    }
+
+    #[test]
+    fn fallback_render_class_is_derived_from_registry_not_provider() {
+        // The fallback face is registered as Msdf; the primary is Outline. The
+        // provider carries only a validated token — it cannot supply a render
+        // class — so the fallback run's class is read from the registry's
+        // FaceRecord (Msdf), proving the registry is authoritative and the
+        // router applies no bitmap default.
         let mut sys = CompositeTextSystem::new();
-        let bogus_target = FontIdAllocator::new().allocate().unwrap();
+        let pb = sys.add_provider(mock(TextRenderClass::Msdf, "Fb", 5));
+        let font_b = sys
+            .register_face(pb, LocalFontId(0), FontSource::Bytes, vec!["Fb".into()])
+            .unwrap();
+        let token = sys.validated_fallback(font_b).unwrap();
         let pa = sys.add_provider(Box::new(MixedProvider {
             primary_class: TextRenderClass::Outline,
-            family: "Primary".into(),
+            family: "Pri".into(),
             fallback_char: '*',
-            fallback_target: bogus_target,
-            fallback_class: TextRenderClass::Slug,
+            fallback: token,
         }));
         let font_a = sys
-            .register_face(
-                pa,
-                LocalFontId(0),
-                FontSource::Bytes,
-                vec!["Primary".into()],
-            )
+            .register_face(pa, LocalFontId(0), FontSource::Bytes, vec!["Pri".into()])
             .unwrap();
 
         let spec = LayoutSpec {
@@ -1037,9 +1105,10 @@ mod tests {
         let runs = sys.layout("A*", &spec, None);
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].font_id, font_a);
-        // Unregistered fallback target → reserved bitmap face, Bitmap lane.
-        assert_eq!(runs[1].font_id, FontId::BITMAP);
-        assert_eq!(runs[1].render_class, TextRenderClass::Bitmap);
+        assert_eq!(runs[0].render_class, TextRenderClass::Outline);
+        // Fallback run: identity AND render class come from font_b's record.
+        assert_eq!(runs[1].font_id, font_b);
+        assert_eq!(runs[1].render_class, TextRenderClass::Msdf);
     }
 
     // ---- Outline routing, no trait-default fallback ----------------------
