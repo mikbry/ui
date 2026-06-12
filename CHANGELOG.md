@@ -10,6 +10,22 @@ breaking changes can land on minor bumps).
 ### Added
 - (next sprint's additions land here)
 
+### Security
+- **Bump pyo3 0.28.3 → 0.29.0 (#114).** Resolves two RUSTSEC advisories
+  published 2026-06-11 against pyo3 0.28.x, both fixed in 0.29.0:
+  - **RUSTSEC-2026-0176** — out-of-bounds read (memory exposure) in
+    `BoundListIterator`/`BoundTupleIterator` `nth`/`nth_back`, where a large
+    `n` could overflow the unchecked `index + n` addition before the
+    bounds-check (PyO3/pyo3#6086).
+  - **RUSTSEC-2026-0177** — missing `Sync` bound on
+    `PyCFunction::new_closure` closures, allowing concurrent closure
+    execution (especially under free-threaded Python) without a `Sync`
+    guarantee (PyO3/pyo3#6096).
+
+  mkui-py does not call any of the affected APIs directly, so the bump is a
+  pure dependency update with no source changes. Unblocks `cargo-deny` +
+  `cargo-audit` CI, which treat `vulnerability` as `error`.
+
 ### Fixed
 - **wgpu live-resize jerk eliminated on macOS (#99).** PR #98 (#97) fixed
   the HiDPI viewport-units math but the visible scale-snap on shrinking
