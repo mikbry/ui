@@ -37,11 +37,14 @@
 //!   same, for the x-range split into columns, excluding `|dx| < ε`
 //!   (vertical/near-vertical) segments.
 //!
-//! Within each band the members are ordered by **descending scan-axis top
-//! endpoint** (descending `max(p0.y, p2.y)` for rows, descending
-//! `max(p0.x, p2.x)` for columns) as Slug's scanline rasterizer requires;
-//! exact ties break by ascending curve index for determinism. The encoding is
-//! a pure function of `(path, config)`, so re-encoding is byte-identical.
+//! Within each band the members are ordered by the **cross-axis curve
+//! extremum**, descending, as Slug's scanline rasterizer requires: horizontal
+//! rows sort by descending maximum **x** (rightmost-extending first), vertical
+//! columns by descending maximum **y** (topmost-extending first). The extremum
+//! is the true curve maximum over `t ∈ [0, 1]` — for a quadratic that includes
+//! the interior critical point, not just the endpoints. Exact ties break by
+//! ascending curve index for determinism. The encoding is a pure function of
+//! `(path, config)`, so re-encoding is byte-identical.
 //!
 //! # What #66 may and may not do
 //!
@@ -144,6 +147,40 @@ impl SlugCurve {
         let hi = self.p0.x.max(self.p1.x).max(self.p2.x);
         (lo, hi)
     }
+
+    /// True maximum x-coordinate of the curve over `t ∈ [0, 1]` (the larger
+    /// endpoint plus the interior critical point if one lies inside the span).
+    /// This is the horizontal-band sort key the Slug contract requires.
+    fn curve_extrema_max_x(&self) -> f32 {
+        quadratic_extremum_max(self.p0.x, self.p1.x, self.p2.x)
+    }
+
+    /// True maximum y-coordinate of the curve over `t ∈ [0, 1]` — the
+    /// vertical-band sort key the Slug contract requires.
+    fn curve_extrema_max_y(&self) -> f32 {
+        quadratic_extremum_max(self.p0.y, self.p1.y, self.p2.y)
+    }
+}
+
+/// Maximum of one component of a quadratic Bézier over `t ∈ [0, 1]`.
+///
+/// `B(t) = (1-t)²·a0 + 2(1-t)t·a1 + t²·a2`. The derivative vanishes at
+/// `t* = (a0 - a1) / (a0 - 2·a1 + a2)`; when `t*` falls strictly inside
+/// `(0, 1)` the interior value `B(t*)` is a candidate extremum, otherwise the
+/// maximum is at an endpoint. For a degenerate (line) component the denominator
+/// is ~0 and only the endpoints matter. We never sample at a fixed `t`.
+fn quadratic_extremum_max(a0: f32, a1: f32, a2: f32) -> f32 {
+    let mut max = a0.max(a2);
+    let denom = a0 - 2.0 * a1 + a2;
+    if denom.abs() > f32::EPSILON {
+        let t = (a0 - a1) / denom;
+        if t > 0.0 && t < 1.0 {
+            let mt = 1.0 - t;
+            let b = mt * mt * a0 + 2.0 * mt * t * a1 + t * t * a2;
+            max = max.max(b);
+        }
+    }
+    max
 }
 
 /// Glyph ink bounds carried alongside the records, font units y-up.
@@ -267,7 +304,7 @@ pub fn encode_slug_glyph(
         bounds.y_max,
         config.horizontal_bands(),
         SlugCurve::y_extent,
-        |c| c.p0.y.max(c.p2.y),
+        SlugCurve::curve_extrema_max_x,
     );
     let (vertical_bands, vertical_curve_indices) = build_bands(
         &curves,
@@ -275,7 +312,7 @@ pub fn encode_slug_glyph(
         bounds.x_max,
         config.vertical_bands(),
         SlugCurve::x_extent,
-        |c| c.p0.x.max(c.p2.x),
+        SlugCurve::curve_extrema_max_y,
     );
 
     Ok(SlugGlyph {
@@ -333,8 +370,9 @@ const AXIS_PARALLEL_EPSILON: f32 = 1e-6;
 
 /// Partition `[lo, hi]` into `count` equal bands. A curve joins a band when its
 /// scan-axis extent overlaps the band **and** the curve is not axis-parallel
-/// (`extent_span >= ε`). Members are ordered by descending `sort_key` (the
-/// scan-axis top endpoint), ties broken by ascending curve index, per the Slug
+/// (`extent_span >= ε`). Members are ordered by descending `sort_key` — the
+/// cross-axis curve extremum (max-x for horizontal rows, max-y for vertical
+/// columns) — with ascending curve index breaking ties, per the Slug
 /// scanline-rasterization invariant.
 fn build_bands(
     curves: &[SlugCurve],
@@ -376,8 +414,9 @@ fn build_bands(
                 members.push(idx as u32);
             }
         }
-        // Descending scan-axis top endpoint; ascending index breaks exact ties
-        // so the output stays deterministic and byte-stable.
+        // Descending cross-axis curve extremum (max-x for rows, max-y for
+        // columns); ascending index breaks exact ties so the output stays
+        // deterministic and byte-stable.
         members.sort_by(|&a, &b| {
             let ka = sort_key(&curves[a as usize]);
             let kb = sort_key(&curves[b as usize]);
@@ -571,10 +610,12 @@ mod tests {
                 },
             ]
         );
+        // Horizontal rows sort by descending max-x: curve1 (max-x 100) precedes
+        // curve2 (max-x 0).
         assert_eq!(glyph.horizontal_curve_indices, vec![1, 2, 1, 2]);
 
-        // Vertical bands (x): curve2 is vertical (|dx|=0) → excluded. curve0 and
-        // curve1 share a right-endpoint x of 100 → ascending index → [0, 1].
+        // Vertical bands (x): curve2 is vertical (|dx|=0) → excluded. Columns
+        // sort by descending max-y: curve1 (max-y 100) precedes curve0 (max-y 0).
         assert_eq!(
             glyph.vertical_bands,
             vec![
@@ -592,67 +633,100 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(glyph.vertical_curve_indices, vec![0, 1, 0, 1]);
+        assert_eq!(glyph.vertical_curve_indices, vec![1, 0, 1, 0]);
     }
 
     #[test]
-    fn slug_contract_line_sentinel_exclusion_and_descending_order() {
-        // One horizontal line, one diagonal line, one quadratic — open path so
-        // each command maps to exactly one curve index.
+    fn line_sentinel_and_axis_parallel_exclusion() {
+        // One horizontal line, one diagonal line — open path so each command
+        // maps to exactly one curve index.
         let path = VectorPath::new(
             vec![
                 PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
-                // curve0: horizontal line (|dy| == 0).
+                // curve0: horizontal line (|dy| == 0) — excluded from rows.
                 PathCommand::LineTo(Vec2::new(100.0, 0.0)),
                 // curve1: diagonal line — changes x and y.
                 PathCommand::LineTo(Vec2::new(0.0, 100.0)),
-                // curve2: quadratic rising to the top of the glyph.
-                PathCommand::QuadTo {
-                    control: Vec2::new(50.0, 150.0),
-                    to: Vec2::new(100.0, 200.0),
-                },
             ],
             FillRule::NonZero,
-            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 200.0)),
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0)),
         );
         let glyph = encode_slug_glyph(&path, &SlugConfig::new(2, 2, 1)).unwrap();
 
-        // Diagonal line carries the duplicated-endpoint sentinel (p1 == p2).
+        // Both lines carry the duplicated-endpoint sentinel (p1 == p2).
+        assert_eq!(glyph.curves[0].p1, glyph.curves[0].p2);
         let diagonal = glyph.curves[1];
         assert_eq!(diagonal.p1, diagonal.p2);
         assert_eq!(diagonal.p1, Vec2::new(0.0, 100.0));
 
-        // The horizontal segment (curve index 0) appears in no horizontal band.
-        assert!(
-            !glyph.horizontal_curve_indices.contains(&0),
-            "horizontal segment must be excluded from band rows"
-        );
+        // The horizontal segment (curve 0) is in no horizontal band; the
+        // diagonal (curve 1, which is not axis-parallel) is.
+        assert!(!glyph.horizontal_curve_indices.contains(&0));
+        assert!(glyph.horizontal_curve_indices.contains(&1));
+    }
 
-        // Within every horizontal band, members are ordered by descending
-        // scan-axis top endpoint y. curve2 (top y = 200) precedes curve1
-        // (top y = 100).
-        for band in &glyph.horizontal_bands {
-            let start = band.first_curve as usize;
-            let end = start + band.curve_count as usize;
-            let row = &glyph.horizontal_curve_indices[start..end];
-            let tops: Vec<f32> = row
-                .iter()
-                .map(|&i| {
-                    let c = glyph.curves[i as usize];
-                    c.p0.y.max(c.p2.y)
-                })
-                .collect();
-            let mut sorted = tops.clone();
-            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
-            assert_eq!(tops, sorted, "band rows must be sorted descending by y");
-            if row.len() == 2 {
-                assert_eq!(
-                    row,
-                    &[2, 1],
-                    "curve2 (top y=200) precedes curve1 (top y=100)"
-                );
-            }
-        }
+    /// Three diagonal line segments laid out as separate contours so their
+    /// max-x and max-y disambiguate the sort axis. Each is non-axis-parallel,
+    /// so all three land in a single full-height/full-width band.
+    ///
+    /// | curve | max-x | max-y |
+    /// |-------|-------|-------|
+    /// | 0     | 2.0   | 10.0  |
+    /// | 1     | 5.0   | 1.0   |
+    /// | 2     | 3.0   | 5.0   |
+    fn disambiguating_path() -> VectorPath {
+        VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(2.0, 10.0)), // curve0
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(5.0, 1.0)), // curve1
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(3.0, 5.0)), // curve2
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(5.0, 10.0)),
+        )
+    }
+
+    #[test]
+    fn horizontal_band_sorts_by_descending_max_x() {
+        // Single full-height row so all three curves share one band.
+        let glyph = encode_slug_glyph(&disambiguating_path(), &SlugConfig::new(1, 1, 1)).unwrap();
+        // max-x descending: curve1 (5) > curve2 (3) > curve0 (2).
+        assert_eq!(glyph.horizontal_curve_indices, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn vertical_band_sorts_by_descending_max_y() {
+        let glyph = encode_slug_glyph(&disambiguating_path(), &SlugConfig::new(1, 1, 1)).unwrap();
+        // max-y descending: curve0 (10) > curve2 (5) > curve1 (1).
+        assert_eq!(glyph.vertical_curve_indices, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn band_sort_axes_are_not_swapped() {
+        // The two orientations must produce *different* orderings; if the sort
+        // axes were swapped or applied globally these would coincide.
+        let glyph = encode_slug_glyph(&disambiguating_path(), &SlugConfig::new(1, 1, 1)).unwrap();
+        assert_ne!(
+            glyph.horizontal_curve_indices, glyph.vertical_curve_indices,
+            "horizontal (max-x) and vertical (max-y) sorts must differ"
+        );
+    }
+
+    #[test]
+    fn quadratic_extremum_uses_interior_critical_point() {
+        // Control point well above the endpoints: the true y-maximum is the
+        // interior critical point at t=0.5, not the endpoint max of 0.
+        let arch = SlugCurve {
+            p0: Vec2::new(0.0, 0.0),
+            p1: Vec2::new(50.0, 200.0),
+            p2: Vec2::new(100.0, 0.0),
+        };
+        assert_eq!(arch.curve_extrema_max_y(), 100.0);
+        // x is monotone across the endpoints, so max-x is the endpoint value.
+        assert_eq!(arch.curve_extrema_max_x(), 100.0);
     }
 
     #[test]
