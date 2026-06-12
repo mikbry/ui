@@ -55,5 +55,5 @@ libc = "0.2"
 cbindgen = "0.29.2"
 
 # Python bindings
-pyo3 = "0.28.3"
-pyo3-build-config = "0.28.3"
+pyo3 = "0.29.0"
+pyo3-build-config = "0.29.0"
