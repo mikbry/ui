@@ -18,14 +18,16 @@
 //! non-bitmap id through its allocator at **registration** time and records
 //! the `(ProviderId, LocalFontId)` it maps to. At **dispatch** time the router
 //! reverse-looks-up the public `FontId` to recover `(ProviderId, LocalFontId)`
-//! and hands the provider only its private [`LocalFontId`] — it never
+//! and hands the provider only its private `LocalFontId` — it never
 //! reconstructs a `FontId` from a provider-local value. Provider-local face
-//! IDs ([`LocalFontId`]) are crate-private and never leave this boundary, so
+//! IDs (`LocalFontId`) are crate-private and never leave this boundary, so
 //! two providers may both use `LocalFontId(0)` without colliding.
 //!
-//! Provider-produced [`LayoutRun`]s are rewritten so the public run carries the
-//! global `FontId`, the registry generation, and the selected
-//! [`TextRenderClass`].
+//! Provider-produced [`LayoutRun`]s carry a `RoutedRun` discriminator: a
+//! `Primary` run adopts the selected face's `FontId` / registry generation /
+//! [`TextRenderClass`], while a `Fallback` run keeps its provider-validated
+//! fallback target. This preserves mixed SFNT/bitmap layout (the #67 contract)
+//! instead of flattening every run onto the selected face.
 //!
 //! ## Generic-only boundary (#62)
 //!
@@ -102,15 +104,55 @@ pub(crate) enum RegistryError {
     GenerationOverflow(FontId),
 }
 
+/// How the router should label one provider-emitted [`LayoutRun`].
+///
+/// A provider that performs **layout-time fallback** — e.g. #67's SFNT face
+/// emitting bitmap runs for glyphs it lacks (emoji, CJK supplementary, missing
+/// ligatures) — classifies each run at the provider boundary and tags it so
+/// the router preserves the fallback identity instead of relabeling every run
+/// with the primary selected face. Crate-private: never part of the public
+/// surface.
+///
+/// `Fallback` has no shipping constructor in #62 (the only bundled provider is
+/// the single-lane bitmap adapter, which is always `Primary`); the outline
+/// provider in #67 constructs it, and the mixed-fallback tests here exercise
+/// it. The router already honors it — see `CompositeTextSystem::layout`.
+#[allow(dead_code)]
+pub(crate) enum RoutedRun {
+    /// Render via the provider's primary (selected) face. The router stamps the
+    /// selected `FontId`, its render class, and its registry generation.
+    Primary,
+    /// Render via an already-registered cross-provider fallback the provider
+    /// validated at layout time. The router preserves `target_font_id` +
+    /// `render_class` — after confirming the target is registered — rather than
+    /// relabeling the run to the primary face. The provider supplies a real,
+    /// registered `FontId` here (commonly [`FontId::BITMAP`], the one publicly
+    /// constructible id); it never forges one, and the router re-validates it.
+    Fallback {
+        target_font_id: FontId,
+        render_class: TextRenderClass,
+    },
+}
+
+/// A provider-emitted run plus its [`RoutedRun`] discriminator. The composite
+/// consumes these and returns plain public [`LayoutRun`]s with the routing
+/// applied. Crate-private wrapper so the public `LayoutRun` (owned by #61's
+/// `system.rs`) is not touched.
+pub(crate) struct RoutedLayoutRun {
+    pub(crate) routing: RoutedRun,
+    pub(crate) run: LayoutRun,
+}
+
 /// Crate-private adapter every backend implements so the composite can route
 /// to it. Distinct from the public [`TextSystem`] trait: its methods are keyed
-/// by the provider's own [`LocalFontId`], and the composite is the only caller.
+/// by the provider's own `LocalFontId`, and the composite is the only caller.
 ///
 /// "The provider-local adapter may be crate-private" (#62) — this trait, plus
-/// [`LocalFontId`] / [`ProviderId`], are exactly that boundary. Public APIs
-/// continue to expose only [`FontId`]; no `GlobalFaceId` type is introduced,
-/// and a provider is never handed a public `FontId` to act on — only its own
-/// `LocalFontId`.
+/// `LocalFontId` / `ProviderId`, are exactly that boundary. Public APIs
+/// continue to expose only [`FontId`]; no `GlobalFaceId` type is introduced. A
+/// provider dispatches only on its own `LocalFontId`; the one public `FontId` a
+/// provider ever names is a [`RoutedRun::Fallback`] target — a routing hint the
+/// router re-validates, not an id the provider dispatches on.
 pub(crate) trait FontProvider: Send + Sync + 'static {
     /// The render lane every face this provider exposes draws through.
     fn render_class(&self) -> TextRenderClass;
@@ -122,17 +164,22 @@ pub(crate) trait FontProvider: Send + Sync + 'static {
     /// decline (so a sibling provider can claim the query).
     fn resolve_local(&self, query: &FontQuery) -> Option<LocalFontId>;
 
-    /// Lay out `text` for provider-local face `local`. The provider keys on
-    /// `local`, **not** on `spec.font_id` (which still holds the public id);
-    /// the composite rewrites the returned runs to the global id + render
-    /// class + registry generation before they reach the caller.
+    /// Lay out `text` for provider-local face `local`, returning each run
+    /// tagged with a [`RoutedRun`] discriminator. The provider keys on `local`,
+    /// **not** on `spec.font_id` (which still holds the public id).
+    ///
+    /// A run tagged [`RoutedRun::Primary`] is relabeled by the router to the
+    /// selected face; a run tagged [`RoutedRun::Fallback`] keeps its
+    /// provider-validated fallback identity. This is what makes #67's
+    /// mixed SFNT/bitmap-fallback layout work: the provider — not the router —
+    /// decides per run which face renders it.
     fn layout_local(
         &self,
         local: LocalFontId,
         text: &str,
         spec: &LayoutSpec,
         max_width_px: Option<f32>,
-    ) -> Vec<LayoutRun>;
+    ) -> Vec<RoutedLayoutRun>;
 
     /// Rasterize `key` against provider-local face `local`. The provider keys
     /// on `local`; `key.font_id` still holds the public id (the composite does
@@ -361,10 +408,20 @@ impl CompositeTextSystem {
     }
 
     /// Current `font_generation` for a registered face — available to
-    /// downstream cache keys. Bumped by [`reload_face`](Self::reload_face).
-    /// `None` if `font_id` is unknown.
+    /// downstream cache keys. Bumped by `reload_face` on reload. `None` if
+    /// `font_id` is unknown.
     pub fn font_generation(&self, font_id: FontId) -> Option<u32> {
         self.registry.reverse.get(&font_id).map(|r| r.generation)
+    }
+
+    /// Generation of the reserved bitmap face, used when an unknown id degrades
+    /// to bitmap in the infallible layout path. `0` if somehow unregistered
+    /// (the seed always registers it).
+    fn bitmap_generation(&self) -> u32 {
+        self.registry
+            .reverse
+            .get(&FontId::BITMAP)
+            .map_or(0, |r| r.generation)
     }
 }
 
@@ -405,7 +462,7 @@ impl TextSystem for CompositeTextSystem {
         // layout is infallible: an unknown id — which the FontId opacity (#61)
         // makes callers unable to forge — degrades to the bitmap face rather
         // than panicking, and the rewritten run reports FontId::BITMAP.
-        let (public_id, provider_id, local, generation, render_class) =
+        let (selected_id, provider_id, local, selected_generation, selected_class) =
             match self.registry.reverse.get(&spec.font_id) {
                 Some(rec) => (
                     spec.font_id,
@@ -418,23 +475,48 @@ impl TextSystem for CompositeTextSystem {
                     FontId::BITMAP,
                     ProviderId(0),
                     LocalFontId(0),
-                    0,
+                    self.bitmap_generation(),
                     TextRenderClass::Bitmap,
                 ),
             };
 
         // Hand the provider its private local id; the spec still carries the
         // public id, which the provider ignores for identity.
-        let mut runs = self.providers[provider_id.0].layout_local(local, text, spec, max_width_px);
+        let routed = self.providers[provider_id.0].layout_local(local, text, spec, max_width_px);
 
-        // Rewrite every provider-local run so the public output carries the
-        // global FontId, the registry generation, and the selected lane.
-        for run in &mut runs {
-            run.font_id = public_id;
-            run.font_generation = generation;
-            run.render_class = render_class;
-        }
-        runs
+        // Apply each run's routing discriminator. `Primary` runs adopt the
+        // selected face; `Fallback` runs KEEP their provider-validated target so
+        // a mixed SFNT/bitmap layout (the #67 contract) is not flattened onto a
+        // single face. The router never invents a FontId — it only stamps the
+        // selected id, a re-validated fallback target, or the reserved
+        // FontId::BITMAP.
+        routed
+            .into_iter()
+            .map(|RoutedLayoutRun { routing, mut run }| {
+                let (font_id, render_class, font_generation) = match routing {
+                    RoutedRun::Primary => (selected_id, selected_class, selected_generation),
+                    RoutedRun::Fallback {
+                        target_font_id,
+                        render_class,
+                    } => match self.registry.reverse.get(&target_font_id) {
+                        Some(rec) => (target_font_id, render_class, rec.generation),
+                        // Unknown fallback target: degrade to the bitmap face,
+                        // consistent with how this infallible API handles an
+                        // unknown *selected* id (the fallible rasterize /
+                        // glyph_outline paths return TextError::UnknownFont).
+                        None => (
+                            FontId::BITMAP,
+                            TextRenderClass::Bitmap,
+                            self.bitmap_generation(),
+                        ),
+                    },
+                };
+                run.font_id = font_id;
+                run.render_class = render_class;
+                run.font_generation = font_generation;
+                run
+            })
+            .collect()
     }
 
     fn rasterize(&self, key: GlyphCacheKey) -> Result<GlyphImage, TextError> {
@@ -517,8 +599,16 @@ impl FontProvider for BitmapProvider {
         text: &str,
         spec: &LayoutSpec,
         max_width_px: Option<f32>,
-    ) -> Vec<LayoutRun> {
-        self.inner.layout(text, spec, max_width_px)
+    ) -> Vec<RoutedLayoutRun> {
+        // The bitmap face has exactly one lane, so every run is Primary.
+        self.inner
+            .layout(text, spec, max_width_px)
+            .into_iter()
+            .map(|run| RoutedLayoutRun {
+                routing: RoutedRun::Primary,
+                run,
+            })
+            .collect()
     }
 
     fn rasterize_local(
@@ -540,6 +630,36 @@ mod tests {
     use crate::canonical::{Affine2Fixed, VariationSettings};
     use crate::outline::{OutlineBounds, OutlineCommand};
     use crate::system::{GlyphFormat, LayoutGlyph};
+
+    /// Build a single-glyph [`LayoutRun`] for `glyph_id` under `spec`. Shared by
+    /// the mock providers; the composite overwrites identity fields per routing.
+    fn run_for(glyph_id: u32, spec: &LayoutSpec) -> LayoutRun {
+        LayoutRun {
+            font_id: spec.font_id,
+            render_class: TextRenderClass::Bitmap,
+            font_generation: spec.font_generation,
+            font_size_px: spec.font_size_px,
+            variations: spec.variations.clone(),
+            synthesis_flags: spec.synthesis_flags,
+            hinting: spec.hinting,
+            origin_x_px: 0.0,
+            origin_y_px: 0.0,
+            line_y_baseline_px: 0.0,
+            line_ascent_px: 0.0,
+            line_descent_px: 0.0,
+            glyphs: vec![LayoutGlyph {
+                glyph_id,
+                x_px: 0.0,
+                y_px: 0.0,
+                x_advance_px: 0.0,
+                x_offset_px: 0.0,
+                y_offset_px: 0.0,
+                cluster: 0,
+                subpixel_variant: 0,
+                format: GlyphFormat::Alpha,
+            }],
+        }
+    }
 
     /// Configurable in-crate mock provider. Each instance exposes one local
     /// face (`LocalFontId(0)`); a distinct `tag` byte proves which provider a
@@ -573,34 +693,13 @@ mod tests {
             text: &str,
             spec: &LayoutSpec,
             _max_width_px: Option<f32>,
-        ) -> Vec<LayoutRun> {
-            // Emit one run carrying the public font id from `spec` and a
-            // deliberately wrong render class; the composite must overwrite
-            // both (and the generation).
-            vec![LayoutRun {
-                font_id: spec.font_id,
-                render_class: TextRenderClass::Bitmap,
-                font_generation: spec.font_generation,
-                font_size_px: spec.font_size_px,
-                variations: spec.variations.clone(),
-                synthesis_flags: spec.synthesis_flags,
-                hinting: spec.hinting,
-                origin_x_px: 0.0,
-                origin_y_px: 0.0,
-                line_y_baseline_px: 0.0,
-                line_ascent_px: 0.0,
-                line_descent_px: 0.0,
-                glyphs: vec![LayoutGlyph {
-                    glyph_id: text.chars().next().map_or(0, |c| c as u32),
-                    x_px: 0.0,
-                    y_px: 0.0,
-                    x_advance_px: 0.0,
-                    x_offset_px: 0.0,
-                    y_offset_px: 0.0,
-                    cluster: 0,
-                    subpixel_variant: 0,
-                    format: GlyphFormat::Alpha,
-                }],
+        ) -> Vec<RoutedLayoutRun> {
+            // Emit one Primary run with a deliberately wrong render class; the
+            // composite must overwrite the identity fields to the selected face.
+            let glyph_id = text.chars().next().map_or(0, |c| c as u32);
+            vec![RoutedLayoutRun {
+                routing: RoutedRun::Primary,
+                run: run_for(glyph_id, spec),
             }]
         }
 
@@ -640,6 +739,70 @@ mod tests {
             tag,
             canned_outline: None,
         })
+    }
+
+    /// A provider that performs **layout-time fallback**, like #67's SFNT face:
+    /// it renders most glyphs through its own (primary) lane but emits a
+    /// cross-provider fallback run for `fallback_char` — tagged
+    /// [`RoutedRun::Fallback`] with an already-registered `fallback_target`.
+    struct MixedProvider {
+        primary_class: TextRenderClass,
+        family: String,
+        fallback_char: char,
+        fallback_target: FontId,
+        fallback_class: TextRenderClass,
+    }
+
+    impl FontProvider for MixedProvider {
+        fn render_class(&self) -> TextRenderClass {
+            self.primary_class
+        }
+
+        fn families(&self) -> Vec<String> {
+            vec![self.family.clone()]
+        }
+
+        fn resolve_local(&self, query: &FontQuery) -> Option<LocalFontId> {
+            match &query.family {
+                Some(f) if f.as_str() == self.family => Some(LocalFontId(0)),
+                _ => None,
+            }
+        }
+
+        fn layout_local(
+            &self,
+            _local: LocalFontId,
+            text: &str,
+            spec: &LayoutSpec,
+            _max_width_px: Option<f32>,
+        ) -> Vec<RoutedLayoutRun> {
+            // One run per char: the unsupported `fallback_char` routes to the
+            // validated fallback target; every other char stays Primary.
+            text.chars()
+                .map(|ch| {
+                    let routing = if ch == self.fallback_char {
+                        RoutedRun::Fallback {
+                            target_font_id: self.fallback_target,
+                            render_class: self.fallback_class,
+                        }
+                    } else {
+                        RoutedRun::Primary
+                    };
+                    RoutedLayoutRun {
+                        routing,
+                        run: run_for(ch as u32, spec),
+                    }
+                })
+                .collect()
+        }
+
+        fn rasterize_local(
+            &self,
+            _local: LocalFontId,
+            _key: &GlyphCacheKey,
+        ) -> Result<GlyphImage, TextError> {
+            Err(TextError::UnknownGlyph(0))
+        }
     }
 
     /// Build a cache key for the given public `FontId` (canonical
@@ -786,6 +949,97 @@ mod tests {
         assert_eq!(runs[0].font_id, id);
         assert_ne!(runs[0].font_id, FontId::BITMAP);
         assert_eq!(runs[0].render_class, TextRenderClass::Slug);
+    }
+
+    // ---- Mixed-fallback runs preserved (the #67 contract) ----------------
+
+    #[test]
+    fn mixed_fallback_runs_are_preserved_not_relabeled() {
+        // Provider B owns the bitmap-class fallback face; provider A (Outline)
+        // performs layout-time fallback to it for the glyph it lacks ('🌟').
+        let mut sys = CompositeTextSystem::new();
+
+        let pb = sys.add_provider(mock(TextRenderClass::Bitmap, "FallbackFace", 9));
+        let font_b = sys
+            .register_face(
+                pb,
+                LocalFontId(0),
+                FontSource::Bytes,
+                vec!["FallbackFace".into()],
+            )
+            .unwrap();
+
+        // Provider A must be configured with the *already-registered* fallback
+        // target — it never forges a FontId.
+        let pa = sys.add_provider(Box::new(MixedProvider {
+            primary_class: TextRenderClass::Outline,
+            family: "Primary".into(),
+            fallback_char: '🌟',
+            fallback_target: font_b,
+            fallback_class: TextRenderClass::Bitmap,
+        }));
+        let font_a = sys
+            .register_face(
+                pa,
+                LocalFontId(0),
+                FontSource::Bytes,
+                vec!["Primary".into()],
+            )
+            .unwrap();
+
+        let spec = LayoutSpec {
+            font_id: font_a,
+            ..Default::default()
+        };
+        let runs = sys.layout("A🌟C", &spec, None);
+        assert_eq!(runs.len(), 3);
+
+        // Primary runs adopt the selected (Outline) face...
+        assert_eq!(runs[0].font_id, font_a);
+        assert_eq!(runs[0].render_class, TextRenderClass::Outline);
+        assert_eq!(runs[2].font_id, font_a);
+        assert_eq!(runs[2].render_class, TextRenderClass::Outline);
+
+        // ...but the fallback run KEEPS the validated bitmap target, instead of
+        // being relabeled to font_a/Outline (which would break #67's contract).
+        assert_eq!(runs[1].font_id, font_b);
+        assert_eq!(runs[1].render_class, TextRenderClass::Bitmap);
+        assert_ne!(runs[1].font_id, font_a);
+    }
+
+    #[test]
+    fn unknown_fallback_target_degrades_to_bitmap_not_panic() {
+        // A provider that names an UNREGISTERED fallback target must degrade to
+        // the reserved bitmap face in the infallible layout path — never panic,
+        // never emit an unregistered id.
+        let mut sys = CompositeTextSystem::new();
+        let bogus_target = FontIdAllocator::new().allocate().unwrap();
+        let pa = sys.add_provider(Box::new(MixedProvider {
+            primary_class: TextRenderClass::Outline,
+            family: "Primary".into(),
+            fallback_char: '*',
+            fallback_target: bogus_target,
+            fallback_class: TextRenderClass::Slug,
+        }));
+        let font_a = sys
+            .register_face(
+                pa,
+                LocalFontId(0),
+                FontSource::Bytes,
+                vec!["Primary".into()],
+            )
+            .unwrap();
+
+        let spec = LayoutSpec {
+            font_id: font_a,
+            ..Default::default()
+        };
+        let runs = sys.layout("A*", &spec, None);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].font_id, font_a);
+        // Unregistered fallback target → reserved bitmap face, Bitmap lane.
+        assert_eq!(runs[1].font_id, FontId::BITMAP);
+        assert_eq!(runs[1].render_class, TextRenderClass::Bitmap);
     }
 
     // ---- Outline routing, no trait-default fallback ----------------------
