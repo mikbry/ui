@@ -8,7 +8,7 @@
 //! in this module.
 //!
 //! Coordinates are `f32` in the source geometry's own units. For glyph
-//! outlines that is *font units, y-up* (see [`crate::outline::GlyphOutline`]).
+//! outlines that is *font units, y-up* (see [`crate::GlyphOutline`]).
 
 /// A 2D point/vector in path space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,7 +88,7 @@ impl Bounds {
 }
 
 /// A path-local 2×3 affine transform in `f32` (distinct from the canonical
-/// fixed-point [`crate::fixed::Affine2Fixed`] used in cache keys). For the
+/// fixed-point [`mkui_text::Affine2Fixed`] used in cache keys). For the
 /// Sprint 7 glyph lane this is always [`Affine2::IDENTITY`] — outline points
 /// arrive pre-resolved and are never re-transformed here.
 #[derive(Debug, Clone, Copy, PartialEq)]

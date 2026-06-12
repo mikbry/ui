@@ -1,13 +1,13 @@
 //! Conversion from `mkui-text`'s resolved glyph-outline contract into the
 //! backend-neutral path model.
 //!
-//! The outline request/data types ([`OutlineKey`], [`GlyphOutline`],
+//! The outline request/data types ([`crate::OutlineKey`], [`GlyphOutline`],
 //! [`OutlineCommand`], [`OutlineBounds`]) and the canonical identity values are
 //! **owned by `mkui-text`** (#61) — they are text/font domain types and are
 //! re-exported here purely for consumer convenience. This module adds only the
 //! glue: turning a fully-resolved [`GlyphOutline`] into a [`VectorPath`].
 //!
-//! A [`GlyphOutline`] is already fully resolved for its [`OutlineKey`]: the
+//! A [`GlyphOutline`] is already fully resolved for its [`crate::OutlineKey`]: the
 //! provider applied variation, synthesis, and the outline-local affine exactly
 //! once, and its `ink_bounds` match its points. Conversion here is therefore a
 //! faithful 1:1 copy — it does **not** reapply variation, synthesis, transform,
