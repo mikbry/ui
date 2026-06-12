@@ -8,7 +8,7 @@
 
 use mkui_text::{
     BitmapTextSystem, FontId, GlyphFormat, HintingMode, LayoutSpec, TextAlign as MkuiTextAlign,
-    TextSystem,
+    TextSystem, VariationSettings,
 };
 
 use crate::types::{
@@ -70,15 +70,19 @@ fn tessellate_quad(triangles: &mut Vec<GuiTriangle>, quad: Quad) {
 fn tessellate_text(triangles: &mut Vec<GuiTriangle>, text: &Text, system: &dyn TextSystem) {
     let line_height = text.style.line_height_px.max(1.0);
     let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
+    // The bitmap face is the only face this renderer drives in Sprint 7, so a
+    // font handle is always the reserved bitmap identity. `FontId` is opaque
+    // (no public raw constructor); callers re-resolve through the text system
+    // rather than forging an id from `text.style.font`.
     let spec = LayoutSpec {
-        font_id: FontId(text.style.font.0),
+        font_id: FontId::BITMAP,
         font_generation: 0,
         font_size_px: text.style.font_size_px,
         line_height_px: line_height,
         align: map_align(text.style.align),
         max_lines: Some(max_lines),
         hinting: HintingMode::None,
-        variation_axes: 0,
+        variations: VariationSettings::empty(),
         synthesis_flags: 0,
     };
 
