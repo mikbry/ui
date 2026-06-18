@@ -443,6 +443,35 @@ impl WgpuApp {
         }
     }
 
+    /// Whether a `CursorMoved` event should drive the M2 redraw bridge this
+    /// tick (#101). The active-resize-window state machine
+    /// ([`WgpuApp::in_active_resize_window`]) is **shared infra** — armed,
+    /// decayed, and unit-tested identically on every native target — but the
+    /// cursor-driven redraw it gates is **macOS-only**: only macOS exhibits
+    /// the fast-shrink residual vibration #101 fixes, and the brief scopes the
+    /// fix to macOS ("macos fast-resize residual vibration"). On Windows/Linux
+    /// the bridge folds to a constant `false` at compile time (`#[cfg]`, not a
+    /// runtime `cfg!` branch), so ordinary cursor motion during a resize stays
+    /// quiescent there — no behavior change on those platforms.
+    ///
+    /// The shared predicate is still evaluated on every target so the state
+    /// machine and its backing fields stay live (and identically exercised by
+    /// the cross-platform unit tests); only the *bridge action* gates on the
+    /// platform.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cursor_moved_should_request_redraw(&self) -> bool {
+        let in_active_resize = self.in_active_resize_window();
+        #[cfg(target_os = "macos")]
+        {
+            in_active_resize
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = in_active_resize;
+            false
+        }
+    }
+
     /// True while the resize pump is armed — i.e. `about_to_wait` should
     /// drive another redraw this tick. A pure read: the pump is *not*
     /// drained by being asked whether to redraw (StoneSketch-style — the
@@ -669,9 +698,12 @@ impl ApplicationHandler for WgpuApp {
                 // than `Resized` cadence. It is NOT M1 (re-arming the pump):
                 // cap-exhaustion was ruled out, so re-arming would not help and
                 // the circular `resize_redraw_pending > 0` guard is avoided.
-                // The `in_active_resize_window` timeout keeps ordinary idle
-                // pointer motion quiescent once the gesture stops.
-                if self.in_active_resize_window() {
+                // The bridge is **macOS-only** (see
+                // `cursor_moved_should_request_redraw`): only macOS exhibits
+                // the fast-shrink residual, so Windows/Linux cursor motion
+                // stays quiescent. The active-resize-window timeout keeps even
+                // macOS quiescent once the gesture stops.
+                if self.cursor_moved_should_request_redraw() {
                     if let Some(state) = self.state.as_ref() {
                         state.window.request_redraw();
                     }
@@ -1222,5 +1254,59 @@ mod tests {
         // about_to_wait would saturate here, not wrap; the window then closes
         // because the arm frame can never advance past the saturated counter.
         assert_eq!(app.frame_counter.saturating_add(1), u32::MAX);
+    }
+
+    // ---- #101: M2 bridge is macOS-only (Codex round-N P1) ----
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cursor_moved_bridge_fires_inside_window_on_macos() {
+        // On macOS — the sole platform with the #101 fast-shrink residual —
+        // a CursorMoved inside the active-resize window DOES drive the bridge.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        assert!(app.in_active_resize_window(), "precondition: window open");
+        assert!(
+            app.cursor_moved_should_request_redraw(),
+            "macOS: cursor-during-active-resize-window must drive the M2 bridge"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cursor_moved_bridge_quiescent_outside_window_on_macos() {
+        // Even on macOS, the bridge stays quiescent once the window expires —
+        // the idle-quiescence invariant holds regardless of platform.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        app.frame_counter = RESIZE_ACTIVE_WINDOW_FRAMES;
+        assert!(
+            !app.in_active_resize_window(),
+            "precondition: window expired"
+        );
+        assert!(
+            !app.cursor_moved_should_request_redraw(),
+            "macOS: cursor outside the active-resize window must not redraw"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn cursor_moved_bridge_disabled_on_non_macos() {
+        // Codex round-N P1: the M2 bridge is scoped to macOS. On Windows/Linux,
+        // even with the active-resize window wide open, a CursorMoved must NOT
+        // drive a redraw — those platforms have no fast-shrink residual and the
+        // brief requires them unchanged. The shared state machine itself still
+        // works (`in_active_resize_window` reads true); only the bridge gates.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.arm_resize_redraw_pump();
+        assert!(
+            app.in_active_resize_window(),
+            "shared state machine still tracks the window on non-macOS"
+        );
+        assert!(
+            !app.cursor_moved_should_request_redraw(),
+            "non-macOS: the M2 cursor bridge must be compiled out / disabled"
+        );
     }
 }

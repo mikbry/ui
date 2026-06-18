@@ -115,9 +115,14 @@ breaking changes can land on minor bumps).
   "not resizing" exactly when the cursor bridge is needed — Codex 2026-06-09
   #101 review P1#2). `about_to_wait` advances a monotonic `frame_counter`;
   `Resized`/`ScaleFactorChanged` stamp `last_resize_frame`; the window closes on
-  the timeout so idle pointer motion after the gesture stays quiescent. No
-  public API change, no new deps, no MSRV bump. ADR 0006 §"Resize-active redraw
-  pump" documents the M2 expansion + the explicit-timeout guard.
+  the timeout so idle pointer motion after the gesture stays quiescent. The
+  bridge is **macOS-only** — the fast-shrink residual is a macOS Metal artifact,
+  so the `CursorMoved → request_redraw()` action is compile-time gated with
+  `#[cfg(target_os = "macos")]` and folds to a constant `false` on Windows/Linux
+  (those platforms are unchanged); the active-resize-window state machine itself
+  is shared infra, compiled + unit-tested on every native target. No public API
+  change, no new deps, no MSRV bump. ADR 0006 §"Resize-active redraw pump"
+  documents the M2 expansion + the explicit-timeout guard + the platform gating.
 
   **Operator/hardware gates deferred** (require a Retina macOS display + the
   Codex reviewer, unavailable to the autonomous implementing agent): pre-impl

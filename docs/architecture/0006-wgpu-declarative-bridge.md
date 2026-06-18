@@ -284,6 +284,19 @@ the active-resize window expires on the frame-count timeout. These invariants
 are asserted by unit tests (`active_resize_window_expires_after_timeout`,
 `active_resize_window_guard_independent_of_drained_pump`).
 
+The M2 bridge is **macOS-only**. The fast-shrink residual is a macOS Metal
+swapchain artifact; Windows and Linux do not exhibit it, and the brief scopes
+the fix to macOS. So the *bridge action* — `CursorMoved → request_redraw()` —
+is compile-time gated with `#[cfg(target_os = "macos")]` in
+`cursor_moved_should_request_redraw`, folding to a constant `false` on other
+native targets (no runtime branch, no behavior change on Win/Linux). The
+active-resize-window **state machine** (`frame_counter`, `last_resize_frame`,
+`in_active_resize_window`) is *not* gated — it compiles, runs, and is
+unit-tested identically on every native target; only the platform-specific
+redraw it gates is conditional. `cursor_moved_bridge_disabled_on_non_macos`
+asserts the off-macOS disabled path; `cursor_moved_bridge_fires_inside_window_on_macos`
+asserts macOS keeps the behavior.
+
 The budget is consumed one frame at a time on each successful
 `RenderOutcome::Drawn` (in `handle_render_outcome_for_redraw`). `Skipped`
 and `NeedsReconfigure` do **not** consume budget. `RenderOutcome::Drawn`
