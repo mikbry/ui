@@ -367,10 +367,8 @@ impl SfntFace {
                 }
                 // Macintosh Roman (ASCII subset for Latin names) — kept as a
                 // fallback so a Windows record always wins when present.
-                1 => {
-                    if mac_fallback.is_none() && raw.is_ascii() {
-                        mac_fallback = Some(String::from_utf8_lossy(raw).into_owned());
-                    }
+                1 if mac_fallback.is_none() && raw.is_ascii() => {
+                    mac_fallback = Some(String::from_utf8_lossy(raw).into_owned());
                 }
                 _ => {}
             }
