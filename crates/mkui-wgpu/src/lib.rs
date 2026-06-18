@@ -60,6 +60,7 @@ pub mod pointer;
 pub mod prelude;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod render;
+pub mod render_command;
 pub mod renderer;
 pub mod theme;
 pub mod types;
@@ -75,8 +76,16 @@ pub use pointer::{hit_test, ClickHit, PointerState};
 pub use render::offscreen::{OffscreenError, OffscreenRenderer};
 #[cfg(not(target_arch = "wasm32"))]
 pub use render::{RenderOutcome, Renderer};
+pub use render_command::{build_render_commands, classify_primitive, RenderCommand, RenderLane};
 pub use renderer::WgpuRenderer;
 pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
+
+// Native Slug adapter re-exports (#66), available only when the `slug` feature
+// is enabled. The adapter crate owns the GPU packing + WGSL coverage pipeline;
+// mkui-wgpu re-exports its surface so consumers don't also name the adapter
+// crate directly.
+#[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
+pub use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
 
 // Low-level types
 pub use types::{

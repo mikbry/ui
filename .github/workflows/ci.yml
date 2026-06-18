@@ -144,6 +144,44 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-gpu-offscreen-
       - run: cargo test -p mkui-wgpu --features gpu-tests --locked
+      # Slug lane GPU acceptance tests (#66) — hand-authored curve/band records
+      # rendered through the same Vulkan/Lavapipe contract. Needs both the #106
+      # harness (`gpu-tests`) and the adapter (`slug`).
+      - run: cargo test -p mkui-wgpu --features "gpu-tests,slug" --locked
+
+  feature-slug:
+    # Package-aware rows for the #66 Slug lane (extends the #105 matrix): the
+    # new adapter crate, the wgpu backend with `slug` on, and the example with
+    # `slug` on. These feature combinations are off by default, so `--workspace`
+    # never exercises them — without this job a Slug-only compile or lint break
+    # slips through. Pure compile + lint (no GPU), so it runs on the default
+    # displayless runner.
+    name: feature-slug
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-feature-slug-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-feature-slug-
+      # The new acyclic adapter crate (default features).
+      - run: cargo clippy -p mkui-vector2d-wgpu --all-targets --locked -- -D warnings
+      - run: cargo test -p mkui-vector2d-wgpu --locked
+      # The wgpu backend with the Slug lane on.
+      - run: cargo clippy -p mkui-wgpu --features slug --all-targets --locked -- -D warnings
+      - run: cargo test -p mkui-wgpu --features slug --locked
+      # The example forwarding `slug` down to the backend.
+      - run: cargo clippy -p atoms-on-wgpu --features slug --all-targets --locked -- -D warnings
+      - run: cargo build -p atoms-on-wgpu --features slug --locked
 
   test-doc:
     name: test-doc

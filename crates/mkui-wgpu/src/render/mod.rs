@@ -65,12 +65,22 @@ use crate::{tessellate_scene_with_text, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
+#[cfg(feature = "slug")]
+use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
+
 /// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
 /// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
 /// ICD; the dedicated Lavapipe GPU job enables it. Reused by the #66 Slug and
 /// #67 font GPU acceptance tests.
 #[cfg(feature = "gpu-tests")]
 pub mod offscreen;
+
+/// Offscreen GPU acceptance tests for the Slug lane (#66). Compiled only in
+/// test builds that enable both `gpu-tests` (the #106 surfaceless harness) and
+/// `slug` (the adapter). They hand-author curve/band records — no font parser
+/// (that is #67) — and run on the same Vulkan/Lavapipe contract as #106.
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod slug_gpu;
 
 /// Preferred MSAA sample count for the UI pass.
 ///
@@ -126,6 +136,12 @@ pub struct Renderer {
     /// pass. `None` on the 1× fallback, where the UI pass writes the
     /// swapchain view directly.
     msaa_color_view: Option<wgpu::TextureView>,
+    /// Native Slug glyph adapter (#66), present only when the `slug` feature is
+    /// enabled. Built once against the swapchain format; invoked inside the UI
+    /// render pass so Slug glyphs composite in scene paint order. Off-feature
+    /// builds never construct it (v0.9.3 bitmap-only behavior).
+    #[cfg(feature = "slug")]
+    slug_adapter: SlugAdapter,
 }
 
 impl Renderer {
@@ -197,6 +213,9 @@ impl Renderer {
         let ui_pipeline = build_ui_pipeline(&device, format, sample_count);
         let msaa_color_view = create_msaa_color_view(&device, width, height, format, sample_count);
 
+        #[cfg(feature = "slug")]
+        let slug_adapter = SlugAdapter::new(&device, format);
+
         Ok(Self {
             _window: window,
             surface,
@@ -206,6 +225,8 @@ impl Renderer {
             sample_count,
             ui_pipeline,
             msaa_color_view,
+            #[cfg(feature = "slug")]
+            slug_adapter,
         })
     }
 
@@ -293,6 +314,15 @@ impl Renderer {
                 })
         });
 
+        // Pack any Slug glyphs the scene carries before the pass opens so the
+        // prepared buffers outlive it. `None` (the #66 default — no Slug font
+        // provider lands until #67) skips the lane entirely, preserving the
+        // bitmap-only frame. The Slug draw is issued *inside* the same render
+        // pass, after the UI triangles, so it composites in scene paint order
+        // and stays load/store compatible with the UI lane.
+        #[cfg(feature = "slug")]
+        let prepared_slug = self.prepare_scene_slug(scene);
+
         {
             let color_attachment = match self.msaa_color_view.as_ref() {
                 Some(msaa) => wgpu::RenderPassColorAttachment {
@@ -327,6 +357,12 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..vertices.len() as u32, 0..1);
             }
+            // Slug glyph lane (#66): drawn after the UI triangles within the
+            // same pass so later-in-scene glyphs composite over earlier UI.
+            #[cfg(feature = "slug")]
+            if let Some(prepared) = prepared_slug.as_ref() {
+                self.slug_adapter.draw(&mut pass, prepared);
+            }
         }
 
         self.queue.submit(Some(encoder.finish()));
@@ -337,6 +373,37 @@ impl Renderer {
         }
         Ok(RenderOutcome::Drawn)
     }
+
+    /// Pack the scene's Slug glyphs (#66) into a [`PreparedSlug`] ready to draw,
+    /// or `None` when the scene carries none. Projected against the logical
+    /// viewport, matching the UI lane's `gui_vertices` projection.
+    #[cfg(feature = "slug")]
+    fn prepare_scene_slug(&self, scene: &Scene) -> Option<PreparedSlug> {
+        let glyphs = scene_slug_glyphs(scene);
+        if glyphs.is_empty() {
+            return None;
+        }
+        self.slug_adapter.prepare(
+            &self.device,
+            &self.queue,
+            [scene.viewport.width, scene.viewport.height],
+            &glyphs,
+        )
+    }
+}
+
+/// Extract the Slug-lane glyphs a scene wants drawn. This is the integration
+/// seam between `mkui-wgpu`'s renderer and the `mkui-vector2d-wgpu` adapter.
+///
+/// Sprint 7 (#66) ships the GPU lane and its packing/pipeline but **no Slug
+/// font provider** — that is #67. Until a composite text system can resolve a
+/// Slug-class face into encoded blobs, no scene primitive yields Slug glyphs, so
+/// this returns empty and the live frame stays bitmap-only. The adapter's
+/// coverage pipeline is exercised end-to-end by the offscreen GPU acceptance
+/// tests, which hand-author the curve/band records directly.
+#[cfg(feature = "slug")]
+fn scene_slug_glyphs(_scene: &Scene) -> Vec<PlacedSlugGlyph> {
+    Vec::new()
 }
 
 /// Shared `DeviceDescriptor` for the windowed [`Renderer`] and the surfaceless
