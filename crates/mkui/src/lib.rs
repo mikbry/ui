@@ -39,9 +39,12 @@
 //!   `app` (backend state), `renderer` (output surface), `components`
 //!   (backend-specific projections of the contract), `high_level` (the
 //!   `Mkui` entry point), and `prelude`. Depends on [`mkui_core`] only.
-//! - **Bridge crate** (this crate) — picks one backend at compile time via
-//!   Cargo features (`web`, `console`) and re-exports its `Mkui` type
-//!   plus the shared contract.
+//! - **Bridge crate** (this crate) — picks **exactly one** backend at compile
+//!   time via Cargo features (`web`, `console`, or `wgpu`) and re-exports its
+//!   `Mkui` type plus the shared contract. Enabling more than one primary
+//!   backend feature is a hard compile error (see ADR 0006): there is no
+//!   silent precedence, so feature unification cannot quietly swap the backend
+//!   a consumer intended.
 //!
 //! Adding a new backend means copying the five-module template, depending on
 //! [`mkui_core`], implementing `Mkui::new() / .child(...) / .run()`, and
@@ -62,7 +65,9 @@
 //!
 //! With `--features web`, [`Mkui`] resolves to `mkui_web::Mkui` (DOM
 //! rendering via `wasm-bindgen`). With `--features console`, it resolves to
-//! `mkui_console::Mkui` (terminal rendering via `crossterm`). Without any
+//! `mkui_console::Mkui` (terminal rendering via `crossterm`). With
+//! `--features wgpu`, it resolves to `mkui_wgpu::Mkui` (GPU scene rendering).
+//! Enabling more than one of these is a compile-time error. Without any
 //! backend feature, [`Mkui::new`] returns an [`MkuiError`] explaining what
 //! to enable — library consumers get a clear runtime message instead of an
 //! opaque link error.
@@ -71,40 +76,79 @@
 //! the `Result` type the host platform expects (`JsValue` on web,
 //! `io::Error` on console), so showcase binaries can stay one-liners.
 
+// Used by the gated `Mkui` impl below; on a conflicting feature set that impl
+// is excluded, so gate the import too — otherwise it reads as unused and adds
+// a warning on top of the one-backend `compile_error!`.
+#[cfg(not(any(
+    all(feature = "web", feature = "console"),
+    all(feature = "web", feature = "wgpu"),
+    all(feature = "console", feature = "wgpu"),
+)))]
 use mkui_core::error::MkuiError;
+
+// One-primary-backend invariant (see ADR 0006 "Cross-binding identity: one
+// primary backend"). The `web`, `console`, and `wgpu` features each select a
+// different `Mkui` implementation; enabling more than one is ambiguous, and
+// Cargo feature unification across a dependency graph could otherwise pick a
+// backend the consumer never intended — silently. Make every conflicting pair
+// a hard compile error instead of resolving it by hidden cfg precedence.
+//
+// Critically, the entire valid implementation below (`struct Mkui`, `impl
+// Mkui`, the prelude re-export, and the web error-translation helper) is gated
+// on `not(<any conflict>)` so that a conflicting feature set produces *only*
+// this `compile_error!` — not a wall of E0124 (duplicate `inner` field) and
+// E0308 (mismatched types) noise from two backends' bodies being compiled at
+// once. A user who enables `web` + `console` must see one clear message.
+#[cfg(any(
+    all(feature = "web", feature = "console"),
+    all(feature = "web", feature = "wgpu"),
+    all(feature = "console", feature = "wgpu"),
+))]
+compile_error!("mkui: enable exactly one primary backend feature: `web`, `console`, or `wgpu`");
 
 /// Cross-backend `Mkui` app.
 ///
 /// The component tree is built from the shared `mkui-core` model and dispatched
-/// to the backend selected by Cargo features (`web` or `console`). Without a
-/// backend feature, [`Mkui::new`] returns an initialization error so library
-/// consumers get a clear message instead of a link error.
+/// to the backend selected by exactly one Cargo feature (`web`, `console`, or
+/// `wgpu`). Enabling more than one is a compile-time error; enabling none makes
+/// [`Mkui::new`] return an initialization error so library consumers get a clear
+/// message instead of a link error.
+#[cfg(not(any(
+    all(feature = "web", feature = "console"),
+    all(feature = "web", feature = "wgpu"),
+    all(feature = "console", feature = "wgpu"),
+)))]
 pub struct Mkui {
-    #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
+    #[cfg(feature = "console")]
     inner: mkui_console::prelude::Mkui,
-    #[cfg(all(feature = "web", not(feature = "console")))]
+    #[cfg(feature = "web")]
     inner: mkui_web::prelude::Mkui,
-    #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+    #[cfg(feature = "wgpu")]
     inner: mkui_wgpu::prelude::Mkui,
     #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
     _marker: std::marker::PhantomData<()>,
 }
 
+#[cfg(not(any(
+    all(feature = "web", feature = "console"),
+    all(feature = "web", feature = "wgpu"),
+    all(feature = "console", feature = "wgpu"),
+)))]
 impl Mkui {
     pub fn new() -> Result<Self, MkuiError> {
-        #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
+        #[cfg(feature = "console")]
         {
             let inner = mkui_console::prelude::Mkui::new()?;
             Ok(Self { inner })
         }
 
-        #[cfg(all(feature = "web", not(feature = "console")))]
+        #[cfg(feature = "web")]
         {
             let inner = mkui_web::prelude::Mkui::new().map_err(js_value_to_mkui_error)?;
             Ok(Self { inner })
         }
 
-        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        #[cfg(feature = "wgpu")]
         {
             let inner = mkui_wgpu::prelude::Mkui::new()?;
             Ok(Self { inner })
@@ -119,19 +163,7 @@ impl Mkui {
     }
 
     pub fn child(self, child: impl mkui_core::components::Component + 'static) -> Self {
-        #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
-        {
-            Self {
-                inner: self.inner.child(child),
-            }
-        }
-        #[cfg(all(feature = "web", not(feature = "console")))]
-        {
-            Self {
-                inner: self.inner.child(child),
-            }
-        }
-        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        #[cfg(any(feature = "web", feature = "console", feature = "wgpu"))]
         {
             Self {
                 inner: self.inner.child(child),
@@ -145,18 +177,18 @@ impl Mkui {
     }
 
     pub fn run(self) -> Result<(), MkuiError> {
-        #[cfg(any(feature = "console", all(feature = "web", feature = "console")))]
+        #[cfg(feature = "console")]
         {
             self.inner.run()?;
             Ok(())
         }
 
-        #[cfg(all(feature = "web", not(feature = "console")))]
+        #[cfg(feature = "web")]
         {
             self.inner.run().map_err(js_value_to_mkui_error)
         }
 
-        #[cfg(all(feature = "wgpu", not(any(feature = "console", feature = "web"))))]
+        #[cfg(feature = "wgpu")]
         {
             self.inner.run()
         }
@@ -175,7 +207,7 @@ impl Mkui {
 /// so we fall back to a rendered string in `Rendering`. Either way, the
 /// bridge never re-stringifies via `format!("{:?}", e)` on user-reachable
 /// paths beyond this single translation layer.
-#[cfg(all(feature = "web", not(feature = "console")))]
+#[cfg(all(feature = "web", not(any(feature = "console", feature = "wgpu"))))]
 fn js_value_to_mkui_error(value: wasm_bindgen::JsValue) -> MkuiError {
     #[cfg(target_arch = "wasm32")]
     {
@@ -260,6 +292,14 @@ macro_rules! run {
 }
 
 pub mod prelude {
+    // `Mkui` only exists when the one-backend invariant holds; on a conflicting
+    // feature set it is gated out so the sole error is the top-level
+    // `compile_error!` rather than an additional unresolved-import (E0432).
+    #[cfg(not(any(
+        all(feature = "web", feature = "console"),
+        all(feature = "web", feature = "wgpu"),
+        all(feature = "console", feature = "wgpu"),
+    )))]
     pub use crate::Mkui;
     pub use mkui_core::prelude::*;
 }
