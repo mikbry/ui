@@ -1,0 +1,16 @@
+[package]
+name = "text"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-text = { path = "../../crates/mkui-text" }
+# Phase 1 keeps the Slug encoder optional so a feature-off build contains NO
+# Slug execution path. Phase 2 (after #66 lands) extends the `slug` feature to
+# `["dep:mkui-vector2d", "mkui-wgpu/slug"]` and adds the GPU render path.
+mkui-vector2d = { path = "../../crates/mkui-vector2d", optional = true }
+
+[features]
+slug = ["dep:mkui-vector2d"]

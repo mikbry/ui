@@ -39,12 +39,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::bitmap::{BitmapTextSystem, BITMAP_FAMILY};
+use crate::bitmap::{
+    bitmap_scale, normalize_bitmap_char, BitmapTextSystem, BITMAP_FAMILY, GLYPH_ADVANCE_PX,
+    GLYPH_CELL_HEIGHT_PX,
+};
 use crate::font_id::{FontId, FontIdAllocator};
 use crate::outline::{GlyphOutline, OutlineKey};
+use crate::sfnt::{apply_transform, SfntError, SfntFace};
 use crate::system::{
-    FontQuery, GlyphCacheKey, GlyphImage, LayoutRun, LayoutSpec, TextError, TextRenderClass,
-    TextSystem,
+    FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, LayoutGlyph, LayoutRun, LayoutSpec,
+    TextError, TextRenderClass, TextSystem,
 };
 
 /// Where a registered face's data originates — modeled **separately** from
@@ -245,6 +249,249 @@ pub(crate) trait FontProvider: Send + Sync + 'static {
         _key: &OutlineKey,
     ) -> Result<GlyphOutline, TextError> {
         Err(TextError::UnsupportedOutline)
+    }
+
+    /// Borrow this provider's decoded [`SfntFace`], if it is the SFNT provider.
+    /// The default is `None` (bitmap / mock providers have no SFNT face); the
+    /// SFNT provider overrides it so the registry can expose the decoded face
+    /// for inspection without re-parsing.
+    fn as_sfnt_face(&self) -> Option<&SfntFace> {
+        None
+    }
+}
+
+/// Public error from [`CompositeTextSystem::register_sfnt_face`].
+///
+/// Keeps the crate-private [`RegistryError`] off the public surface: the only
+/// registry failure reachable during SFNT registration is allocator exhaustion
+/// (the bitmap fallback target is always registered and generation is never
+/// bumped here), surfaced as [`FontIdExhausted`](Self::FontIdExhausted).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SfntRegisterError {
+    /// The narrow SFNT decoder rejected the bytes with a typed reason.
+    #[error("SFNT decode failed: {0}")]
+    Decode(#[from] SfntError),
+    /// The shared `1..=u64::MAX` [`FontId`] space is exhausted.
+    #[error("font id space exhausted while registering SFNT face")]
+    FontIdExhausted,
+}
+
+/// Map a narrow-decoder [`SfntError`] onto the public [`TextError`] surface for
+/// the `glyph_outline` / `rasterize` trait paths.
+fn sfnt_to_text_error(err: SfntError) -> TextError {
+    match err {
+        SfntError::GlyphOutOfRange(gid) => TextError::UnknownGlyph(gid as u32),
+        // Composite / unsupported / malformed glyph data: this face cannot
+        // produce that outline. UnknownFont/Unsupported* are setup-time concerns
+        // already handled at registration, so the per-glyph surface collapses to
+        // "no outline available".
+        _ => TextError::UnsupportedOutline,
+    }
+}
+
+/// Crate-private provider adapter wrapping a decoded [`SfntFace`] behind the
+/// [`FontProvider`] contract, in the [`TextRenderClass::Slug`] lane.
+///
+/// Exposes one local face, `LocalFontId(0)`. Its [`layout_local`](FontProvider::layout_local)
+/// performs **layout-time fallback segmentation**: consecutive characters the
+/// face maps stay in a `Primary` Slug run; consecutive characters it lacks are
+/// emitted as an adjacent `Fallback` run targeting the registry-validated
+/// bitmap face, with cluster order, advances, and absolute positions preserved.
+struct SfntProvider {
+    face: Arc<SfntFace>,
+    fallback: ValidatedFallback,
+}
+
+impl SfntProvider {
+    fn new(face: Arc<SfntFace>, fallback: ValidatedFallback) -> Self {
+        Self { face, fallback }
+    }
+}
+
+/// One run-in-progress while segmenting a line into Slug + fallback runs.
+struct PendingRun {
+    routing: RoutedRun,
+    render_class: TextRenderClass,
+    origin_x_px: f32,
+    line_ascent_px: f32,
+    line_descent_px: f32,
+    line_y_baseline_px: f32,
+    glyphs: Vec<LayoutGlyph>,
+}
+
+impl FontProvider for SfntProvider {
+    fn render_class(&self) -> TextRenderClass {
+        TextRenderClass::Slug
+    }
+
+    fn families(&self) -> Vec<String> {
+        self.face
+            .family_name()
+            .map(|n| vec![n.to_string()])
+            .unwrap_or_default()
+    }
+
+    fn resolve_local(&self, query: &FontQuery) -> Option<LocalFontId> {
+        match (&query.family, self.face.family_name()) {
+            (Some(requested), Some(face_family)) if requested == face_family => {
+                Some(LocalFontId(0))
+            }
+            _ => None,
+        }
+    }
+
+    fn layout_local(
+        &self,
+        _local: LocalFontId,
+        text: &str,
+        spec: &LayoutSpec,
+        _max_width_px: Option<f32>,
+    ) -> Vec<RoutedLayoutRun> {
+        let upem = self.face.units_per_em() as f32;
+        let sfnt_scale = spec.font_size_px / upem;
+        let metrics = self.face.metrics();
+        let sfnt_ascent = metrics.ascender as f32 * sfnt_scale;
+        let sfnt_descent = -(metrics.descender as f32) * sfnt_scale;
+        // The shared baseline both lanes sit on, measured from the line top.
+        let baseline = sfnt_ascent;
+
+        let bmp_scale = bitmap_scale(spec.font_size_px);
+        let bmp_advance = GLYPH_ADVANCE_PX * bmp_scale;
+        let bmp_height = GLYPH_CELL_HEIGHT_PX * bmp_scale;
+
+        let mut runs: Vec<PendingRun> = Vec::new();
+        let mut current: Option<PendingRun> = None;
+        let mut pen_x = 0.0f32;
+
+        for (cluster, ch) in text.chars().enumerate() {
+            // Classify the character: mapped → Slug lane, unmapped → bitmap
+            // fallback. The boundary is decided here, at layout time, never in
+            // the renderer.
+            let (is_slug, glyph_id, advance) = match self.face.glyph_index(ch) {
+                Some(gid) => (
+                    true,
+                    gid as u32,
+                    self.face.advance_width(gid) as f32 * sfnt_scale,
+                ),
+                None => (false, normalize_bitmap_char(ch) as u32, bmp_advance),
+            };
+
+            let want_class = if is_slug {
+                TextRenderClass::Slug
+            } else {
+                TextRenderClass::Bitmap
+            };
+
+            // Start a new run at every supported/unsupported boundary.
+            let needs_new = current
+                .as_ref()
+                .is_none_or(|r| r.render_class != want_class);
+            if needs_new {
+                if let Some(done) = current.take() {
+                    runs.push(done);
+                }
+                let (line_ascent_px, line_descent_px) = if is_slug {
+                    (sfnt_ascent, sfnt_descent)
+                } else {
+                    (bmp_height, 0.0)
+                };
+                current = Some(PendingRun {
+                    routing: if is_slug {
+                        RoutedRun::Primary
+                    } else {
+                        RoutedRun::Fallback(self.fallback)
+                    },
+                    render_class: want_class,
+                    origin_x_px: pen_x,
+                    line_ascent_px,
+                    line_descent_px,
+                    line_y_baseline_px: baseline,
+                    glyphs: Vec::new(),
+                });
+            }
+
+            let run = current.as_mut().expect("a run was just ensured");
+            run.glyphs.push(LayoutGlyph {
+                glyph_id,
+                // Absolute x within the parent run = pen − run origin.
+                x_px: pen_x - run.origin_x_px,
+                y_px: 0.0,
+                x_advance_px: advance,
+                x_offset_px: 0.0,
+                y_offset_px: 0.0,
+                cluster: cluster as u32,
+                subpixel_variant: 0,
+                format: GlyphFormat::Alpha,
+            });
+            pen_x += advance;
+        }
+        if let Some(done) = current.take() {
+            runs.push(done);
+        }
+
+        // Materialize each pending run into a public LayoutRun. The composite
+        // overwrites font_id / render_class / generation per the routing
+        // discriminator, so the values stamped here for those three fields are
+        // placeholders.
+        runs.into_iter()
+            .map(|pending| {
+                let bitmap_top_origin = (baseline - pending.line_ascent_px).max(0.0);
+                RoutedLayoutRun {
+                    routing: pending.routing,
+                    run: LayoutRun {
+                        font_id: spec.font_id,
+                        render_class: pending.render_class,
+                        font_generation: spec.font_generation,
+                        font_size_px: spec.font_size_px,
+                        variations: spec.variations.clone(),
+                        synthesis_flags: spec.synthesis_flags,
+                        hinting: spec.hinting,
+                        origin_x_px: pending.origin_x_px,
+                        // Slug runs are baseline-relative (origin at top = 0);
+                        // bitmap fallback runs draw from a top origin placed so
+                        // their cell baseline lands on the shared baseline.
+                        origin_y_px: if pending.render_class == TextRenderClass::Bitmap {
+                            bitmap_top_origin
+                        } else {
+                            0.0
+                        },
+                        line_y_baseline_px: pending.line_y_baseline_px,
+                        line_ascent_px: pending.line_ascent_px,
+                        line_descent_px: pending.line_descent_px,
+                        glyphs: pending.glyphs,
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn rasterize_local(
+        &self,
+        _local: LocalFontId,
+        _key: &GlyphCacheKey,
+    ) -> Result<GlyphImage, TextError> {
+        // A Slug/outline face has no CPU raster; its glyphs flow through
+        // `outline_local` + the Slug encoder. Fallback glyphs are bitmap-face
+        // glyphs and never route here.
+        Err(TextError::UnsupportedRaster)
+    }
+
+    fn outline_local(
+        &self,
+        _local: LocalFontId,
+        key: &OutlineKey,
+    ) -> Result<GlyphOutline, TextError> {
+        let gid = u16::try_from(key.glyph_id).map_err(|_| TextError::UnknownGlyph(key.glyph_id))?;
+        let mut outline = self.face.glyph_outline(gid).map_err(sfnt_to_text_error)?;
+        // The provider resolves the outline-local affine exactly once, so the
+        // returned ink bounds always match the returned points (#61 contract).
+        apply_transform(&mut outline, key.transform);
+        Ok(outline)
+    }
+
+    fn as_sfnt_face(&self) -> Option<&SfntFace> {
+        Some(&self.face)
     }
 }
 
@@ -450,6 +697,49 @@ impl CompositeTextSystem {
         target: FontId,
     ) -> Result<ValidatedFallback, RegistryError> {
         fallback::validate(target, |fid| self.registry.reverse.contains_key(&fid))
+    }
+
+    /// Decode an SFNT/TrueType face from `bytes` (face `index`) and register it
+    /// as a [`TextRenderClass::Slug`] provider beside the built-in bitmap face,
+    /// minting a fresh public [`FontId`] from the shared allocator.
+    ///
+    /// This is #67's concrete provider entry point: it owns the narrow
+    /// from-scratch [`SfntFace`] decode, wires the provider to a
+    /// registry-validated bitmap fallback (so glyphs the face lacks split into
+    /// `FontId::BITMAP` runs at layout time), and indexes the decoded family
+    /// name. The returned [`FontId`] is the only identity that escapes — the
+    /// provider-local face id never leaves the registry boundary.
+    pub fn register_sfnt_face(
+        &mut self,
+        bytes: Arc<[u8]>,
+        index: u32,
+    ) -> Result<FontId, SfntRegisterError> {
+        let face = SfntFace::parse(bytes, index)?;
+        let families = face
+            .family_name()
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default();
+
+        // The reserved bitmap face is always registered, so this fallback token
+        // can never be rejected — but route it through the same validation
+        // boundary every provider uses, so the registry stays authoritative.
+        let fallback = self
+            .validated_fallback(FontId::BITMAP)
+            .map_err(|_| SfntRegisterError::FontIdExhausted)?;
+
+        let provider = SfntProvider::new(Arc::new(face), fallback);
+        let provider_id = self.add_provider(Box::new(provider));
+        self.register_face(provider_id, LocalFontId(0), FontSource::Bytes, families)
+            .map_err(|_| SfntRegisterError::FontIdExhausted)
+    }
+
+    /// Resolved face metrics + decoded glyph count for a registered SFNT face,
+    /// or `None` if `font_id` is unknown or not an SFNT provider. Lets a caller
+    /// inspect the decoded face (units-per-em, glyph count, family) without
+    /// re-parsing the bytes.
+    pub fn sfnt_face(&self, font_id: FontId) -> Option<&SfntFace> {
+        let record = self.registry.reverse.get(&font_id)?;
+        self.providers[record.provider_id.0].as_sfnt_face()
     }
 
     /// Render lane selected for a registered face, or `None` if `font_id` is
