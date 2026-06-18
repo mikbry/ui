@@ -7,13 +7,14 @@
 //! build failure deep in a downstream crate.
 //!
 //! Note: `cargo test --workspace` unifies features (resolver = 2), so when
-//! any sibling crate depends on `mkui` with `console` or `web` enabled,
-//! the no-backend assertion is meaningless. The `cfg` gate below pins the
-//! assertion to the configuration where it is actually testable.
+//! any sibling crate depends on `mkui` with a backend enabled, the no-backend
+//! assertion is meaningless. The `cfg` gate below pins the assertion to the
+//! configuration where it is actually testable — no primary backend feature
+//! (`web`, `console`, or `wgpu`) enabled.
 
 use mkui::prelude::*;
 
-#[cfg(not(any(feature = "web", feature = "console")))]
+#[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
 #[test]
 fn new_without_backend_returns_initialization_error() {
     let result = Mkui::new();
