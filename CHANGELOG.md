@@ -8,6 +8,22 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **SFNT text-system integration — Phase 1, CPU-side (#67).** A narrow,
+  from-scratch SFNT/TrueType decoder in `mkui-text` (`SfntFace`) reads the
+  licensed Abel-Regular fixture — table-directory validation, `head`/`maxp`/
+  `hhea`/`hmtx`/`cmap` format 4/`loca`/`glyf`/`name`, Unicode→glyph mapping,
+  advances, and simple quadratic outlines (font units, y-up) — and rejects
+  CFF/CFF2, color/bitmap, composite, malformed, and out-of-range inputs with
+  typed `SfntError`s. No runtime font-stack dependency (`ttf-parser` is a
+  `[dev-dependencies]` parity oracle only). `CompositeTextSystem::register_sfnt_face`
+  registers the face as a `TextRenderClass::Slug` provider beside the built-in
+  bitmap face through #62's registry-issued `FontId`s, with layout-time mixed
+  fallback honoring `RoutedRun::Fallback(ValidatedFallback)` end-to-end (real
+  SFNT + bitmap, cluster order/advances/positions preserved). The Slug CPU
+  vertical slice flows decoded outlines through #65's `mkui-vector2d` encoder
+  into a size-independent blob reused across 12/16/24/48 px, and glyph-`M`
+  calibration proves the Tier-2 baseline-diff threshold feasible. GPU rendering
+  and font-backed readback land in Phase 2 once #66 merges.
 - **`mkui-vector2d-wgpu` adapter + ordered Slug render lane (#66).** A new
   acyclic crate packs #65's backend-neutral Slug glyph blobs into WGPU storage
   buffers and renders them through a single-horizontal-ray WGSL coverage
