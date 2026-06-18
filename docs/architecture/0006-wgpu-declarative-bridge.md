@@ -29,6 +29,48 @@ finishes the job against the substrate that now exists.
 Implement the wgpu declarative bridge as a thin layer on top of the
 existing tessellation pipeline.
 
+### Cross-binding identity: one primary backend
+
+The `mkui` bridge crate's identity is "depend on `mkui`, pick a backend with a
+Cargo feature, get one `mkui::Mkui` type." That identity holds only if the
+backend selection is unambiguous. The `web`, `console`, and `wgpu` features
+each resolve `Mkui` to a *different* concrete type and rendering path, so they
+are **mutually exclusive primary backends**.
+
+Earlier the bridge resolved a multi-feature build by hidden `cfg` precedence
+(`console` shadowed `web`, which shadowed `wgpu`). That is unsafe: Cargo
+feature unification across a dependency graph can enable a second backend
+feature a consumer never asked for, and the build would *silently* select a
+different backend than intended — a cross-binding identity violation with no
+diagnostic. As of v0.10.0 (#102) the invariant is enforced at compile time:
+
+```rust
+#[cfg(any(
+    all(feature = "web", feature = "console"),
+    all(feature = "web", feature = "wgpu"),
+    all(feature = "console", feature = "wgpu"),
+))]
+compile_error!(
+    "mkui: enable exactly one primary backend feature: `web`, `console`, or `wgpu`"
+);
+```
+
+**The rule:** enable *exactly one* primary backend feature. Every conflicting
+pair (and the all-three combo) is a hard compile error; there is **no silent
+precedence**. Zero backends remains valid — `Mkui::new()` returns a clear
+`MkuiError` naming which feature to enable, so a library consumer who forgot
+to pick one gets a runtime explanation rather than a link error. Each valid
+single-backend build therefore has exactly one `inner` field and one
+implementation path through the bridge.
+
+This is a pre-1.0 breaking change for any consumer that was (knowingly or not)
+relying on the old precedence. Because the backend is selected only at compile
+time, this guard adds no runtime backend-selection API, dependency, or MSRV
+change. CI enforces it package-aware (`-p mkui --no-default-features`, never
+workspace `--all-features`, which would mask the conflict via unification):
+the four valid builds must compile and the four conflicting combos must fail
+with the message above.
+
 ### Component placement
 
 - **`WgpuRenderable` trait + `WgpuRendererRegistry`** live in

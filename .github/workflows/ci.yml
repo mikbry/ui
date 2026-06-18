@@ -72,7 +72,12 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # `--exclude` the three backend-pinned showcase examples: each enables a
+      # different primary backend on `mkui`, and Cargo feature unification
+      # would otherwise enable all three at once and trip the one-backend
+      # `compile_error!` guard (#102). They build package-aware (see the
+      # `mkui-examples` job + ADR 0006). #105 owns the wider feature matrix.
+      - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --all-targets --locked -- -D warnings
 
   test:
     name: test
@@ -93,7 +98,10 @@ jobs:
           key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-
-      - run: cargo test --workspace --locked
+      # See the clippy job: the backend-pinned examples can't be unified into
+      # one build under the #102 one-backend guard; they are covered separately
+      # by the `mkui-examples` job.
+      - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --locked
 
   gpu-offscreen:
     # Surfaceless offscreen GPU readback tests (#106). These exercise a real
@@ -145,6 +153,100 @@ jobs:
             ${{ runner.os }}-cargo-gpu-offscreen-
       - run: cargo test -p mkui-wgpu --features gpu-tests --locked
 
+  mkui-backend-matrix:
+    # Enforces the `mkui` one-primary-backend invariant (#102). The bridge
+    # crate selects a backend via a Cargo feature (`web` / `console` / `wgpu`);
+    # enabling more than one is a hard `compile_error!`, not silent cfg
+    # precedence. Cargo feature unification across a dependency graph means a
+    # workspace-wide `--all-features` build would mask this — so this job is
+    # deliberately PACKAGE-AWARE (`-p mkui --no-default-features`) and never
+    # uses `--all-features`. It does NOT duplicate #105's general
+    # package-aware matrix; it owns only the backend-conflict assertion.
+    #
+    # Valid builds (exactly one or zero primary backends) must succeed; every
+    # conflicting pair (and the all-three combo) must fail with the intended
+    # message. A regression that re-introduces silent precedence makes an
+    # invalid combo compile, which fails this job loudly.
+    name: mkui-backend-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-mkui-backend-matrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mkui-backend-matrix-
+      - name: Valid single-backend (and no-backend) builds must succeed
+        run: |
+          set -euo pipefail
+          for feat in "" "web" "console" "wgpu"; do
+            if [ -z "$feat" ]; then
+              echo "::group::cargo check -p mkui --no-default-features"
+              cargo check -p mkui --no-default-features --locked
+            else
+              echo "::group::cargo check -p mkui --no-default-features --features $feat"
+              cargo check -p mkui --no-default-features --features "$feat" --locked
+            fi
+            echo "::endgroup::"
+          done
+      - name: Conflicting-backend builds must fail with the intended message
+        run: |
+          set -uo pipefail
+          expected="enable exactly one primary backend feature"
+          status=0
+          for combo in "web,console" "web,wgpu" "console,wgpu" "web,console,wgpu"; do
+            echo "::group::cargo check -p mkui --no-default-features --features $combo (must FAIL)"
+            out="$(cargo check -p mkui --no-default-features --features "$combo" --locked 2>&1 || true)"
+            echo "$out"
+            echo "::endgroup::"
+            if cargo check -p mkui --no-default-features --features "$combo" --locked >/dev/null 2>&1; then
+              echo "::error::feature combo '$combo' compiled but MUST be a compile error (silent backend precedence regressed)"
+              status=1
+            elif ! printf '%s' "$out" | grep -q "$expected"; then
+              echo "::error::feature combo '$combo' failed but not with the one-backend compile_error message"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  mkui-examples:
+    # The three backend-pinned showcase examples (console / web / wgpu) are
+    # excluded from the aggregate `--workspace` jobs because they enable
+    # mutually-exclusive `mkui` backends that cannot be unified into one build
+    # under the #102 one-backend guard. This job restores their coverage by
+    # building each one PACKAGE-AWARE, so a real regression in an example still
+    # fails CI. The web example builds for `wasm32-unknown-unknown` (its real
+    # target); the console + wgpu examples build natively.
+    name: mkui-examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-mkui-examples-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-mkui-examples-
+      - name: Build console-showcase (console backend)
+        run: cargo build -p console-showcase --locked
+      - name: Build native-showcase (wgpu backend)
+        run: cargo build -p native-showcase --locked
+      - name: Build web-showcase (web backend, wasm32)
+        run: cargo build -p web-showcase --target wasm32-unknown-unknown --locked
+
   test-doc:
     name: test-doc
     runs-on: ubuntu-latest
@@ -164,7 +266,8 @@ jobs:
           key: ${{ runner.os }}-cargo-test-doc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-test-doc-
-      - run: cargo test --workspace --doc --locked
+      # Backend-pinned examples excluded — see the clippy/test jobs (#102).
+      - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --doc --locked
 
   build-release:
     name: build-release
@@ -185,7 +288,8 @@ jobs:
           key: ${{ runner.os }}-cargo-build-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
-      - run: cargo build --workspace --release --locked
+      # Backend-pinned examples excluded — see the clippy/test jobs (#102).
+      - run: cargo build --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --release --locked
 
   msrv:
     # MSRV gate: `Cargo.toml` declares the workspace's minimum supported Rust
@@ -219,7 +323,8 @@ jobs:
           key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-msrv-
-      - run: cargo check --workspace --locked
+      # Backend-pinned examples excluded — see the clippy/test jobs (#102).
+      - run: cargo check --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --locked
 
   mkui-py-bindings:
     # The interpreter-LINKED Python binding tests. Two suites live under

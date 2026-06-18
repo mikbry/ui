@@ -20,6 +20,37 @@ members = [
     "examples/native-showcase", # Cross-binding showcase on the wgpu backend (Sprint 5)
 ]
 
+# The three backend-pinned showcase examples each enable a *different* primary
+# backend feature on the `mkui` bridge crate (`console` / `web` / `wgpu`).
+# Since #102 the bridge enforces exactly one primary backend at compile time
+# (no silent precedence — see ADR 0006). Cargo unifies a shared dependency's
+# features across every member built in one invocation, so building all three
+# together (`cargo build`, `cargo test --workspace`, …) would enable all three
+# backends on `mkui` at once and trip the `compile_error!` guard.
+#
+# `default-members` therefore excludes them from bare/aggregate commands; they
+# build package-aware (`cargo build -p console-showcase`, the `trunk` wasm
+# build for `web-showcase`, etc.) and CI compiles each separately. The broad
+# `--workspace` CI jobs pass `--exclude` for the same three. #105 owns the
+# wider package-aware feature matrix; this list only keeps the default build
+# green under the one-backend invariant.
+default-members = [
+    "crates/mkui-runtime",
+    "crates/mkui-core",
+    "crates/mkui-text",
+    "crates/mkui-vector2d",
+    "crates/mkui-wgpu",
+    "crates/mkui-web",
+    "crates/mkui-console",
+    "crates/mkui-c",
+    "crates/mkui-py",
+    "crates/mkui",
+    "examples/showcase-common",
+    "examples/headless-showcase",
+    "examples/native-window",
+    "examples/atoms-on-wgpu",
+]
+
 [workspace.package]
 version = "0.9.3"
 edition = "2021"

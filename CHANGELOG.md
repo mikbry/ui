@@ -36,6 +36,28 @@ breaking changes can land on minor bumps).
   Slug algorithm by Eric Lengyel from scratch (no Slug source). No WGPU type
   appears in the crate or its dependency tree; GPU packing is #66's scope.
 
+### Changed
+- **Breaking (pre-1.0): `mkui` enforces exactly one primary backend feature
+  at compile time (#102).** The bridge crate (`crates/mkui`) previously
+  resolved a build with multiple primary backend features enabled (`web`,
+  `console`, `wgpu`) by hidden `cfg` precedence — `console` silently shadowed
+  `web`, which shadowed `wgpu`. Cargo feature unification across a dependency
+  graph could therefore select a different backend than a downstream consumer
+  intended, with no diagnostic. The bridge now emits a `compile_error!` for
+  every conflicting pair (and the all-three combo):
+
+  > `mkui: enable exactly one primary backend feature: \`web\`, \`console\`, or \`wgpu\``
+
+  There is no silent precedence remaining; each valid single-backend build has
+  exactly one `inner` field and implementation path. The no-backend build is
+  still valid (`Mkui::new()` returns a clear `MkuiError` naming which feature
+  to enable). This is a **breaking change** for any consumer relying on
+  accidental multi-feature precedence — enable exactly one of `web`,
+  `console`, or `wgpu`. No runtime backend-selection API, dependency, or MSRV
+  change. ADR 0006 documents the invariant; a package-aware CI job
+  (`mkui-backend-matrix`, never workspace `--all-features`) asserts the four
+  valid builds compile and the four conflicting combos fail.
+
 ### Security
 - **Bump pyo3 0.28.3 → 0.29.0 (#114).** Resolves two RUSTSEC advisories
   published 2026-06-11 against pyo3 0.28.x, both fixed in 0.29.0:

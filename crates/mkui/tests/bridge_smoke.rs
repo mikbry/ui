@@ -17,7 +17,7 @@
 
 use mkui::prelude::*;
 
-#[cfg(not(any(feature = "web", feature = "console")))]
+#[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
 #[test]
 fn without_a_backend_feature_init_reports_a_clear_error() {
     let err = match Mkui::new() {
