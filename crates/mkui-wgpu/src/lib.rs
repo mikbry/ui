@@ -109,7 +109,7 @@ pub use components::SliderRegions;
 // `View` / `Stack` / `Row` tree).
 pub use builder::{ListRow, NumberRow, UiBuilder};
 
-pub use tessellation::{tessellate_scene, tessellate_scene_with_text};
+pub use tessellation::{tessellate_primitives, tessellate_scene, tessellate_scene_with_text};
 
 /// Convenience alias: the flat `widgets` module lives on as a
 /// re-export of `components`. New code should use `components::*` directly.

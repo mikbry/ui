@@ -58,7 +58,7 @@ const QUAD_DILATION_PX: f32 = 1.5;
 /// and a uniform `scale_px_per_unit` (font size ÷ units-per-em). The encoded
 /// blob stays in font units, y-up — the adapter performs the y-flip and pixel
 /// projection so the neutral crate never sees a screen coordinate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlacedSlugGlyph {
     /// The size-independent outline blob from `mkui-vector2d`.
     pub blob: Arc<SlugGlyph>,

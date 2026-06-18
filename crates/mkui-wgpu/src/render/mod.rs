@@ -55,18 +55,34 @@
 //!   and uses alpha blending; depth would only force us to keep a
 //!   matching multisampled depth view on resize for no visual gain.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::{tessellate_scene_with_text, GuiTriangle, Scene};
+use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
+use crate::{tessellate_primitives, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
 #[cfg(feature = "slug")]
 use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
+
+/// One frame's per-command GPU draw resource, built before the render pass so
+/// it outlives the borrow. The renderer walks these in `Scene::primitives`
+/// order so UI/bitmap triangles and Slug glyphs composite in scene paint order
+/// (#66). On the `Triangles` lane both `UiTriangles` and `BitmapText` commands
+/// share the UI pipeline; the `Slug` lane exists only under the feature.
+enum LaneDraw {
+    Triangles {
+        buffer: wgpu::Buffer,
+        vertex_count: u32,
+    },
+    #[cfg(feature = "slug")]
+    Slug(PreparedSlug),
+}
 
 /// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
 /// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
@@ -284,44 +300,89 @@ impl Renderer {
         let target_is_srgb = self.config.format.is_srgb();
         let clear = clear_color(target_is_srgb);
 
-        let triangles = tessellate_scene_with_text(scene, text_system);
-        // Project against the logical-pixel viewport, NOT the physical-pixel
-        // surface config. `self.config.{width, height}` are physical pixels
-        // (wgpu's `surface.configure` contract); scene primitives are authored
-        // in logical pixels, so the NDC denominator must be logical too. Using
-        // physical pixels here mis-projected primitives into the upper-left
-        // quadrant on HiDPI displays (#97). See ADR 0006 §"Viewport units
-        // contract".
-        let vertices = gui_vertices(
-            &triangles,
-            scene.viewport.width,
-            scene.viewport.height,
-            target_is_srgb,
-        );
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mkui-wgpu UI Encoder"),
             });
 
-        let vertex_buffer = (!vertices.is_empty()).then(|| {
-            self.device
+        // Derive the ordered command stream from `Scene::primitives` and build
+        // each command's GPU resources up front so they outlive the pass. The
+        // renderer always consumes this stream — there is no separate
+        // "all UI then all Slug" path — and lane switches happen exactly at
+        // scene-order boundaries (#66). Consecutive triangle-lane commands
+        // (`UiTriangles` + `BitmapText`, which share the UI pipeline) coalesce
+        // into one buffer, since only same-pipeline adjacency may merge; a Slug
+        // command flushes the pending triangle run first so paint order holds.
+        // With the feature off every command is triangle-lane, so this collapses
+        // to a single buffer + draw — byte-identical to the v0.9.3 path.
+        // Triangles are projected against the logical-pixel viewport, NOT the
+        // physical surface config (#97, ADR 0006 §"Viewport units").
+        let commands = build_render_commands(&scene.primitives, classify_primitive);
+        let mut lane_draws: Vec<LaneDraw> = Vec::new();
+
+        // Tessellate a contiguous triangle-lane primitive range into one vertex
+        // buffer, or `None` when it yields no geometry.
+        let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
+            let triangles = tessellate_primitives(&scene.primitives[range], text_system);
+            let vertices = gui_vertices(
+                &triangles,
+                scene.viewport.width,
+                scene.viewport.height,
+                target_is_srgb,
+            );
+            if vertices.is_empty() {
+                return None;
+            }
+            let buffer = self
+                .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("mkui-wgpu UI Vertices"),
                     contents: bytemuck::cast_slice(&vertices),
                     usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+                });
+            Some(LaneDraw::Triangles {
+                buffer,
+                vertex_count: vertices.len() as u32,
+            })
+        };
 
-        // Pack any Slug glyphs the scene carries before the pass opens so the
-        // prepared buffers outlive it. `None` (the #66 default — no Slug font
-        // provider lands until #67) skips the lane entirely, preserving the
-        // bitmap-only frame. The Slug draw is issued *inside* the same render
-        // pass, after the UI triangles, so it composites in scene paint order
-        // and stays load/store compatible with the UI lane.
-        #[cfg(feature = "slug")]
-        let prepared_slug = self.prepare_scene_slug(scene);
+        let mut pending_triangles: Option<Range<usize>> = None;
+        for command in &commands {
+            let range = command.primitives();
+            match command {
+                RenderCommand::UiTriangles(_) | RenderCommand::BitmapText(_) => {
+                    pending_triangles = Some(match pending_triangles {
+                        Some(open) => open.start..range.end,
+                        None => range,
+                    });
+                }
+                RenderCommand::SlugGlyphs(_) => {
+                    // Flush any open triangle run so the Slug glyphs composite
+                    // over exactly the primitives that preceded them.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    // Without the `slug` feature `classify_primitive` never
+                    // emits a SlugGlyphs command, so this arm cannot run.
+                    #[cfg(feature = "slug")]
+                    {
+                        let glyphs = scene_slug_glyphs(&scene.primitives[range]);
+                        if let Some(prepared) = self.slug_adapter.prepare(
+                            &self.device,
+                            &self.queue,
+                            [scene.viewport.width, scene.viewport.height],
+                            &glyphs,
+                        ) {
+                            lane_draws.push(LaneDraw::Slug(prepared));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(open) = pending_triangles.take() {
+            lane_draws.extend(make_triangles(open));
+        }
 
         {
             let color_attachment = match self.msaa_color_view.as_ref() {
@@ -352,16 +413,25 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some(buffer) = vertex_buffer.as_ref() {
-                pass.set_pipeline(&self.ui_pipeline);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..vertices.len() as u32, 0..1);
-            }
-            // Slug glyph lane (#66): drawn after the UI triangles within the
-            // same pass so later-in-scene glyphs composite over earlier UI.
-            #[cfg(feature = "slug")]
-            if let Some(prepared) = prepared_slug.as_ref() {
-                self.slug_adapter.draw(&mut pass, prepared);
+            // Draw each command in scene order within the single pass, so a
+            // later command composites over an earlier one (alpha blending is
+            // load/store compatible across lanes). UI/bitmap runs use the UI
+            // pipeline; Slug runs draw through the adapter (#66).
+            for draw in &lane_draws {
+                match draw {
+                    LaneDraw::Triangles {
+                        buffer,
+                        vertex_count,
+                    } => {
+                        pass.set_pipeline(&self.ui_pipeline);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..*vertex_count, 0..1);
+                    }
+                    #[cfg(feature = "slug")]
+                    LaneDraw::Slug(prepared) => {
+                        self.slug_adapter.draw(&mut pass, prepared);
+                    }
+                }
             }
         }
 
@@ -373,37 +443,27 @@ impl Renderer {
         }
         Ok(RenderOutcome::Drawn)
     }
-
-    /// Pack the scene's Slug glyphs (#66) into a [`PreparedSlug`] ready to draw,
-    /// or `None` when the scene carries none. Projected against the logical
-    /// viewport, matching the UI lane's `gui_vertices` projection.
-    #[cfg(feature = "slug")]
-    fn prepare_scene_slug(&self, scene: &Scene) -> Option<PreparedSlug> {
-        let glyphs = scene_slug_glyphs(scene);
-        if glyphs.is_empty() {
-            return None;
-        }
-        self.slug_adapter.prepare(
-            &self.device,
-            &self.queue,
-            [scene.viewport.width, scene.viewport.height],
-            &glyphs,
-        )
-    }
 }
 
-/// Extract the Slug-lane glyphs a scene wants drawn. This is the integration
-/// seam between `mkui-wgpu`'s renderer and the `mkui-vector2d-wgpu` adapter.
+/// Collect the [`PlacedSlugGlyph`]s carried by a primitive slice, in order.
 ///
-/// Sprint 7 (#66) ships the GPU lane and its packing/pipeline but **no Slug
-/// font provider** — that is #67. Until a composite text system can resolve a
-/// Slug-class face into encoded blobs, no scene primitive yields Slug glyphs, so
-/// this returns empty and the live frame stays bitmap-only. The adapter's
-/// coverage pipeline is exercised end-to-end by the offscreen GPU acceptance
-/// tests, which hand-author the curve/band records directly.
+/// This is the scene-level seam between the renderer and the
+/// `mkui-vector2d-wgpu` adapter (#66): scenes carry Slug glyphs as
+/// [`Primitive::SlugGlyph`] variants, and the ordered render path hands each
+/// `SlugGlyphs` command's slice here to recover the glyphs for that lane run.
+/// #67's outline text system emits these primitives directly, so its glyphs
+/// flow through with no further renderer change. Glyphs are cloned (an
+/// `Arc<SlugGlyph>` clone is cheap) so the returned owned `Vec` can back a GPU
+/// upload outliving the borrowed scene.
 #[cfg(feature = "slug")]
-fn scene_slug_glyphs(_scene: &Scene) -> Vec<PlacedSlugGlyph> {
-    Vec::new()
+fn scene_slug_glyphs(primitives: &[crate::Primitive]) -> Vec<PlacedSlugGlyph> {
+    primitives
+        .iter()
+        .filter_map(|p| match p {
+            crate::Primitive::SlugGlyph(glyph) => Some(glyph.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Shared `DeviceDescriptor` for the windowed [`Renderer`] and the surfaceless
@@ -631,7 +691,7 @@ fn render_input_counts(
     height: f32,
     target_is_srgb: bool,
 ) -> RenderInputCounts {
-    let triangles = tessellate_scene_with_text(scene, text_system);
+    let triangles = crate::tessellate_scene_with_text(scene, text_system);
     let vertices = gui_vertices(&triangles, width, height, target_is_srgb);
     RenderInputCounts {
         primitives: scene.primitives.len(),
@@ -644,6 +704,55 @@ fn render_input_counts(
 mod tests {
     use super::*;
     use mkui_text::BitmapTextSystem;
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn scene_slug_glyphs_collects_only_slug_primitives_in_order() {
+        use mkui_vector2d::Vec2;
+        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use std::sync::Arc;
+
+        let make = |color: [f32; 4]| PlacedSlugGlyph {
+            blob: Arc::new(SlugGlyph {
+                revision: 1,
+                bounds: GlyphBounds {
+                    x_min: 0.0,
+                    y_min: 0.0,
+                    x_max: 1.0,
+                    y_max: 1.0,
+                },
+                curves: vec![SlugCurve {
+                    p0: Vec2::new(0.0, 0.0),
+                    p1: Vec2::new(1.0, 1.0),
+                    p2: Vec2::new(1.0, 1.0),
+                }],
+                horizontal_bands: Vec::new(),
+                horizontal_curve_indices: Vec::new(),
+                vertical_bands: Vec::new(),
+                vertical_curve_indices: Vec::new(),
+            }),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+            color,
+        };
+        let g0 = make([1.0, 0.0, 0.0, 1.0]);
+        let g1 = make([0.0, 1.0, 0.0, 1.0]);
+        let quad = crate::Primitive::Quad(crate::Quad {
+            rect: crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(1.0, 1.0)),
+            fill: crate::Color::rgba(1.0, 1.0, 1.0, 1.0),
+            corner_radii: crate::CornerRadii::all(0.0),
+            stroke: None,
+        });
+        // Interleaved with a non-Slug primitive: the seam returns exactly the
+        // Slug glyphs, in scene order, and nothing else (regression guard
+        // against the lane being silently re-stubbed to empty).
+        let prims = vec![
+            crate::Primitive::SlugGlyph(g0.clone()),
+            quad,
+            crate::Primitive::SlugGlyph(g1.clone()),
+        ];
+        assert_eq!(scene_slug_glyphs(&prims), vec![g0, g1]);
+    }
 
     #[test]
     fn msaa_pref_is_off_pending_srgb_orchestration() {

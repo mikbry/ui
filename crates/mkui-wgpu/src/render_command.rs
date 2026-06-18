@@ -94,6 +94,8 @@ impl RenderCommand {
 pub fn classify_primitive(primitive: &Primitive) -> RenderLane {
     match primitive {
         Primitive::Text(_) => RenderLane::BitmapText,
+        #[cfg(feature = "slug")]
+        Primitive::SlugGlyph(_) => RenderLane::SlugGlyphs,
         _ => RenderLane::UiTriangles,
     }
 }
@@ -235,5 +237,53 @@ mod tests {
     fn classify_routes_text_to_bitmap_and_rest_to_ui() {
         assert_eq!(classify_primitive(&text()), RenderLane::BitmapText);
         assert_eq!(classify_primitive(&quad()), RenderLane::UiTriangles);
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn slug_glyph_primitive_routes_to_slug_lane_preserving_paint_order() {
+        use mkui_vector2d::Vec2;
+        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use std::sync::Arc;
+
+        let slug = || {
+            Primitive::SlugGlyph(PlacedSlugGlyph {
+                blob: Arc::new(SlugGlyph {
+                    revision: 1,
+                    bounds: GlyphBounds {
+                        x_min: 0.0,
+                        y_min: 0.0,
+                        x_max: 1.0,
+                        y_max: 1.0,
+                    },
+                    curves: vec![SlugCurve {
+                        p0: Vec2::new(0.0, 0.0),
+                        p1: Vec2::new(1.0, 1.0),
+                        p2: Vec2::new(1.0, 1.0),
+                    }],
+                    horizontal_bands: Vec::new(),
+                    horizontal_curve_indices: Vec::new(),
+                    vertical_bands: Vec::new(),
+                    vertical_curve_indices: Vec::new(),
+                }),
+                origin_px: [0.0, 0.0],
+                scale_px_per_unit: 1.0,
+                color: [1.0, 1.0, 1.0, 1.0],
+            })
+        };
+
+        // UI, Slug, UI — the real scene-carried variant must produce three
+        // ordered commands on two distinct lanes, never collapsing the two UI
+        // runs across the Slug command.
+        let prims = vec![quad(), slug(), quad()];
+        let cmds = build_render_commands(&prims, classify_primitive);
+        assert_eq!(
+            cmds,
+            vec![
+                RenderCommand::UiTriangles(0..1),
+                RenderCommand::SlugGlyphs(1..2),
+                RenderCommand::UiTriangles(2..3),
+            ]
+        );
     }
 }

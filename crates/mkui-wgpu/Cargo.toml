@@ -29,12 +29,19 @@ mkui-runtime = { path = "../mkui-runtime" }
 mkui-text = { path = "../mkui-text" }
 serde_json = { workspace = true }
 
+# Native Slug adapter (#66), pulled in only by the `slug` feature. Kept out of
+# the `cfg(not(wasm32))` target table so the `slug` feature and its
+# `Primitive::SlugGlyph` variant resolve on every target; the dependency is
+# optional, so default (and all WASM) builds never compile it or its `wgpu`.
+[dependencies.mkui-vector2d-wgpu]
+path = "../mkui-vector2d-wgpu"
+optional = true
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
-mkui-vector2d-wgpu = { path = "../mkui-vector2d-wgpu", optional = true }
 
 [dev-dependencies]
 # Hand-authored Slug curve/band records for the `slug` + `gpu-tests` offscreen
