@@ -241,12 +241,48 @@ The mitigation is a **narrow arm-and-decay pump**: armed on `Resized` +
 The resize handlers only arm the pump; they do not directly call
 `window.request_redraw()`. While armed, `about_to_wait` calls
 `window.request_redraw()` after the current event batch drains — a pure read
-of the pump state, it does not drain the budget. Cursor movement while the
-pump is armed also re-arms the pump and requests a redraw immediately:
-StoneSketch resets its accumulator and requests redraw on `CursorMoved`, and
-macOS live-resize can produce cursor-position changes relative to the content
-area during fast edge/corner drags. mkui keeps that path gated behind the
-resize pump so ordinary idle pointer motion does not redraw.
+of the pump state, it does not drain the budget.
+
+#### CursorMoved M2 bridge during the active-resize window (#101)
+
+The `Resized`-armed pump (cap = 60) reached its operator-verified ceiling at
+v0.9.3: a small residual vibration persisted on *fast shrink-direction* drags
+(right→left, bottom→top). Three hypotheses were ruled out during PR #100's
+iteration — pump-cap exhaustion (cap=120 was *worse*, not better), scene
+complexity by primitive count, and absolute-vs-relative primitive coords — so
+the residual is **not** a budget problem and a further cap tune cannot close it.
+
+#101 adds a second, orthogonal redraw trigger: **M2 — immediate redraw
+scheduling on `CursorMoved` during a recent-resize-active window.** When the
+cursor moves inside the active-resize window, the `CursorMoved` handler calls
+`window.request_redraw()` *directly*, independent of the pump's counter. This
+gives the redraw cadence a cursor-driven trigger to complement the pump's
+`Resized`-arm trigger, smoothing the cadence toward cursor motion rather than
+the sparser `Resized` event arrival.
+
+Two design constraints from the Codex 2026-06-09 #101 review shaped this:
+
+- **M2, not M1.** Re-arming the pump on cursor events (M1) would only help if
+  cap-exhaustion were the bottleneck — it is ruled out — so M2 schedules a
+  redraw *without* touching `resize_redraw_pending`. (The pre-#101 code re-armed
+  the pump on `CursorMoved`; that M1 path is replaced by M2.)
+- **The guard must be pump-state-independent.** Encoding "are we resizing?" as
+  `resize_redraw_pending > 0` is circular: a drained pump reads as "not
+  resizing" exactly when the residual vibration needs cursor-driven redraws.
+  The guard is instead an explicit frame-count timeout (G2): `about_to_wait`
+  advances a monotonic `frame_counter`; `arm_resize_redraw_pump` stamps
+  `last_resize_frame = frame_counter`; and `in_active_resize_window()` is true
+  while `frame_counter - last_resize_frame < RESIZE_ACTIVE_WINDOW_FRAMES` (60,
+  ~1s at 60Hz). The window opens on `Resized`/`ScaleFactorChanged` and closes
+  on the timeout — keeping the cursor bridge live across a fast gesture while
+  preserving idle quiescence once the drag stops. `frame_counter` saturates
+  rather than wraps.
+
+Both pieces of state (`resize_redraw_pending`, `last_resize_frame`) are armed
+together but decay independently: the pump drains on presented `Drawn` frames;
+the active-resize window expires on the frame-count timeout. These invariants
+are asserted by unit tests (`active_resize_window_expires_after_timeout`,
+`active_resize_window_guard_independent_of_drained_pump`).
 
 The budget is consumed one frame at a time on each successful
 `RenderOutcome::Drawn` (in `handle_render_outcome_for_redraw`). `Skipped`
@@ -281,9 +317,9 @@ re-arms to the cap, so the pump stays saturated for the whole live-resize
 gesture and only begins decaying once the drag stops — then returns to idle
 quiescence within ~60 presented frames (~1s at 60Hz). The value fits `u8`.
 The 120 result refutes "pump exhaustion" as the residual root cause; the
-remaining fast-drag vibration is tracked as **#101** for a shape change (a
-`CursorMoved`-armed bridge during the active-resize window) with its own
-Codex round-N design review — not a further cap tune.
+remaining fast-drag vibration is addressed by the **#101** shape change (the
+`CursorMoved` M2 bridge during the active-resize window, documented above) —
+not a further cap tune.
 
 The renderer also treats `CurrentSurfaceTexture::Suboptimal` as a resize-
 recovery signal: it renders and presents the frame, then immediately

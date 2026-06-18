@@ -94,6 +94,39 @@ breaking changes can land on minor bumps).
   `cargo-audit` CI, which treat `vulnerability` as `error`.
 
 ### Fixed
+- **wgpu fast-shrink residual vibration: CursorMoved M2 bridge during the
+  active-resize window (#101).** PR #100 (#99) shipped the `about_to_wait`
+  resize redraw pump (cap=60, `Drawn`-decrement, `Skipped`-no-burn) and reached
+  its operator-verified ceiling — a small residual vibration persisted on fast
+  *shrink*-direction drags (right→left, bottom→top). It is **not** pump
+  exhaustion (cap=120 was tested *worse*, not better; ruled out alongside
+  scene-complexity and absolute-vs-relative coords during the #100 cycle), so a
+  further cap tune cannot close it.
+
+  This adds a second, orthogonal redraw trigger — **mechanism M2**: a
+  `CursorMoved` event inside a recent-resize-active window calls
+  `window.request_redraw()` directly, **independent of the pump's counter**,
+  giving the redraw cadence a cursor-driven trigger to complement the pump's
+  `Resized`-arm trigger. This is deliberately *not* M1 (re-arming the pump on
+  cursor events): cap-exhaustion is ruled out, so re-arming would not help. The
+  active-resize-window guard is an explicit frame-count timeout
+  (`RESIZE_ACTIVE_WINDOW_FRAMES = 60`, ~1s at 60Hz), **not** the circular
+  `resize_redraw_pending > 0` predicate (a drained pump would otherwise read as
+  "not resizing" exactly when the cursor bridge is needed — Codex 2026-06-09
+  #101 review P1#2). `about_to_wait` advances a monotonic `frame_counter`;
+  `Resized`/`ScaleFactorChanged` stamp `last_resize_frame`; the window closes on
+  the timeout so idle pointer motion after the gesture stays quiescent. No
+  public API change, no new deps, no MSRV bump. ADR 0006 §"Resize-active redraw
+  pump" documents the M2 expansion + the explicit-timeout guard.
+
+  **Operator/hardware gates deferred** (require a Retina macOS display + the
+  Codex reviewer, unavailable to the autonomous implementing agent): pre-impl
+  `CursorMoved`-during-border-drag event trace, per-example frame-time
+  profiling for the cross-example ordering, the Codex round-N pre-impl design
+  review, and operator visual verification of the fast-shrink residual + idle
+  quiescence on Retina. The shipped code matches the review-ratified C2 M2
+  shape from the issue body; the empirical/visual confirmation is the
+  next-agent-launch / operator follow-up. See PR body for the scope decision.
 - **wgpu live-resize jerk eliminated on macOS (#99).** PR #98 (#97) fixed
   the HiDPI viewport-units math but the visible scale-snap on shrinking
   resize gestures (right→left, bottom→top) persisted. Root cause was at
@@ -143,9 +176,10 @@ breaking changes can land on minor bumps).
     native-window's quad to viewport-relative coords did not change the
     visible vibration)
 
-  The residual root cause remains undiagnosed at v0.9.3 ship time. See
-  #101 for the continuing investigation and the substrate-tier C2
-  (CursorMoved-armed bridge during active-resize window) candidate.
+  The residual root cause remained undiagnosed at v0.9.3 ship time. #101
+  (above, this release) addresses it with the substrate-tier C2 expansion —
+  the CursorMoved M2 redraw bridge during the active-resize window — rather
+  than a further cap tune.
 - **wgpu primitives now land at logical-pixel positions on HiDPI displays
   (#97).** The Sprint 5 bridge inherited a viewport-units mismatch: scene
   primitives were authored in logical pixels (matching web's CSS-pixel and
