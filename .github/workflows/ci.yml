@@ -190,6 +190,9 @@ jobs:
       # The example forwarding `slug` down to the backend.
       - run: cargo clippy -p atoms-on-wgpu --features slug --all-targets --locked -- -D warnings
       - run: cargo build -p atoms-on-wgpu --features slug --locked
+      # #67's text example: the GPU smoke (Abel Slug + bitmap) with `slug` on.
+      - run: cargo clippy -p text --features slug --all-targets --locked -- -D warnings
+      - run: cargo build -p text --features slug --locked
 
   mkui-backend-matrix:
     # Enforces the `mkui` one-primary-backend invariant (#102). The bridge

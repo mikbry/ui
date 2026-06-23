@@ -2111,6 +2111,7 @@ version = "0.9.3"
 dependencies = [
  "mkui-text",
  "mkui-vector2d",
+ "mkui-wgpu",
 ]
 
 [[package]]

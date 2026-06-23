@@ -98,6 +98,12 @@ pub mod offscreen;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod slug_gpu;
 
+/// Font-backed Slug GPU acceptance tests (#67 Phase 2) — the licensed Abel
+/// fixture rendered through the real `SfntTextSystem` → #65 encoder → #66 lane
+/// on #106's Lavapipe harness. Same dual gate as [`slug_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod sfnt_slug_gpu;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
