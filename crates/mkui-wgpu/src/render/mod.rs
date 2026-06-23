@@ -223,6 +223,13 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        // #101 root-cause fix (macOS only): switch the CAMetalLayer backing
+        // this surface into synchronous-present mode so the fast-resize jerk
+        // is eliminated at the presentation layer. See
+        // [`enable_presents_with_transaction`].
+        #[cfg(target_os = "macos")]
+        enable_presents_with_transaction(&surface);
+
         let color_flags = adapter.get_texture_format_features(format).flags;
         let sample_count = pick_sample_count(color_flags, MSAA_SAMPLE_COUNT_PREF);
 
@@ -464,6 +471,57 @@ fn scene_slug_glyphs(primitives: &[crate::Primitive]) -> Vec<PlacedSlugGlyph> {
             _ => None,
         })
         .collect()
+}
+
+/// Switch the `CAMetalLayer` backing `surface` into synchronous-present mode
+/// (`presentsWithTransaction = true`) — the **root-cause** fix for the macOS
+/// fast-resize jerk (#101).
+///
+/// The jerk is a presentation-layer race, not an event-scheduling one (the
+/// v0.9.3 `about_to_wait` pump and the #117 `CursorMoved` M2 bridge both
+/// operate at the event layer and could not close it). AppKit commits a new
+/// window's bounds inside a `CATransaction`, but by default
+/// (`presentsWithTransaction = false`) `CAMetalLayer` presents its drawable on
+/// an independent, asynchronous timeline. During a live-resize the window rect
+/// jumps to the new size before the matching drawable is scheduled, so Core
+/// Animation stretches the previous (stale-size) drawable into the new rect for
+/// one or more frames — the visible vibration.
+///
+/// Flipping the layer to `presentsWithTransaction = true` makes presentation
+/// synchronous: wgpu-hal's Metal `present` then commits the command buffer,
+/// `waitUntilScheduled()`, and calls `drawable.present()` *inside the current
+/// `CATransaction`* (see wgpu-hal `metal::Queue::present`). The drawable resize
+/// and the window-rect resize commit atomically — no stretch frame. The flag is
+/// re-read by wgpu-hal on every `acquire_texture`, so setting it once after
+/// `configure` (the layer property persists across reconfigures) is sufficient.
+///
+/// macOS-only: other backends have no `CAMetalLayer` and no such race, so the
+/// call is compile-time gated by the `#[cfg(target_os = "macos")]` at the call
+/// site. No public API change; the surface keeps the standard wgpu present
+/// path on every other platform.
+///
+/// References: Tristan Hume, "Glitchless Metal Window Resizing"
+/// (<https://thume.ca/2019/06/19/glitchless-metal-window-resizing/>); Raph
+/// Levien, "The smooth resize test"
+/// (<https://raphlinus.github.io/rust/gui/2019/06/21/smooth-resize-test.html>);
+/// wgpu#1168; winit#3644.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // sole FFI seam in the crate — see crate-root `deny` rationale
+fn enable_presents_with_transaction(surface: &wgpu::Surface<'static>) {
+    // SAFETY: `as_hal` yields the live HAL surface for the current backend; we
+    // only read its `CAMetalLayer` and flip one boolean property on it. We do
+    // not destroy or alias any wgpu-owned resource, and the returned guard is
+    // dropped at the end of this scope (well before the surface is used by the
+    // GPU), satisfying `as_hal`'s safety contract. The `None` arm (a non-Metal
+    // surface, impossible under this `cfg`) is a silent no-op.
+    unsafe {
+        if let Some(hal_surface) = surface.as_hal::<wgpu::hal::api::Metal>() {
+            hal_surface
+                .render_layer()
+                .lock()
+                .setPresentsWithTransaction(true);
+        }
+    }
 }
 
 /// Shared `DeviceDescriptor` for the windowed [`Renderer`] and the surfaceless

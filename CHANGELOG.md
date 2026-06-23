@@ -94,44 +94,55 @@ breaking changes can land on minor bumps).
   `cargo-audit` CI, which treat `vulnerability` as `error`.
 
 ### Fixed
-- **wgpu fast-shrink residual vibration: CursorMoved M2 bridge during the
-  active-resize window (#101).** PR #100 (#99) shipped the `about_to_wait`
-  resize redraw pump (cap=60, `Drawn`-decrement, `Skipped`-no-burn) and reached
-  its operator-verified ceiling — a small residual vibration persisted on fast
-  *shrink*-direction drags (right→left, bottom→top). It is **not** pump
-  exhaustion (cap=120 was tested *worse*, not better; ruled out alongside
-  scene-complexity and absolute-vs-relative coords during the #100 cycle), so a
-  further cap tune cannot close it.
+- **macOS fast-resize jerk fixed at the presentation layer:
+  `CAMetalLayer.presentsWithTransaction` (#101).** The fast-shrink-direction
+  vibration (right→left, bottom→top) on macOS live-resize is a **presentation-
+  layer race**, not an event-scheduling one. AppKit commits a window's new
+  bounds inside a `CATransaction`, but `CAMetalLayer` defaults to
+  `presentsWithTransaction = false` — it presents drawables on an independent
+  asynchronous timeline, so during a resize Core Animation stretches the
+  previous (stale-size) drawable into the new window rect for one or more frames.
+  Two earlier event-layer attempts (v0.9.3's `about_to_wait` pump; the
+  `CursorMoved` M2 bridge below) could not close it because they change only
+  *when* redraws are requested, not how the drawable commits.
 
-  This adds a second, orthogonal redraw trigger — **mechanism M2**: a
+  Fix (`render::enable_presents_with_transaction`, macOS-only): reach the
+  surface's `CAMetalLayer` via `wgpu::Surface::as_hal::<hal::api::Metal>()` and
+  set `presentsWithTransaction = true` once after `configure`. wgpu-hal's Metal
+  present path then commits the command buffer, `waitUntilScheduled()`, and calls
+  `drawable.present()` inside the current `CATransaction`, so drawable + window
+  rect resize atomically — no stretch frame. This is the sole `unsafe` seam in
+  the crate: `mkui-wgpu` moves from `#![forbid(unsafe_code)]` to
+  `#![deny(unsafe_code)]` with a single scoped `#[allow(unsafe_code)]` +
+  `SAFETY:` note on that FFI call; every other module stays unsafe-denied. The
+  call is `#[cfg(target_os = "macos")]`-gated (Windows/Linux keep the standard
+  wgpu present path, unchanged), uses no new dependencies (the `objc2-quartz-core`
+  /`wgpu-hal` Metal path is already in the tree), and changes no public API.
+  Verified by operator visual-verify on Retina; not unit-testable without a live
+  Metal surface (displayless CI has none). References: Tristan Hume "Glitchless
+  Metal Window Resizing"; Raph Levien "The smooth resize test"; wgpu#1168;
+  winit#3644.
+- **wgpu `CursorMoved` M2 bridge during the active-resize window (#101, event
+  layer — orthogonal hygiene; retained, not the root-cause fix).** PR #100 (#99)
+  shipped the `about_to_wait` resize redraw pump (cap=60, `Drawn`-decrement,
+  `Skipped`-no-burn). This adds a second redraw trigger — **mechanism M2**: a
   `CursorMoved` event inside a recent-resize-active window calls
   `window.request_redraw()` directly, **independent of the pump's counter**,
   giving the redraw cadence a cursor-driven trigger to complement the pump's
-  `Resized`-arm trigger. This is deliberately *not* M1 (re-arming the pump on
-  cursor events): cap-exhaustion is ruled out, so re-arming would not help. The
+  `Resized`-arm trigger. It is deliberately *not* M1 (re-arming the pump): the
   active-resize-window guard is an explicit frame-count timeout
   (`RESIZE_ACTIVE_WINDOW_FRAMES = 60`, ~1s at 60Hz), **not** the circular
-  `resize_redraw_pending > 0` predicate (a drained pump would otherwise read as
-  "not resizing" exactly when the cursor bridge is needed — Codex 2026-06-09
-  #101 review P1#2). `about_to_wait` advances a monotonic `frame_counter`;
+  `resize_redraw_pending > 0` predicate (Codex 2026-06-09 #101 review P1#2).
+  `about_to_wait` advances a monotonic `frame_counter`;
   `Resized`/`ScaleFactorChanged` stamp `last_resize_frame`; the window closes on
-  the timeout so idle pointer motion after the gesture stays quiescent. The
-  bridge is **macOS-only** — the fast-shrink residual is a macOS Metal artifact,
-  so the `CursorMoved → request_redraw()` action is compile-time gated with
-  `#[cfg(target_os = "macos")]` and folds to a constant `false` on Windows/Linux
-  (those platforms are unchanged); the active-resize-window state machine itself
-  is shared infra, compiled + unit-tested on every native target. No public API
-  change, no new deps, no MSRV bump. ADR 0006 §"Resize-active redraw pump"
-  documents the M2 expansion + the explicit-timeout guard + the platform gating.
-
-  **Operator/hardware gates deferred** (require a Retina macOS display + the
-  Codex reviewer, unavailable to the autonomous implementing agent): pre-impl
-  `CursorMoved`-during-border-drag event trace, per-example frame-time
-  profiling for the cross-example ordering, the Codex round-N pre-impl design
-  review, and operator visual verification of the fast-shrink residual + idle
-  quiescence on Retina. The shipped code matches the review-ratified C2 M2
-  shape from the issue body; the empirical/visual confirmation is the
-  next-agent-launch / operator follow-up. See PR body for the scope decision.
+  the timeout so idle pointer motion stays quiescent. The bridge is **macOS-only**
+  — compile-time gated with `#[cfg(target_os = "macos")]`, folding to a constant
+  `false` on Windows/Linux (those platforms unchanged); the active-resize-window
+  state machine is shared infra, compiled + unit-tested on every native target.
+  This work keeps redraw cadence sane during a gesture but, per operator
+  visual-verify, is **not** what eliminates the jerk — the
+  `presentsWithTransaction` fix above is. No public API change, no new deps, no
+  MSRV bump. ADR 0006 §"Resize-active redraw pump" documents both layers.
 - **wgpu live-resize jerk eliminated on macOS (#99).** PR #98 (#97) fixed
   the HiDPI viewport-units math but the visible scale-snap on shrinking
   resize gestures (right→left, bottom→top) persisted. Root cause was at

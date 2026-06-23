@@ -243,7 +243,49 @@ The resize handlers only arm the pump; they do not directly call
 `window.request_redraw()` after the current event batch drains — a pure read
 of the pump state, it does not drain the budget.
 
-#### CursorMoved M2 bridge during the active-resize window (#101)
+> **Layer note (#101).** The pump and the `CursorMoved` M2 bridge below both
+> operate at the **event-scheduling layer** — they change *when* redraws are
+> requested. Operator visual-verify proved they cannot eliminate the macOS
+> fast-shrink residual, because its root cause is at the **presentation layer**
+> (see "Root cause" immediately below). The event-layer work is retained as
+> correct, orthogonal hygiene (it keeps redraw cadence sane during a gesture
+> and is correctly macOS-scoped), but the load-bearing fix is
+> `presentsWithTransaction`.
+
+#### Root cause: CAMetalLayer `presentsWithTransaction` (#101, presentation layer)
+
+The macOS fast-resize jerk is a **presentation-layer race**, not an
+event-scheduling one. AppKit commits a window's new bounds inside a
+`CATransaction`; by default (`CAMetalLayer.presentsWithTransaction = false`)
+the layer presents its drawable on an independent, asynchronous timeline. During
+a live-resize the window rect jumps to the new size before the matching drawable
+is scheduled, so Core Animation stretches the previous (stale-size) drawable into
+the new rect for one or more frames — the visible vibration. Neither winit nor
+wgpu set `presentsWithTransaction` by default (winit#3644).
+
+The fix (`render::enable_presents_with_transaction`, macOS-only, called once
+after `surface.configure`): reach the surface's `CAMetalLayer` via
+`wgpu::Surface::as_hal::<hal::api::Metal>()` and flip
+`setPresentsWithTransaction(true)`. wgpu-hal's Metal `Queue::present` already
+branches on this flag — when set, it commits the command buffer,
+`waitUntilScheduled()`, then calls `drawable.present()` *inside the current
+`CATransaction`* (wgpu-hal 29 `src/metal/mod.rs`). The drawable resize and the
+window-rect resize then commit atomically, with no stretch frame. The flag is a
+layer property (persists across `configure`) re-read every `acquire_texture`, so
+one call at surface creation suffices.
+
+This is the sole `unsafe` seam in `mkui-wgpu`: the crate is `#![deny(unsafe_code)]`
+(downgraded from `forbid` for exactly this FFI call), and the function carries a
+scoped `#[allow(unsafe_code)]` + `SAFETY:` note. No public API change; every
+non-macOS backend keeps the standard wgpu present path (the call is compiled out
+by `#[cfg(target_os = "macos")]`). It cannot be unit-tested without a live Metal
+surface (displayless CI has none; GPU tests are Vulkan/Lavapipe-only), so its
+binding verification is operator visual-verify on Retina.
+
+References: Tristan Hume, "Glitchless Metal Window Resizing"; Raph Levien, "The
+smooth resize test"; wgpu#1168 ("Resizing on macOS is cursed again"); winit#3644.
+
+#### CursorMoved M2 bridge during the active-resize window (#101, event layer — orthogonal hygiene)
 
 The `Resized`-armed pump (cap = 60) reached its operator-verified ceiling at
 v0.9.3: a small residual vibration persisted on *fast shrink-direction* drags
