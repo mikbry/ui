@@ -5,6 +5,7 @@ members = [
     "crates/mkui-core",        # Core types, traits, and headless logic
     "crates/mkui-text",        # Text-system trait + from-scratch bitmap prototype
     "crates/mkui-vector2d",    # Backend-neutral 2D paths/curves + Slug glyph encoder (Sprint 7)
+    "crates/mkui-vector2d-wgpu", # Native WGPU adapter for Slug glyph blobs (Sprint 7, #66)
     "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
     "crates/mkui-web",         # Web/WASM renderer
     "crates/mkui-console",     # Terminal/TUI renderer

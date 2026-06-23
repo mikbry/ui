@@ -15,8 +15,11 @@
 //! coexist as documented public API. See ADR 0006 §"`with_scene` as
 //! the retained low-level escape hatch".
 
+use std::sync::Arc;
+
 use mkui_core::components::Component;
 use mkui_core::error::MkuiError;
+use mkui_text::TextSystem;
 
 use crate::bridge::{WgpuRenderable, WgpuRendererRegistry};
 use crate::{Scene, Size, WgpuApp};
@@ -44,6 +47,11 @@ pub struct Mkui {
     /// `.run()`.
     core: Option<mkui_core::components::Mkui>,
     registry: Option<WgpuRendererRegistry>,
+    /// Optional explicitly-supplied text system (#66). When `Some`, it is
+    /// threaded into the `WgpuApp` on `.run()` so the declarative path renders
+    /// against a custom/composite text system instead of the bitmap default,
+    /// and is **never** replaced during `run` or a per-frame rebuild.
+    text_system: Option<Arc<dyn TextSystem>>,
 }
 
 impl Mkui {
@@ -52,6 +60,7 @@ impl Mkui {
             app: WgpuApp::new(Scene::new(Size::new(1280.0, 720.0))),
             core: Some(mkui_core::components::Mkui::new()),
             registry: Some(WgpuRendererRegistry::with_defaults()),
+            text_system: None,
         })
     }
 
@@ -65,6 +74,30 @@ impl Mkui {
             app: WgpuApp::new(Scene::new(Size::new(1280.0, 720.0))),
             core: Some(core),
             registry: Some(WgpuRendererRegistry::with_defaults()),
+            text_system: None,
+        })
+    }
+
+    /// Wrap a pre-built [`mkui_core::components::Mkui`] **and an explicitly
+    /// supplied text system** (#66).
+    ///
+    /// This is the declarative path's seam for a custom/composite text system:
+    /// the bitmap + Slug (+ outline, from #67) [`CompositeTextSystem`] is handed
+    /// in here and retained for the lifetime of the app. `run` threads it into
+    /// the live [`WgpuApp`] via [`WgpuApp::with_app_tree_and_text_system`]
+    /// instead of falling back to the bitmap default, and it is never replaced
+    /// during a per-frame scene rebuild.
+    ///
+    /// [`CompositeTextSystem`]: mkui_text::CompositeTextSystem
+    pub fn from_core_with_text_system(
+        core: mkui_core::components::Mkui,
+        text_system: Arc<dyn TextSystem>,
+    ) -> Result<Self, MkuiError> {
+        Ok(Self {
+            app: WgpuApp::new(Scene::new(Size::new(1280.0, 720.0))),
+            core: Some(core),
+            registry: Some(WgpuRendererRegistry::with_defaults()),
+            text_system: Some(text_system),
         })
     }
 
@@ -86,6 +119,7 @@ impl Mkui {
             app: WgpuApp::new(scene),
             core: None,
             registry: None,
+            text_system: None,
         }
     }
 
@@ -143,7 +177,15 @@ impl Mkui {
 
         let mut app = if let (Some(core), Some(registry)) = (self.core.take(), self.registry.take())
         {
-            WgpuApp::with_app_tree(core, registry)
+            // Retain an explicitly-supplied text system across `run` (#66) —
+            // the declarative path must not silently swap in the bitmap default
+            // when a custom/composite text system was provided.
+            match self.text_system.take() {
+                Some(text_system) => {
+                    WgpuApp::with_app_tree_and_text_system(core, registry, text_system)
+                }
+                None => WgpuApp::with_app_tree(core, registry),
+            }
         } else {
             self.app
         };
@@ -194,6 +236,33 @@ mod tests {
             );
         let core = mkui.core.as_ref().expect("core present");
         assert_eq!(core.children_len(), 2);
+    }
+
+    #[test]
+    fn from_core_with_text_system_stores_the_supplied_system() {
+        use mkui_text::CompositeTextSystem;
+        // #66: the declarative seam for a custom/composite text system retains
+        // it for `run` to thread into the live `WgpuApp`.
+        let core = mkui_core::components::Mkui::new();
+        let ts: Arc<dyn TextSystem> = Arc::new(CompositeTextSystem::new());
+        let mkui = Mkui::from_core_with_text_system(core, Arc::clone(&ts)).expect("ctor");
+        assert!(mkui.core.is_some(), "declarative core present");
+        let stored = mkui.text_system.as_ref().expect("text system retained");
+        assert!(
+            Arc::ptr_eq(stored, &ts),
+            "the exact supplied text system is retained, not a bitmap default"
+        );
+    }
+
+    #[test]
+    fn default_constructors_carry_no_custom_text_system() {
+        // `new` / `from_core` / `with_scene` leave the text system unset so the
+        // renderer keeps the bitmap default — only the explicit constructor opts
+        // in (#66).
+        assert!(Mkui::new().expect("new").text_system.is_none());
+        assert!(Mkui::with_scene(Scene::new(Size::new(1.0, 1.0)))
+            .text_system
+            .is_none());
     }
 
     #[test]

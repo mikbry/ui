@@ -16,14 +16,35 @@ description = "WGPU-oriented scene primitives and declarative builders for mkui"
 # See issue #106.
 gpu-tests = []
 
+# Slug vector-glyph lane (#66). Default OFF: builds without it retain the
+# v0.9.3 bitmap-only behavior and never initialize Slug GPU resources. Enabling
+# it pulls in the native `mkui-vector2d-wgpu` adapter and turns on the ordered
+# Slug render lane. Native only — the adapter is a `cfg(not(wasm32))` dep, so
+# browser/WASM builds ignore the feature (browser WebGPU is out of scope, #66).
+slug = ["dep:mkui-vector2d-wgpu"]
+
 [dependencies]
 mkui-core = { path = "../mkui-core" }
 mkui-runtime = { path = "../mkui-runtime" }
 mkui-text = { path = "../mkui-text" }
 serde_json = { workspace = true }
 
+# Native Slug adapter (#66), pulled in only by the `slug` feature. Kept out of
+# the `cfg(not(wasm32))` target table so the `slug` feature and its
+# `Primitive::SlugGlyph` variant resolve on every target; the dependency is
+# optional, so default (and all WASM) builds never compile it or its `wgpu`.
+[dependencies.mkui-vector2d-wgpu]
+path = "../mkui-vector2d-wgpu"
+optional = true
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
+
+[dev-dependencies]
+# Hand-authored Slug curve/band records for the `slug` + `gpu-tests` offscreen
+# acceptance tests (#66). Tests construct `SlugGlyph` blobs directly (no font
+# parser — that is #67), which needs the neutral crate's `Vec2`.
+mkui-vector2d = { path = "../mkui-vector2d" }
