@@ -130,13 +130,14 @@ fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
     let (sys, id) = registered();
 
     let face = sys.sfnt_face(id).unwrap();
-    let upem = face.units_per_em() as f64;
     let gid = face.glyph_index('M').unwrap();
     let ink = face.glyph_outline(gid).unwrap().ink_bounds;
     let ink_area = (ink.max_x - ink.min_x) as f64 * (ink.max_y - ink.min_y) as f64;
 
+    // Box top near the origin: `place_slug_run` puts the baseline an ascent
+    // below this, so a small top margin keeps even the 48 px glyph on-target.
     // Integer placement so the outward-rounded rectangle is unambiguous.
-    let box_origin = [8.0f32, 80.0f32];
+    let box_origin = [8.0f32, 8.0f32];
 
     // Clear-only baseline frame (no glyphs).
     let baseline = render_slug(&renderer, &adapter, &[]);
@@ -167,11 +168,14 @@ fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
 
         let drawn = render_slug(&renderer, &adapter, &glyphs);
 
-        // Outward-rounded ink rectangle in screen space (y-down: font y_max maps
-        // to the smaller/top screen y). Pen origin is the glyph's font-unit (0,0).
-        let scale = px as f64 / upem;
-        let pen_x = box_origin[0] as f64;
-        let baseline_y = box_origin[1] as f64;
+        // Outward-rounded ink rectangle in screen space. Derived from the glyph's
+        // ACTUAL placed pen origin (`origin_px`) + per-unit scale, so the rect
+        // tracks exactly where the adapter drew it (y-down: font y_max maps to
+        // the smaller/top screen y).
+        let placed = &glyphs[0];
+        let scale = placed.scale_px_per_unit as f64;
+        let pen_x = placed.origin_px[0] as f64;
+        let baseline_y = placed.origin_px[1] as f64;
         let x0 = (pen_x + ink.min_x as f64 * scale).floor() as i64;
         let x1 = (pen_x + ink.max_x as f64 * scale).ceil() as i64;
         let y_top = (baseline_y - ink.max_y as f64 * scale).floor() as i64;
