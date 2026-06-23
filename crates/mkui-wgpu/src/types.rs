@@ -106,6 +106,14 @@ pub enum Primitive {
     Quad(Quad),
     Text(Text),
     Icon(Icon),
+    /// A Slug vector glyph (#66), drawn through the `mkui-vector2d-wgpu`
+    /// coverage pipeline rather than tessellated to triangles. Present only
+    /// under the `slug` feature — the variant *is* the scene-level seam #67's
+    /// outline text system emits into; the renderer collects these in scene
+    /// order and dispatches them on the Slug lane via the ordered command
+    /// stream (see [`crate::render_command`]).
+    #[cfg(feature = "slug")]
+    SlugGlyph(mkui_vector2d_wgpu::PlacedSlugGlyph),
 }
 
 /// Generic motion primitive emitted by atoms like `dot`. The renderer
@@ -410,6 +418,14 @@ impl Scene {
 
     pub fn icon(&mut self, icon: Icon) {
         self.push(Primitive::Icon(icon));
+    }
+
+    /// Record a Slug vector glyph (#66) at its scene position. The glyph draws
+    /// on the Slug lane in the order it was pushed relative to other
+    /// primitives. Available only under the `slug` feature.
+    #[cfg(feature = "slug")]
+    pub fn slug_glyph(&mut self, glyph: mkui_vector2d_wgpu::PlacedSlugGlyph) {
+        self.push(Primitive::SlugGlyph(glyph));
     }
 
     /// Record a non-`None` animation. Atoms emit at most one instance per

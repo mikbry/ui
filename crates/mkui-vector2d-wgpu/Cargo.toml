@@ -1,0 +1,14 @@
+[package]
+name = "mkui-vector2d-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Native WGPU adapter for mkui-vector2d Slug glyph blobs: GPU buffer packing, WGSL coverage pipeline, and an ordered Slug render lane (no surface/frame lifecycle)"
+
+[dependencies]
+mkui-vector2d = { path = "../mkui-vector2d" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }

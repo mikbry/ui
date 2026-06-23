@@ -1067,6 +1067,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-vector2d-wgpu"
+version = "0.9.3"
+dependencies = [
+ "bytemuck",
+ "mkui-vector2d",
+ "wgpu",
+]
+
+[[package]]
 name = "mkui-web"
 version = "0.9.3"
 dependencies = [
@@ -1088,6 +1097,8 @@ dependencies = [
  "mkui-core",
  "mkui-runtime",
  "mkui-text",
+ "mkui-vector2d",
+ "mkui-vector2d-wgpu",
  "pollster",
  "serde_json",
  "wgpu",

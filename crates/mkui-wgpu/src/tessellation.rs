@@ -25,13 +25,29 @@ pub fn tessellate_scene(scene: &Scene) -> Vec<GuiTriangle> {
 /// their own `Arc<dyn TextSystem>` (so they can swap implementations
 /// between sprints) call this directly rather than the convenience wrapper.
 pub fn tessellate_scene_with_text(scene: &Scene, text_system: &dyn TextSystem) -> Vec<GuiTriangle> {
+    tessellate_primitives(&scene.primitives, text_system)
+}
+
+/// Tessellate a contiguous slice of primitives. The ordered render path (#66)
+/// calls this per [`crate::RenderCommand`] run so each command's geometry is
+/// emitted in scene order; `tessellate_scene_with_text` is the whole-scene
+/// convenience over the full primitive list.
+pub fn tessellate_primitives(
+    primitives: &[Primitive],
+    text_system: &dyn TextSystem,
+) -> Vec<GuiTriangle> {
     let mut triangles = Vec::new();
-    for primitive in &scene.primitives {
+    for primitive in primitives {
         match primitive {
             Primitive::Shadow(shadow) => tessellate_shadow(&mut triangles, *shadow),
             Primitive::Quad(quad) => tessellate_quad(&mut triangles, *quad),
             Primitive::Text(text) => tessellate_text(&mut triangles, text, text_system),
             Primitive::Icon(icon) => tessellate_icon(&mut triangles, icon),
+            // Slug glyphs are not tessellated to triangles — they draw on the
+            // Slug coverage lane (#66). The ordered render path routes them
+            // there directly, so the triangle tessellator skips them.
+            #[cfg(feature = "slug")]
+            Primitive::SlugGlyph(_) => {}
         }
     }
     triangles

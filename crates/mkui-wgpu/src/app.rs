@@ -187,6 +187,24 @@ impl WgpuApp {
         app
     }
 
+    /// Build a declarative-path app that **retains an explicitly supplied text
+    /// system** (#66). Identical to [`WgpuApp::with_app_tree`] except the
+    /// renderer draws against `text_system` instead of the bitmap default.
+    ///
+    /// This is the declarative analogue of [`WgpuApp::with_text_system`]: a
+    /// composite text system (bitmap + Slug + outline) handed in here survives
+    /// `run` and every per-frame scene rebuild — the app never silently swaps
+    /// in the bitmap default. See [`crate::Mkui::from_core_with_text_system`].
+    pub fn with_app_tree_and_text_system(
+        core: mkui_core::components::Mkui,
+        registry: WgpuRendererRegistry,
+        text_system: Arc<dyn TextSystem>,
+    ) -> Self {
+        let mut app = Self::with_app_tree(core, registry);
+        app.text_system = text_system;
+        app
+    }
+
     pub fn scene(&self) -> &Scene {
         &self.scene
     }
@@ -735,6 +753,22 @@ mod tests {
         let app = WgpuApp::with_app_tree(core, registry);
         assert!(app.core().is_some());
         assert!(app.registry().is_some());
+    }
+
+    #[test]
+    fn with_app_tree_and_text_system_retains_supplied_system() {
+        use mkui_text::CompositeTextSystem;
+        // #66: a declarative app handed a custom/composite text system must keep
+        // it — never silently swap in the bitmap default.
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let ts: Arc<dyn TextSystem> = Arc::new(CompositeTextSystem::new());
+        let app = WgpuApp::with_app_tree_and_text_system(core, registry, Arc::clone(&ts));
+        assert!(app.core().is_some(), "still a declarative-path app");
+        assert!(
+            Arc::ptr_eq(app.text_system(), &ts),
+            "the supplied text system is retained, not replaced by the bitmap default"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

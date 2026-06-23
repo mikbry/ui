@@ -8,6 +8,25 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-vector2d-wgpu` adapter + ordered Slug render lane (#66).** A new
+  acyclic crate packs #65's backend-neutral Slug glyph blobs into WGPU storage
+  buffers and renders them through a single-horizontal-ray WGSL coverage
+  pipeline (one dilated quad per glyph; band membership/ordering consumed
+  verbatim from `mkui-vector2d`, never recomputed). The crate depends only on
+  `mkui-vector2d` + `wgpu` — never on `mkui-wgpu` — and owns no surface, adapter
+  selection, or frame lifecycle. `mkui-wgpu` gains a default-off `slug` Cargo
+  feature (forwarded by `examples/atoms-on-wgpu`); off-feature builds stay
+  bitmap-only and v0.9.3-compatible. The renderer now derives an ordered
+  `RenderCommand` stream from `Scene::primitives` — preserving paint order,
+  coalescing only adjacent same-lane primitives — and draws UI/bitmap triangles
+  and Slug glyphs in scene order within one pass. Scenes carry Slug glyphs via a
+  new `Primitive::SlugGlyph` variant (the seam #67's outline text system emits
+  into); `WgpuApp::with_app_tree_and_text_system` /
+  `Mkui::from_core_with_text_system` let declarative apps supply and retain a
+  custom/composite text system. Slug curve/band encoding reproduces the
+  public-domain Slug contract (Eric Lengyel) from scratch. GPU acceptance tests
+  run hand-authored records through #106's offscreen Lavapipe harness — no font
+  parser (that is #67).
 - **Composite text-system router + font registry in `mkui-text` (#62).**
   `CompositeTextSystem` lets bitmap and Slug (and, from #67, outline) faces
   coexist in one scene without renderer-global conditionals or provider-local

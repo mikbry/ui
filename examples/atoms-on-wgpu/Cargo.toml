@@ -5,6 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Forward the Slug vector-glyph lane (#66) down to the wgpu backend. Default
+# off — the demo stays bitmap-only and v0.9.3-compatible unless built with
+# `--features slug`.
+slug = ["mkui-wgpu/slug"]
+
 [dependencies]
 mkui-core = { path = "../../crates/mkui-core" }
 mkui-runtime = { path = "../../crates/mkui-runtime" }
