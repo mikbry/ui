@@ -6,7 +6,7 @@
 //! binary is the wgpu-side consumer that proves the bridge runs the
 //! shared tree end-to-end.
 //!
-//! `HEADLESS=1 cargo run --example native-showcase --release` exits
+//! `HEADLESS=1 cargo run -p native-showcase --release` exits
 //! after a single walker pass — useful for CI smoke validation when
 //! there is no display server.
 

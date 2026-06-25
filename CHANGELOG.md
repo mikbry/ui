@@ -116,6 +116,19 @@ breaking changes can land on minor bumps).
   `cargo-audit` CI, which treat `vulnerability` as `error`.
 
 ### Fixed
+- **Completed `showcase-common` wgpu action arms and corrected example run
+  commands (#94).** All seven shared-showcase button actions (GitHub, Primary,
+  Secondary, Destructive, Outline, Ghost, Source Code) previously carried only
+  `web` and `console` cfg arms, leaving native WGPU interaction incomplete; each
+  now has a `#[cfg(feature = "wgpu")]` arm with a diagnostic print mechanically
+  equivalent to its console arm (the current runtime tree has no stateful visual
+  action for these buttons). A source-level test in `showcase-common` asserts all
+  seven arms are present. The three WGPU package binaries (`atoms-on-wgpu`,
+  `native-showcase`, `native-window`) documented the invalid
+  `cargo run --example <name>` form even though they are workspace packages; their
+  doc comments — plus the matching `README.md` invocations — now use
+  `cargo run -p <package> --release`. No public API, dependency, or MSRV change;
+  bridge multi-feature precedence semantics remain out of scope (#102).
 - **macOS fast-resize jerk fixed at the presentation layer:
   `CAMetalLayer.presentsWithTransaction` (#101).** The fast-shrink-direction
   vibration (right→left, bottom→top) on macOS live-resize is a **presentation-

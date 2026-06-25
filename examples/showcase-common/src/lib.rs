@@ -48,6 +48,10 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                     {
                                                         println!("GitHub link clicked!");
                                                     }
+                                                    #[cfg(feature = "wgpu")]
+                                                    {
+                                                        println!("GitHub link clicked!");
+                                                    }
                                                 })
                                         )
                                 )
@@ -104,6 +108,8 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             web_sys::console::log_1(&"Primary button clicked!".into());
                                                             #[cfg(feature = "console")]
                                                             println!("Primary button clicked!");
+                                                            #[cfg(feature = "wgpu")]
+                                                            println!("Primary button clicked!");
                                                         })
                                                 )
                                                 .child(
@@ -113,6 +119,8 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             #[cfg(feature = "web")]
                                                             web_sys::console::log_1(&"Secondary button clicked!".into());
                                                             #[cfg(feature = "console")]
+                                                            println!("Secondary button clicked!");
+                                                            #[cfg(feature = "wgpu")]
                                                             println!("Secondary button clicked!");
                                                         })
                                                 )
@@ -124,6 +132,8 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             web_sys::console::log_1(&"Destructive button clicked!".into());
                                                             #[cfg(feature = "console")]
                                                             println!("Destructive button clicked!");
+                                                            #[cfg(feature = "wgpu")]
+                                                            println!("Destructive button clicked!");
                                                         })
                                                 )
                                                 .child(
@@ -134,6 +144,8 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             web_sys::console::log_1(&"Outline button clicked!".into());
                                                             #[cfg(feature = "console")]
                                                             println!("Outline button clicked!");
+                                                            #[cfg(feature = "wgpu")]
+                                                            println!("Outline button clicked!");
                                                         })
                                                 )
                                                 .child(
@@ -143,6 +155,8 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             #[cfg(feature = "web")]
                                                             web_sys::console::log_1(&"Ghost button clicked!".into());
                                                             #[cfg(feature = "console")]
+                                                            println!("Ghost button clicked!");
+                                                            #[cfg(feature = "wgpu")]
                                                             println!("Ghost button clicked!");
                                                         })
                                                 )
@@ -183,6 +197,10 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             {
                                                                 println!("Source code link clicked!");
                                                             }
+                                                            #[cfg(feature = "wgpu")]
+                                                            {
+                                                                println!("Source code link clicked!");
+                                                            }
                                                         })
                                                 )
                                                 .child(Text::new("•").variant(TextVariant::Caption))
@@ -195,4 +213,27 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                         )
                 )
         ))
+}
+
+#[cfg(test)]
+mod tests {
+    /// Issue #94 — every one of the seven `showcase-common` button actions
+    /// must carry a wgpu-gated cfg arm alongside its web/console arms, so
+    /// native WGPU interaction is complete. This source-level assertion is
+    /// backend-agnostic: it inspects the source text directly rather than
+    /// requiring the `wgpu` feature to be active to compile a runtime check.
+    /// (The needle below is assembled at runtime so this comment and the
+    /// search literal cannot themselves be miscounted as button arms.)
+    #[test]
+    fn all_seven_actions_have_a_wgpu_arm() {
+        let source = include_str!("lib.rs");
+        // Assemble the needle so neither this line nor the doc comment above
+        // can ever be miscounted as one of the seven button arms.
+        let needle = format!("#[cfg(feature = {q}wgpu{q})]", q = '"');
+        let wgpu_arms = source.matches(&needle).count();
+        assert_eq!(
+            wgpu_arms, 7,
+            "expected a wgpu cfg arm on each of the seven button actions, found {wgpu_arms}"
+        );
+    }
 }
