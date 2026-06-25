@@ -417,10 +417,7 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
     let bm_x1 = bm_x0 + bm_w;
     let bm_y1 = bm_y0 + bm_h;
     assert!(
-        bm_x0 >= 0
-            && bm_y0 >= 0
-            && bm_x1 <= W as i64
-            && bm_y1 <= H as i64,
+        bm_x0 >= 0 && bm_y0 >= 0 && bm_x1 <= W as i64 && bm_y1 <= H as i64,
         "bitmap proxy region must fit on-target (got {bm_x0},{bm_y0}..{bm_x1},{bm_y1})"
     );
 
