@@ -8,6 +8,28 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **SFNT text-system integration — Phase 1, CPU-side (#67).** A narrow,
+  from-scratch SFNT/TrueType decoder in `mkui-text` (`SfntFace`) reads the
+  licensed Abel-Regular fixture — table-directory validation, `head`/`maxp`/
+  `hhea`/`hmtx`/`cmap` format 4/`loca`/`glyf`/`name`, Unicode→glyph mapping,
+  advances, and simple quadratic outlines (font units, y-up) — and rejects
+  CFF/CFF2, color/bitmap, composite, malformed, and out-of-range inputs with
+  typed `SfntError`s. No runtime font-stack dependency (`ttf-parser` is a
+  `[dev-dependencies]` parity oracle only). `CompositeTextSystem::register_sfnt_face`
+  registers the face as a `TextRenderClass::Slug` provider beside the built-in
+  bitmap face through #62's registry-issued `FontId`s, with layout-time mixed
+  fallback honoring `RoutedRun::Fallback(ValidatedFallback)` end-to-end (real
+  SFNT + bitmap, cluster order/advances/positions preserved). The Slug CPU
+  vertical slice flows decoded outlines through #65's `mkui-vector2d` encoder
+  into a size-independent blob reused across 12/16/24/48 px, and glyph-`M`
+  calibration proves the Tier-2 baseline-diff threshold feasible. Phase 2 wires
+  that outline output into #66's GPU Slug lane: `mkui-wgpu::place_slug_run` turns
+  a Slug `LayoutRun` into `PlacedSlugGlyph` primitives, and font-backed offscreen
+  readback tests (on #106's Lavapipe harness) render glyph `M` at 12/16/24/48 px
+  and assert at least the calibrated changed-pixel count inside its decoded ink
+  rectangle. A cross-provider test composes a real SFNT-Slug run and a bitmap
+  fallback run through the renderer's ordered command stream, and `examples/text
+  --features slug` renders Abel through the Slug lane beside a bitmap label.
 - **`mkui-vector2d-wgpu` adapter + ordered Slug render lane (#66).** A new
   acyclic crate packs #65's backend-neutral Slug glyph blobs into WGPU storage
   buffers and renders them through a single-horizontal-ray WGSL coverage

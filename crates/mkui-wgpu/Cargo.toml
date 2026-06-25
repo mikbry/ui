@@ -21,7 +21,10 @@ gpu-tests = []
 # it pulls in the native `mkui-vector2d-wgpu` adapter and turns on the ordered
 # Slug render lane. Native only — the adapter is a `cfg(not(wasm32))` dep, so
 # browser/WASM builds ignore the feature (browser WebGPU is out of scope, #66).
-slug = ["dep:mkui-vector2d-wgpu"]
+# #67 also pulls in `mkui-vector2d` (the neutral encoder) so the renderer-side
+# `slug_text::place_slug_run` glue can turn an SFNT outline run into placed GPU
+# glyphs.
+slug = ["dep:mkui-vector2d-wgpu", "dep:mkui-vector2d"]
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
@@ -37,14 +40,22 @@ serde_json = { workspace = true }
 path = "../mkui-vector2d-wgpu"
 optional = true
 
+# Backend-neutral Slug encoder (#65), pulled in only by the `slug` feature.
+# #67's `slug_text::place_slug_run` consumes it to turn an SFNT outline run into
+# a placed GPU glyph (outline → path → encoded blob → `PlacedSlugGlyph`). The
+# `slug` + `gpu-tests` offscreen acceptance tests (#66) also build their
+# hand-authored `SlugGlyph` blobs through it.
+[dependencies.mkui-vector2d]
+path = "../mkui-vector2d"
+optional = true
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
 
-[dev-dependencies]
-# Hand-authored Slug curve/band records for the `slug` + `gpu-tests` offscreen
-# acceptance tests (#66). Tests construct `SlugGlyph` blobs directly (no font
-# parser — that is #67), which needs the neutral crate's `Vec2`.
-mkui-vector2d = { path = "../mkui-vector2d" }
+# `mkui-vector2d` is no longer a dev-dependency: since #67 it is an optional
+# normal dependency enabled by the `slug` feature (above), which already covers
+# every `slug`-gated test (the #66 hand-authored-record acceptance tests and
+# #67's font-backed ones).

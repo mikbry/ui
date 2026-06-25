@@ -74,6 +74,11 @@ pub mod theme;
 pub mod types;
 pub mod walker;
 
+// #67 renderer-side glue: turn an outline (Slug-class) `LayoutRun` into placed
+// GPU glyphs. Native + `slug` only — it names `mkui-vector2d-wgpu` types.
+#[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
+pub mod slug_text;
+
 mod tessellation;
 
 pub use app::WgpuApp;
@@ -94,6 +99,10 @@ pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutpu
 // crate directly.
 #[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
 pub use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
+
+// #67 renderer-side outline-text glue.
+#[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
+pub use slug_text::place_slug_run;
 
 // Low-level types
 pub use types::{

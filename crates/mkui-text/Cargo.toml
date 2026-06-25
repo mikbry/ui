@@ -9,3 +9,10 @@ description = "Text-system trait + from-scratch bitmap prototype for mkui (no ex
 
 [dependencies]
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# Test oracle ONLY — used by #67's parity tests to validate the from-scratch
+# narrow SFNT decoder against a known-correct independent parser. Never a
+# runtime dependency (the crate's "own the stack" forbid-list applies); it
+# appears here under [dev-dependencies] and nowhere else.
+ttf-parser = "0.25"

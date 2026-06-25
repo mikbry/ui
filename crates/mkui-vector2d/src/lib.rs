@@ -71,6 +71,7 @@ pub use slug::{
 // on and consumes, so downstream consumers need not also name `mkui-text` for
 // these types. `mkui-text` remains their single source of truth (#61).
 pub use mkui_text::{
-    Affine2Fixed, Fixed16_16, FontId, FontIdAllocator, GlyphOutline, OpenTypeTag, OutlineBounds,
-    OutlineCommand, OutlineKey, VariationAxis, VariationSettings,
+    Affine2Fixed, Fixed16_16, FontId, FontIdAllocator, GlyphOutline, LayoutGlyph, LayoutRun,
+    OpenTypeTag, OutlineBounds, OutlineCommand, OutlineKey, TextRenderClass, VariationAxis,
+    VariationSettings,
 };
