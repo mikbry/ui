@@ -137,6 +137,27 @@ breaking changes can land on minor bumps).
   doc comments — plus the matching `README.md` invocations — now use
   `cargo run -p <package> --release`. No public API, dependency, or MSRV change;
   bridge multi-feature precedence semantics remain out of scope (#102).
+- **FFI panic safety in `mkui-c` (audit round-6 P1, #103).** A Rust panic
+  unwinding across an `extern "C"` boundary is undefined behaviour. Two fixes
+  close that gap. (1) `MkuiResult::error` dropped its nested
+  `CString::new(...).unwrap()` fallback for `unwrap_or_default()`, so ordinary
+  error construction has no panic path from the `CString` fallback. (2) All
+  **12** exported `extern "C"` functions now run their body inside
+  `std::panic::catch_unwind(AssertUnwindSafe(...))` via a private `ffi_guard`
+  helper; a caught panic returns the type-appropriate, allocation-free fallback
+  (`null`/`null_mut` for pointers, `invalid_node()`/`invalid_action()` for the
+  id mirrors, and a non-allocating `MkuiRuntimeError` + null-message
+  `MkuiResult` — never `MkuiResult::error`, which allocates). Best-effort
+  logging on the recovery path is static-message-only and itself wrapped in a
+  nested `catch_unwind`, so a logging failure cannot escape the ABI. This
+  guards Rust panics using mkui's own unwind runtime; it does **not** claim to
+  catch process aborts, foreign-language exceptions, or a panic/exception
+  crossing an `extern "C"` callback boundary. Panic-injection tests exercise
+  every one of the 12 wrappers through a `#[cfg(test)]`-only hook (no Cargo
+  feature); release/public builds contain no injection hook or new exported
+  symbol. No new `MkuiErrorCode` variant, no `MkuiResult::Panicked`, no
+  C-header change, and no new dependency or MSRV change — the cbindgen
+  header-drift check and cross-binding parity tests stay green.
 - **macOS fast-resize jerk fixed at the presentation layer:
   `CAMetalLayer.presentsWithTransaction` (#101).** The fast-shrink-direction
   vibration (right→left, bottom→top) on macOS live-resize is a **presentation-

@@ -30,6 +30,7 @@
 
 use std::cell::RefCell;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::panic::AssertUnwindSafe;
 use std::ptr;
 
 use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeId, StyleClass, TextVariant};
@@ -128,11 +129,89 @@ impl MkuiResult {
     }
 
     fn error(code: MkuiErrorCode, message: &str) -> Self {
-        let c_message = CString::new(message)
-            .unwrap_or_else(|_| CString::new("Failed to create error message").unwrap());
+        // `CString::new` only fails on an interior NUL; fall back to an empty
+        // C string rather than the prior nested `CString::new(...).unwrap()`,
+        // which carried its own (unreachable, but real) panic path. Ordinary
+        // error construction now has no panic path from the `CString`
+        // fallback.
+        let c_message = CString::new(message).unwrap_or_default();
         Self {
             code,
             message: c_message.into_raw(),
+        }
+    }
+}
+
+/// Allocation-free `MkuiResult` returned from the panic-recovery path of an
+/// `extern "C"` wrapper. Unlike [`MkuiResult::error`] it never calls
+/// `CString::new`/`into_raw`, so it cannot itself allocate or fail while we
+/// are already unwinding out of a caught panic.
+fn panic_result() -> MkuiResult {
+    MkuiResult {
+        code: MkuiErrorCode::MkuiRuntimeError,
+        message: ptr::null(),
+    }
+}
+
+/// Run an exported FFI body under [`std::panic::catch_unwind`] so a Rust
+/// panic can never unwind across the `extern "C"` boundary (which is
+/// undefined behaviour). On a caught panic we emit best-effort static-message
+/// logging — itself contained in a nested `catch_unwind` so a logging failure
+/// cannot escape — and return the type-appropriate, allocation-free
+/// `fallback` value.
+///
+/// This protects against Rust panics using the unwind runtime inside mkui's
+/// own Rust body. It does **not** catch process aborts, foreign-language
+/// exceptions, or a panic/exception crossing an `extern "C"` callback
+/// boundary; those remain outside `catch_unwind`'s guarantee.
+fn ffi_guard<T>(fallback: T, body: impl FnOnce() -> T) -> T {
+    let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // `#[cfg(test)]`-only injection hook — absent from release/public
+        // builds, so it adds no exported symbol and no runtime cost there.
+        #[cfg(test)]
+        test_panic::maybe_inject();
+        body()
+    }));
+    match result {
+        Ok(value) => value,
+        Err(_) => {
+            log_ffi_panic();
+            fallback
+        }
+    }
+}
+
+/// Best-effort logging from the panic-recovery path. Static message only —
+/// the panic payload is never formatted into an allocation here — and the
+/// whole call is wrapped in a nested `catch_unwind` so a failure in the
+/// logging path itself cannot unwind across the C ABI.
+fn log_ffi_panic() {
+    let _ = std::panic::catch_unwind(|| {
+        eprintln!("mkui-c: caught a Rust panic at the FFI boundary; returning fallback value");
+    });
+}
+
+/// `#[cfg(test)]`-only panic-injection hook. Lets the panic-safety tests
+/// trigger a synthetic Rust panic *inside* a wrapper (after entry, before
+/// normal return) without a Cargo feature or any release-build footprint.
+#[cfg(test)]
+mod test_panic {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm the next `maybe_inject` call on this thread to panic once.
+    pub(super) fn arm() {
+        ARMED.with(|c| c.set(true));
+    }
+
+    /// Panic once if armed, disarming first so the recovery path cannot
+    /// re-enter the injection on this thread.
+    pub(super) fn maybe_inject() {
+        if ARMED.with(|c| c.replace(false)) {
+            panic!("injected synthetic FFI panic (test only)");
         }
     }
 }
@@ -160,38 +239,44 @@ fn invalid_action() -> MkuiActionId {
 /// Create a new mkui application.
 #[no_mangle]
 pub extern "C" fn mkui_app_new() -> *mut MkuiApp {
-    let app = MkuiApp {
-        tree: RefCell::new(AppTree::new()),
-        callbacks: RefCell::new(Vec::new()),
-    };
-    Box::into_raw(Box::new(app))
+    ffi_guard(ptr::null_mut(), || {
+        let app = MkuiApp {
+            tree: RefCell::new(AppTree::new()),
+            callbacks: RefCell::new(Vec::new()),
+        };
+        Box::into_raw(Box::new(app))
+    })
 }
 
 /// Free a mkui application.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_free(app: *mut MkuiApp) {
-    if app.is_null() {
-        return;
-    }
-    // SAFETY: `app` was produced by `Box::into_raw` in `mkui_app_new` and
-    // the host is responsible for calling `mkui_app_free` exactly once. We
-    // reconstruct the Box and drop it.
-    unsafe {
-        let _ = Box::from_raw(app);
-    }
+    ffi_guard((), || {
+        if app.is_null() {
+            return;
+        }
+        // SAFETY: `app` was produced by `Box::into_raw` in `mkui_app_new` and
+        // the host is responsible for calling `mkui_app_free` exactly once. We
+        // reconstruct the Box and drop it.
+        unsafe {
+            let _ = Box::from_raw(app);
+        }
+    })
 }
 
 /// Return the root `NodeId` so the host can attach children to the runtime
 /// tree without exposing the synthetic root constant.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_root(app: *const MkuiApp) -> MkuiNodeId {
-    if app.is_null() {
-        return invalid_node();
-    }
-    // SAFETY: caller guarantees `app` was produced by `mkui_app_new` and
-    // has not been freed. We only borrow immutably here.
-    let app_ref = unsafe { &*app };
-    app_ref.tree.borrow().root().into()
+    ffi_guard(invalid_node(), || {
+        if app.is_null() {
+            return invalid_node();
+        }
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new` and
+        // has not been freed. We only borrow immutably here.
+        let app_ref = unsafe { &*app };
+        app_ref.tree.borrow().root().into()
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -248,28 +333,30 @@ pub unsafe extern "C" fn mkui_app_view_child(
     parent: MkuiNodeId,
     class_name: *const c_char,
 ) -> MkuiNodeId {
-    if app.is_null() {
-        return invalid_node();
-    }
-    // SAFETY: `app` is non-null and was produced by `mkui_app_new`.
-    let app_ref = unsafe { &mut *app };
-    let class = match unsafe { read_class(class_name) } {
-        Ok(c) => c,
-        Err(_) => return invalid_node(),
-    };
-    let style = StyleClass::from_str(class);
-    if style.parse().is_err() {
-        return invalid_node();
-    }
-    // P1 guard (Codex round 8): refuse stale or fabricated parent handles
-    // before reaching the runtime's `assert!`-on-invalid-parent path. A
-    // panic across `extern "C"` is undefined behaviour.
-    let mut tree = app_ref.tree.borrow_mut();
-    if !parent_is_live(&tree, parent) {
-        return invalid_node();
-    }
-    let id = tree.push_view_unchecked(parent.into(), style);
-    id.into()
+    ffi_guard(invalid_node(), || {
+        if app.is_null() {
+            return invalid_node();
+        }
+        // SAFETY: `app` is non-null and was produced by `mkui_app_new`.
+        let app_ref = unsafe { &mut *app };
+        let class = match unsafe { read_class(class_name) } {
+            Ok(c) => c,
+            Err(_) => return invalid_node(),
+        };
+        let style = StyleClass::from_str(class);
+        if style.parse().is_err() {
+            return invalid_node();
+        }
+        // P1 guard (Codex round 8): refuse stale or fabricated parent handles
+        // before reaching the runtime's `assert!`-on-invalid-parent path. A
+        // panic across `extern "C"` is undefined behaviour.
+        let mut tree = app_ref.tree.borrow_mut();
+        if !parent_is_live(&tree, parent) {
+            return invalid_node();
+        }
+        let id = tree.push_view_unchecked(parent.into(), style);
+        id.into()
+    })
 }
 
 /// Append a `Text` under `parent`.
@@ -281,34 +368,36 @@ pub unsafe extern "C" fn mkui_app_text_child(
     variant: c_int,
     class_name: *const c_char,
 ) -> MkuiNodeId {
-    if app.is_null() {
-        return invalid_node();
-    }
-    // SAFETY: see `mkui_app_view_child`.
-    let app_ref = unsafe { &mut *app };
-    let content = match unsafe { read_str(content, "content") } {
-        Ok(s) => s,
-        Err(_) => return invalid_node(),
-    };
-    let class = match unsafe { read_class(class_name) } {
-        Ok(c) => c,
-        Err(_) => return invalid_node(),
-    };
-    let variant = match TextVariant::from_ffi(variant) {
-        Ok(v) => v,
-        Err(_) => return invalid_node(),
-    };
-    let style = StyleClass::from_str(class);
-    if style.parse().is_err() {
-        return invalid_node();
-    }
-    // P1 guard (Codex round 8): see `mkui_app_view_child`.
-    let mut tree = app_ref.tree.borrow_mut();
-    if !parent_is_live(&tree, parent) {
-        return invalid_node();
-    }
-    let id = tree.push_text_unchecked(parent.into(), content, variant, style);
-    id.into()
+    ffi_guard(invalid_node(), || {
+        if app.is_null() {
+            return invalid_node();
+        }
+        // SAFETY: see `mkui_app_view_child`.
+        let app_ref = unsafe { &mut *app };
+        let content = match unsafe { read_str(content, "content") } {
+            Ok(s) => s,
+            Err(_) => return invalid_node(),
+        };
+        let class = match unsafe { read_class(class_name) } {
+            Ok(c) => c,
+            Err(_) => return invalid_node(),
+        };
+        let variant = match TextVariant::from_ffi(variant) {
+            Ok(v) => v,
+            Err(_) => return invalid_node(),
+        };
+        let style = StyleClass::from_str(class);
+        if style.parse().is_err() {
+            return invalid_node();
+        }
+        // P1 guard (Codex round 8): see `mkui_app_view_child`.
+        let mut tree = app_ref.tree.borrow_mut();
+        if !parent_is_live(&tree, parent) {
+            return invalid_node();
+        }
+        let id = tree.push_text_unchecked(parent.into(), content, variant, style);
+        id.into()
+    })
 }
 
 /// Append a `Button` under `parent`. Pass `MkuiActionId{UINT_MAX, UINT_MAX}`
@@ -322,39 +411,41 @@ pub unsafe extern "C" fn mkui_app_button_child(
     class_name: *const c_char,
     on_press: MkuiActionId,
 ) -> MkuiNodeId {
-    if app.is_null() {
-        return invalid_node();
-    }
-    // SAFETY: see `mkui_app_view_child`.
-    let app_ref = unsafe { &mut *app };
-    let label = match unsafe { read_str(label, "label") } {
-        Ok(s) => s,
-        Err(_) => return invalid_node(),
-    };
-    let class = match unsafe { read_class(class_name) } {
-        Ok(c) => c,
-        Err(_) => return invalid_node(),
-    };
-    let variant = match ButtonVariant::from_ffi(variant) {
-        Ok(v) => v,
-        Err(_) => return invalid_node(),
-    };
-    let style = StyleClass::from_str(class);
-    if style.parse().is_err() {
-        return invalid_node();
-    }
-    let action = if on_press == invalid_action() {
-        None
-    } else {
-        Some(on_press.into())
-    };
-    // P1 guard (Codex round 8): see `mkui_app_view_child`.
-    let mut tree = app_ref.tree.borrow_mut();
-    if !parent_is_live(&tree, parent) {
-        return invalid_node();
-    }
-    let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
-    id.into()
+    ffi_guard(invalid_node(), || {
+        if app.is_null() {
+            return invalid_node();
+        }
+        // SAFETY: see `mkui_app_view_child`.
+        let app_ref = unsafe { &mut *app };
+        let label = match unsafe { read_str(label, "label") } {
+            Ok(s) => s,
+            Err(_) => return invalid_node(),
+        };
+        let class = match unsafe { read_class(class_name) } {
+            Ok(c) => c,
+            Err(_) => return invalid_node(),
+        };
+        let variant = match ButtonVariant::from_ffi(variant) {
+            Ok(v) => v,
+            Err(_) => return invalid_node(),
+        };
+        let style = StyleClass::from_str(class);
+        if style.parse().is_err() {
+            return invalid_node();
+        }
+        let action = if on_press == invalid_action() {
+            None
+        } else {
+            Some(on_press.into())
+        };
+        // P1 guard (Codex round 8): see `mkui_app_view_child`.
+        let mut tree = app_ref.tree.borrow_mut();
+        if !parent_is_live(&tree, parent) {
+            return invalid_node();
+        }
+        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
+        id.into()
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -372,32 +463,34 @@ pub unsafe extern "C" fn mkui_app_register_callback(
     func: Option<extern "C" fn(*mut c_void)>,
     user_data: *mut c_void,
 ) -> MkuiActionId {
-    if app.is_null() {
-        return invalid_action();
-    }
-    let Some(func) = func else {
-        return invalid_action();
-    };
-    // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
-    let app_ref = unsafe { &mut *app };
+    ffi_guard(invalid_action(), || {
+        if app.is_null() {
+            return invalid_action();
+        }
+        let Some(func) = func else {
+            return invalid_action();
+        };
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+        let app_ref = unsafe { &mut *app };
 
-    // Allocate a stable id on the runtime side ("remote" registration —
-    // the closure stays on the C side, the runtime just owns the handle).
-    let id = app_ref.tree.borrow_mut().actions_mut().register_remote();
+        // Allocate a stable id on the runtime side ("remote" registration —
+        // the closure stays on the C side, the runtime just owns the handle).
+        let id = app_ref.tree.borrow_mut().actions_mut().register_remote();
 
-    // Stash the C callback in our parallel table keyed by ActionId.index().
-    let mut callbacks = app_ref.callbacks.borrow_mut();
-    let idx = id.index() as usize;
-    if callbacks.len() <= idx {
-        callbacks.resize_with(idx + 1, || None);
-    }
-    callbacks[idx] = Some(ForeignCallback {
-        func,
-        user_data,
-        generation: id.generation(),
-    });
+        // Stash the C callback in our parallel table keyed by ActionId.index().
+        let mut callbacks = app_ref.callbacks.borrow_mut();
+        let idx = id.index() as usize;
+        if callbacks.len() <= idx {
+            callbacks.resize_with(idx + 1, || None);
+        }
+        callbacks[idx] = Some(ForeignCallback {
+            func,
+            user_data,
+            generation: id.generation(),
+        });
 
-    id.into()
+        id.into()
+    })
 }
 
 /// Fire a registered callback. Useful for test harnesses; the actual UI
@@ -405,23 +498,25 @@ pub unsafe extern "C" fn mkui_app_register_callback(
 /// is pressed.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_fire_action(app: *mut MkuiApp, id: MkuiActionId) -> MkuiResult {
-    if app.is_null() {
-        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
-    }
-    // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
-    let app_ref = unsafe { &*app };
-    let callbacks = app_ref.callbacks.borrow();
-    let Some(slot) = callbacks.get(id.index as usize) else {
-        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Unknown action id");
-    };
-    let Some(cb) = slot else {
-        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is empty");
-    };
-    if cb.generation != id.generation {
-        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is stale");
-    }
-    (cb.func)(cb.user_data);
-    MkuiResult::success()
+    ffi_guard(panic_result(), || {
+        if app.is_null() {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
+        }
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+        let app_ref = unsafe { &*app };
+        let callbacks = app_ref.callbacks.borrow();
+        let Some(slot) = callbacks.get(id.index as usize) else {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Unknown action id");
+        };
+        let Some(cb) = slot else {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is empty");
+        };
+        if cb.generation != id.generation {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is stale");
+        }
+        (cb.func)(cb.user_data);
+        MkuiResult::success()
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -441,38 +536,43 @@ pub unsafe extern "C" fn mkui_app_fire_action(app: *mut MkuiApp, id: MkuiActionI
 /// invalid C and the header would fail to compile downstream.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_run_console(app: *mut MkuiApp) -> MkuiResult {
-    if app.is_null() {
-        return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
-    }
-    #[cfg(feature = "console")]
-    {
-        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
-        let app_ref = unsafe { &mut *app };
-        // Move the tree out of the MkuiApp; the binding cannot be reused
-        // after a successful `run_console`, mirroring the v0.4.x
-        // semantics where `app.run()` consumed the Rust `Mkui`. The C
-        // host calls `mkui_app_free` after run returns.
-        let tree = std::mem::replace(&mut *app_ref.tree.borrow_mut(), AppTree::new());
-        let core = mkui_core::components::Mkui::with_tree(tree);
-        let console = match mkui_console::Mkui::from_core(core) {
-            Ok(m) => m,
-            Err(e) => {
-                return MkuiResult::error(MkuiErrorCode::MkuiInitializationFailed, &e.to_string());
-            }
-        };
-        match console.run() {
-            Ok(()) => MkuiResult::success(),
-            Err(e) => MkuiResult::error(MkuiErrorCode::MkuiRuntimeError, &e.to_string()),
+    ffi_guard(panic_result(), || {
+        if app.is_null() {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
         }
-    }
-    #[cfg(not(feature = "console"))]
-    {
-        let _ = app;
-        MkuiResult::error(
-            MkuiErrorCode::MkuiRuntimeError,
-            "mkui-c was built without the `console` feature",
-        )
-    }
+        #[cfg(feature = "console")]
+        {
+            // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+            let app_ref = unsafe { &mut *app };
+            // Move the tree out of the MkuiApp; the binding cannot be reused
+            // after a successful `run_console`, mirroring the v0.4.x
+            // semantics where `app.run()` consumed the Rust `Mkui`. The C
+            // host calls `mkui_app_free` after run returns.
+            let tree = std::mem::replace(&mut *app_ref.tree.borrow_mut(), AppTree::new());
+            let core = mkui_core::components::Mkui::with_tree(tree);
+            let console = match mkui_console::Mkui::from_core(core) {
+                Ok(m) => m,
+                Err(e) => {
+                    return MkuiResult::error(
+                        MkuiErrorCode::MkuiInitializationFailed,
+                        &e.to_string(),
+                    );
+                }
+            };
+            match console.run() {
+                Ok(()) => MkuiResult::success(),
+                Err(e) => MkuiResult::error(MkuiErrorCode::MkuiRuntimeError, &e.to_string()),
+            }
+        }
+        #[cfg(not(feature = "console"))]
+        {
+            let _ = app;
+            MkuiResult::error(
+                MkuiErrorCode::MkuiRuntimeError,
+                "mkui-c was built without the `console` feature",
+            )
+        }
+    })
 }
 
 // -------------------------------------------------------------------------
@@ -484,37 +584,43 @@ pub unsafe extern "C" fn mkui_app_run_console(app: *mut MkuiApp) -> MkuiResult {
 /// [`mkui_free_error_message`] (same allocator).
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_snapshot_json(app: *const MkuiApp) -> *mut c_char {
-    if app.is_null() {
-        return ptr::null_mut();
-    }
-    // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
-    let app_ref = unsafe { &*app };
-    let tree = app_ref.tree.borrow();
-    let snapshot = mkui_runtime::snapshot::TreeSnapshot::of(&tree);
-    let json = snapshot.to_json();
-    CString::new(json)
-        .map(|cs| cs.into_raw())
-        .unwrap_or(ptr::null_mut())
+    ffi_guard(ptr::null_mut(), || {
+        if app.is_null() {
+            return ptr::null_mut();
+        }
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+        let app_ref = unsafe { &*app };
+        let tree = app_ref.tree.borrow();
+        let snapshot = mkui_runtime::snapshot::TreeSnapshot::of(&tree);
+        let json = snapshot.to_json();
+        CString::new(json)
+            .map(|cs| cs.into_raw())
+            .unwrap_or(ptr::null_mut())
+    })
 }
 
 /// Free an error message or JSON buffer returned by mkui functions.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_free_error_message(message: *mut c_char) {
-    if message.is_null() {
-        return;
-    }
-    // SAFETY: caller guarantees `message` was returned by an mkui function
-    // (via `CString::into_raw`). Reconstructing the CString drops it.
-    unsafe {
-        let _ = CString::from_raw(message);
-    }
+    ffi_guard((), || {
+        if message.is_null() {
+            return;
+        }
+        // SAFETY: caller guarantees `message` was returned by an mkui function
+        // (via `CString::into_raw`). Reconstructing the CString drops it.
+        unsafe {
+            let _ = CString::from_raw(message);
+        }
+    })
 }
 
 /// Get version information.
 #[no_mangle]
 pub extern "C" fn mkui_version() -> *const c_char {
-    static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
-    VERSION.as_ptr() as *const c_char
+    ffi_guard(ptr::null(), || {
+        static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
+        VERSION.as_ptr() as *const c_char
+    })
 }
 
 // Button variant constants for C.
@@ -689,5 +795,163 @@ mod tests {
 
             mkui_app_free(app);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Panic safety (#103): a Rust panic must never unwind across the
+    // `extern "C"` boundary. The `test_panic` injection hook fires a synthetic
+    // panic inside each wrapper (after entry, before normal return); we assert
+    // the type-appropriate, allocation-free fallback comes back and that no
+    // unwind reaches this test caller. The hook is `#[cfg(test)]`-only — it
+    // adds no exported symbol and no code to release/public builds, and there
+    // is no Cargo feature gating it (see the `test_panic` module).
+    //
+    // The `*const MkuiApp` / `*mut MkuiApp` arguments below are never
+    // dereferenced: injection panics ahead of the wrapper body, so passing a
+    // dangling/dummy handle is sound here.
+
+    /// A non-null but never-dereferenced app handle for the panic-fallback
+    /// tests. Sound only because the injection hook panics before the wrapper
+    /// body touches `app`.
+    fn dummy_app() -> *mut MkuiApp {
+        std::ptr::dangling_mut()
+    }
+
+    #[test]
+    fn panic_app_new_returns_null() {
+        test_panic::arm();
+        let app = mkui_app_new();
+        assert!(app.is_null(), "panic fallback must be a null pointer");
+    }
+
+    #[test]
+    fn panic_app_free_swallows_and_returns() {
+        // SAFETY: injection panics before the body, so the dummy handle is
+        // never reconstructed/freed.
+        unsafe {
+            test_panic::arm();
+            mkui_app_free(dummy_app()); // returns normally after swallowing
+        }
+    }
+
+    #[test]
+    fn panic_app_root_returns_invalid_node() {
+        // SAFETY: handle never dereferenced (see module note).
+        unsafe {
+            test_panic::arm();
+            assert_eq!(mkui_app_root(dummy_app()), invalid_node());
+        }
+    }
+
+    #[test]
+    fn panic_view_child_returns_invalid_node() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let id = mkui_app_view_child(dummy_app(), invalid_node(), ptr::null());
+            assert_eq!(id, invalid_node());
+        }
+    }
+
+    #[test]
+    fn panic_text_child_returns_invalid_node() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let id = mkui_app_text_child(
+                dummy_app(),
+                invalid_node(),
+                ptr::null(),
+                MKUI_TEXT_BODY,
+                ptr::null(),
+            );
+            assert_eq!(id, invalid_node());
+        }
+    }
+
+    #[test]
+    fn panic_button_child_returns_invalid_node() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let id = mkui_app_button_child(
+                dummy_app(),
+                invalid_node(),
+                ptr::null(),
+                MKUI_BUTTON_PRIMARY,
+                ptr::null(),
+                invalid_action(),
+            );
+            assert_eq!(id, invalid_node());
+        }
+    }
+
+    #[test]
+    fn panic_register_callback_returns_invalid_action() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let id = mkui_app_register_callback(dummy_app(), None, ptr::null_mut());
+            assert_eq!(id, invalid_action());
+        }
+    }
+
+    #[test]
+    fn panic_fire_action_returns_runtime_error_null_message() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let result = mkui_app_fire_action(dummy_app(), invalid_action());
+            assert!(matches!(result.code, MkuiErrorCode::MkuiRuntimeError));
+            assert!(result.message.is_null(), "fallback must not allocate");
+        }
+    }
+
+    #[test]
+    fn panic_run_console_returns_runtime_error_null_message() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let result = mkui_app_run_console(dummy_app());
+            assert!(matches!(result.code, MkuiErrorCode::MkuiRuntimeError));
+            assert!(result.message.is_null(), "fallback must not allocate");
+        }
+    }
+
+    #[test]
+    fn panic_snapshot_json_returns_null() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            assert!(mkui_app_snapshot_json(dummy_app()).is_null());
+        }
+    }
+
+    #[test]
+    fn panic_free_error_message_swallows_and_returns() {
+        // SAFETY: injection panics before the body, so the dummy pointer is
+        // never reconstructed/freed.
+        unsafe {
+            test_panic::arm();
+            mkui_free_error_message(std::ptr::dangling_mut());
+        }
+    }
+
+    #[test]
+    fn panic_version_returns_null() {
+        test_panic::arm();
+        assert!(mkui_version().is_null());
+    }
+
+    #[test]
+    fn injection_disarms_after_one_panic() {
+        // The hook fires exactly once per `arm()`, so the next call runs
+        // normally — proving the recovery path can't re-enter the injection.
+        test_panic::arm();
+        assert!(mkui_app_new().is_null());
+        let app = mkui_app_new();
+        assert!(!app.is_null(), "second call must not panic");
+        // SAFETY: `app` came from `mkui_app_new`.
+        unsafe { mkui_app_free(app) };
     }
 }
