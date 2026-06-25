@@ -1,4 +1,12 @@
-#![forbid(unsafe_code)]
+// `deny`, not `forbid`: the crate is unsafe-free everywhere except one
+// explicitly-annotated macOS FFI seam — `render::enable_presents_with_transaction`,
+// which reaches the surface's `CAMetalLayer` via `wgpu::Surface::as_hal`
+// (an `unsafe fn`) to flip `presentsWithTransaction` (#101 root-cause fix for
+// the macOS fast-resize jerk; see ADR 0006 §"Resize-active redraw pump"). That
+// seam carries `#[allow(unsafe_code)]` with a `SAFETY:` justification; every
+// other module stays unsafe-denied. `forbid` cannot be locally relaxed, so the
+// single required FFI call mandates `deny` + a scoped allow.
+#![deny(unsafe_code)]
 //! WGPU backend for mkui.
 //! Renders `mkui-runtime::AppTree` data and low-level `Scene` primitive streams
 //! through a WGPU surface.
