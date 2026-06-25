@@ -17,7 +17,7 @@ use crate::types::{
 /// (and optional halo) as quads, and pushes a single
 /// [`DotAnimationInstance`] into `scene.animations` when `animation` is
 /// non-`None`.
-// Rationale: signature parallels `badge` — `variant` / `size` resolve through
+// allow: signature parallels `badge` — `variant` / `size` resolve through
 // the theme, then the generic visual modifiers (`halo`, `animation`) follow.
 // Bundling them into a param-struct would split the atom layer's call shape
 // without clarity gain.
