@@ -56,7 +56,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::path::{PathCommand, Vec2, VectorPath};
-use mkui_text::{Affine2Fixed, FontId, VariationSettings};
+use mkui_text::{Affine2Fixed, FontId, LayoutRun, VariationSettings};
 
 /// Immutable encoder configuration. Held by the owning [`SlugBlobCache`]; it is
 /// **not** part of [`SlugGlyphKey`] so two caches with different configs form
@@ -109,6 +109,27 @@ pub struct SlugGlyphKey {
     pub variation_axes: VariationSettings,
     pub synthesis_flags: u32,
     pub outline_transform: Affine2Fixed,
+}
+
+impl SlugGlyphKey {
+    /// Propagate a Slug run's canonical identity into an outline-cache key.
+    ///
+    /// This is #67's #65-side propagation seam: a [`TextRenderClass::Slug`](mkui_text::TextRenderClass)
+    /// [`LayoutRun`] carries the registry-owned global [`FontId`], generation,
+    /// and canonical variation coordinate; combined with a `glyph_id` and the
+    /// outline-local `outline_transform` (canonical, **not** scene placement)
+    /// they form the size-independent [`SlugGlyphKey`]. Pixel size, hinting, and
+    /// layout position are deliberately excluded — one blob serves every size.
+    pub fn from_run(run: &LayoutRun, glyph_id: u32, outline_transform: Affine2Fixed) -> Self {
+        Self {
+            font_id: run.font_id,
+            font_generation: run.font_generation,
+            glyph_id,
+            variation_axes: run.variations.clone(),
+            synthesis_flags: run.synthesis_flags,
+            outline_transform,
+        }
+    }
 }
 
 /// A single quadratic curve record `(p0, p1, p2)` in font units, y-up.

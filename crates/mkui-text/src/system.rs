@@ -328,6 +328,13 @@ pub enum TextError {
     /// compatibility default; e.g. the raster-only bitmap path).
     #[error("glyph outline not supported by this text system")]
     UnsupportedOutline,
+    /// This face renders through vector outlines, not CPU rasterization, so
+    /// [`TextSystem::rasterize`] has no bitmap to return. The dual of
+    /// [`UnsupportedOutline`](Self::UnsupportedOutline): an outline/Slug face
+    /// (e.g. #67's SFNT face) exposes [`glyph_outline`](TextSystem::glyph_outline)
+    /// but not [`rasterize`](TextSystem::rasterize).
+    #[error("CPU rasterization not supported by this (outline) text system")]
+    UnsupportedRaster,
     /// A [`VariationSettings`] construction saw the same axis tag twice.
     #[error("duplicate variation axis: {0:?}")]
     DuplicateVariationAxis(OpenTypeTag),

@@ -60,6 +60,7 @@ pub mod composite;
 pub mod engine;
 pub mod font_id;
 pub mod outline;
+pub mod sfnt;
 pub mod system;
 
 pub use bitmap::{
@@ -68,10 +69,11 @@ pub use bitmap::{
     GLYPH_CELL_HEIGHT_PX, GLYPH_CELL_WIDTH_PX, REFERENCE_FONT_SIZE_PX,
 };
 pub use canonical::{Affine2Fixed, Fixed16_16, OpenTypeTag, VariationAxis, VariationSettings};
-pub use composite::{CompositeTextSystem, FontSource};
+pub use composite::{CompositeTextSystem, FontSource, SfntRegisterError};
 pub use engine::{LineMetrics, PreparedText, TextEngine, TextLayout};
 pub use font_id::{FontId, FontIdAllocator};
 pub use outline::{GlyphOutline, OutlineBounds, OutlineCommand, OutlineKey};
+pub use sfnt::{SfntError, SfntFace, SfntMetrics};
 pub use system::{
     FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, HintingMode, LayoutGlyph, LayoutRun,
     LayoutSpec, ShapedGlyph, ShapedText, TextAlign, TextError, TextRenderClass, TextSystem,

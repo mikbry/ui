@@ -19,6 +19,7 @@ members = [
     "examples/native-window",  # Native winit + wgpu window
     "examples/atoms-on-wgpu",  # Wgpu badge + dot atoms via AppTree (Sprint 5)
     "examples/native-showcase", # Cross-binding showcase on the wgpu backend (Sprint 5)
+    "examples/text",           # Minimal Slug + bitmap text smoke binary (Sprint 7 #67)
 ]
 
 # The three backend-pinned showcase examples each enable a *different* primary

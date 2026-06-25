@@ -1056,6 +1056,7 @@ name = "mkui-text"
 version = "0.9.3"
 dependencies = [
  "thiserror 1.0.69",
+ "ttf-parser",
 ]
 
 [[package]]
@@ -2102,6 +2103,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "text"
+version = "0.9.3"
+dependencies = [
+ "mkui-text",
+ "mkui-vector2d",
+ "mkui-wgpu",
 ]
 
 [[package]]
