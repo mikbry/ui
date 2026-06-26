@@ -342,7 +342,7 @@ make run
 the HUD `Scene` API. Any visual regression in the HUD pipeline shows up here.
 
 ```bash
-cargo run --example native-window
+cargo run -p native-window --release
 ```
 
 ### Python Example
@@ -417,7 +417,7 @@ Native WGPU smoke (opens a winit window, paints a single quad via the HUD
 `Scene` API):
 
 ```bash
-cargo run --example native-window
+cargo run -p native-window --release
 ```
 
 The web backend is exercised by `examples/web-showcase` via `wasm-pack`;
