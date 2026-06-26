@@ -289,6 +289,23 @@ breaking changes can land on minor bumps).
   can't reach a release visually-unverified again.
 
 ### Tooling
+- **Package-aware CI feature matrix (#105).** The `test` job in
+  `.github/workflows/ci.yml` is now a per-crate strategy matrix instead of a
+  single default-feature `--workspace` run, so feature-gated code (e.g.
+  `mkui-runtime`'s `snapshot`, `mkui-core`'s `serde`) is exercised where it
+  lives instead of rotting undetected. Compatible crates (`mkui-core`,
+  `mkui-runtime`, `mkui-text`, `mkui-web`, `mkui-console`, `mkui-vector2d`,
+  `mkui-vector2d-wgpu`) run `--all-features` per-crate; `mkui-wgpu` compiles
+  `--all-features --no-run` (its `gpu-tests` need the Lavapipe `gpu-offscreen`
+  job to actually run). The `mkui` bridge is tested with each primary backend
+  (`web` / `console` / `wgpu`) and `--no-default-features` separately — never
+  combined, which would trip the #102 one-backend `compile_error!`. Workspace
+  `--all-features` is deliberately NOT used (it fails structurally per the
+  Codex Sprint 7 v5-review: the bridge's mutually-exclusive backends and
+  `mkui-py`'s interpreter-linked vs. `extension-module` link modes). `mkui-c`
+  is tested per-backend for the same one-backend reason. `mkui-py` continues to
+  run its dedicated interpreter-linked `mkui-py-bindings` job, not duplicated
+  here.
 - **Surfaceless offscreen GPU readback harness (#106).** Adds
   `mkui_wgpu::render::offscreen::OffscreenRenderer`, a reusable
   window-less renderer that owns a surfaceless adapter/device/queue, an
