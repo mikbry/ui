@@ -16,7 +16,7 @@ use super::button_with;
 ///
 /// Returns the emitted chip rects (matching index → option order) so the
 /// caller can wire their own layout / test assertions.
-// Rationale: signature mirrors `button` (variant / size / theme as separate
+// allow: signature mirrors `button` (variant / size / theme as separate
 // args) plus the two extras `chip_group` needs — `layout` to push HitRegions
 // into and `to_target` to key them. Bundling these into a param-struct would
 // diverge from the rest of the components module without clarity gain.

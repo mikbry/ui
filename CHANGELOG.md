@@ -78,6 +78,14 @@ breaking changes can land on minor bumps).
   appears in the crate or its dependency tree; GPU packing is #66's scope.
 
 ### Changed
+- **Audit round-6 P1: rationale comments on the two `too_many_arguments`
+  allows in `mkui-wgpu` components (#104).** `components/chip_group.rs` and
+  `components/dot.rs` each carry a `#[allow(clippy::too_many_arguments)]`; their
+  explanatory comments now use the `// allow:` prefix, matching the existing
+  walker-style pattern (`walker.rs:418`). The rationale text is preserved
+  verbatim (signatures mirror `button` / `badge`; a param-struct would diverge
+  from the components/atom call shape without clarity gain). Comment-only — no
+  signature, public API, dependency, or MSRV change; clippy stays clean.
 - **Breaking (pre-1.0): `mkui` enforces exactly one primary backend feature
   at compile time (#102).** The bridge crate (`crates/mkui`) previously
   resolved a build with multiple primary backend features enabled (`web`,
