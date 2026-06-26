@@ -80,8 +80,74 @@ jobs:
       - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --all-targets --locked -- -D warnings
 
   test:
-    name: test
+    # Package-aware feature matrix (#105). The default `--workspace` leg runs
+    # default features only; feature-gated code (`mkui-runtime`'s `snapshot`,
+    # `mkui-core`'s `serde`, …) would rot undetected without exercising it where
+    # it lives. A naive workspace `--all-features` cannot be used: Cargo feature
+    # unification would enable conflicting backends on the `mkui` bridge at once
+    # and trip the #102 one-backend `compile_error!`, and `mkui-py`'s
+    # interpreter-linked `parity-test` mode is mutually exclusive with its
+    # default `extension-module` link. So the axis is PER-CRATE instead:
+    #
+    #   * Compatible crates get `--all-features` (mutually-compatible per crate).
+    #   * The `mkui` bridge is tested per-individual-backend AND
+    #     `--no-default-features` — NEVER all backends together (#102).
+    #
+    # Two crates can't take `--all-features` and are handled package-aware:
+    #   * `mkui-c` — its `web` + `console` features each forward a *different*
+    #     primary backend to `mkui`, so `--all-features` enables two backends
+    #     and hits the #102 guard. Tested per-backend instead.
+    #   * `mkui-wgpu` — `--all-features` pulls `gpu-tests`, which asserts a real
+    #     Vulkan/Lavapipe adapter and fails (no silent skip) on the displayless
+    #     runner. Compiled with `--no-run` here; the `gpu-offscreen` job owns the
+    #     actual GPU execution of `gpu-tests` (+ `slug`).
+    #
+    # `mkui-py` is NOT in this matrix — its dedicated `mkui-py-bindings` job
+    # owns its interpreter-linked feature combinations and is not duplicated.
+    name: test (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Default-feature workspace test (integration + examples + default
+          # paths). Backend-pinned examples excluded — they can't be unified
+          # into one build under the #102 one-backend guard; the `mkui-examples`
+          # job covers them package-aware.
+          - name: workspace-default
+            args: --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase
+          # Compatible crates: `--all-features` per-crate.
+          - name: mkui-core
+            args: -p mkui-core --all-features
+          - name: mkui-runtime
+            args: -p mkui-runtime --all-features
+          - name: mkui-text
+            args: -p mkui-text --all-features
+          - name: mkui-web
+            args: -p mkui-web --all-features
+          - name: mkui-console
+            args: -p mkui-console --all-features
+          - name: mkui-vector2d
+            args: -p mkui-vector2d --all-features
+          - name: mkui-vector2d-wgpu
+            args: -p mkui-vector2d-wgpu --all-features
+          # mkui-wgpu: compile-only `--all-features` (gpu-tests can't run here).
+          - name: mkui-wgpu-compile
+            args: -p mkui-wgpu --all-features --no-run
+          # mkui-c: per-backend (web+console can't coexist — #102).
+          - name: mkui-c-console
+            args: -p mkui-c --no-default-features --features console
+          - name: mkui-c-web
+            args: -p mkui-c --no-default-features --features web
+          # mkui bridge: each primary backend separately + no-default-features.
+          - name: mkui-bridge-web
+            args: -p mkui --no-default-features --features web
+          - name: mkui-bridge-console
+            args: -p mkui --no-default-features --features console
+          - name: mkui-bridge-wgpu
+            args: -p mkui --no-default-features --features wgpu
+          - name: mkui-bridge-no-default
+            args: -p mkui --no-default-features
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -95,13 +161,11 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-test-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
+            ${{ runner.os }}-cargo-test-${{ matrix.name }}-
             ${{ runner.os }}-cargo-test-
-      # See the clippy job: the backend-pinned examples can't be unified into
-      # one build under the #102 one-backend guard; they are covered separately
-      # by the `mkui-examples` job.
-      - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --locked
+      - run: cargo test ${{ matrix.args }} --locked
 
   gpu-offscreen:
     # Surfaceless offscreen GPU readback tests (#106). These exercise a real
