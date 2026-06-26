@@ -7,7 +7,7 @@
 //! `BadgeRenderer` and `DotRenderer` so the `NodeKind::Custom` payloads
 //! resolve without per-app wiring.
 //!
-//! `HEADLESS=1 cargo run --example atoms-on-wgpu` exits after a single
+//! `HEADLESS=1 cargo run -p atoms-on-wgpu --release` exits after a single
 //! walker pass (acceptance criterion #18 — the headless smoke gate).
 
 use mkui_core::components::Mkui as CoreMkui;

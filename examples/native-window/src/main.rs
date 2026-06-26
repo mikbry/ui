@@ -5,6 +5,10 @@
 //! test referenced by issue #20's acceptance criteria — the window
 //! shouldn't show anything more elaborate than that, so any visual
 //! regression in the render pipeline is immediately obvious.
+//!
+//! `cargo run -p native-window --release` opens the window. This is a
+//! workspace package, so the `-p <package>` form is correct — not the
+//! `cargo run --example <name>` form, which does not apply here.
 
 use mkui_wgpu::{Color, CornerRadii, Mkui, Point, Primitive, Quad, Rect, Scene, Size};
 
