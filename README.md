@@ -155,10 +155,11 @@ Backend-specific code never leaks into the contract.
 | `mkui-web`    | Web/WASM backend. Translates the shared component tree into DOM via `web-sys`.                                                  | Stable                                                        |
 | `mkui-console`| Terminal backend. Translates the shared component tree into `crossterm` output.                                                 | Stable                                                        |
 | `mkui`        | Bridge crate. Re-exports the backend chosen by Cargo features and presents a single `Mkui` entry point.                         | Stable                                                        |
-| `mkui-rsx`    | RSX/JSX-like macro.                                                                                                             | Placeholder                                                   |
 | `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |
+| `mkui-vector2d` | Backend-neutral 2D path model + deterministic Slug glyph curve/band encoder (font-units, y-up). No GPU deps. | Stable (Sprint 7) |
+| `mkui-vector2d-wgpu` | WGPU adapter for `mkui-vector2d`'s Slug encoder — packs blobs into GPU buffers + single-horizontal-ray WGSL coverage pipeline. Behind `slug` feature (default off in `mkui-wgpu`). | Stable (Sprint 7) |
 | `mkui-c`      | C/C++ FFI bindings — handle-based nested API over `mkui-runtime`'s `AppTree`. CI builds + clippy gates active.                  | Stable (Sprint 4)                                             |
-| `mkui-py`     | Python bindings via PyO3 0.28.3. Handle-based nested API. Builds + tests on Python 3.9–3.14.                                    | Stable (Sprint 4)                                            |
+| `mkui-py`     | Python bindings via PyO3 0.29.0. Handle-based nested API. Builds + tests on Python 3.9–3.14.                                    | Stable (Sprint 4)                                            |
 
 ### What lives in `mkui-core`
 
@@ -256,7 +257,7 @@ real multithreaded runtime exists.
 * **Rust**: Native support with full ergonomic API ✅
 * **C**: FFI bindings — handle-based nested API on the `mkui-runtime` substrate; CI build + clippy gates active ✅
 * **C++**: Modern C++17 wrapper (RAII + exceptions) over the C handle API ✅
-* **Python**: PyO3 0.28.3 bindings — handle-based API on the same substrate; builds + tests on Python 3.9–3.14 ✅
+* **Python**: PyO3 0.29.0 bindings — handle-based API on the same substrate; builds + tests on Python 3.9–3.14 ✅
 * **JavaScript/TypeScript**: WASM bindings 🚧 (planned)
 
 ---
@@ -347,7 +348,7 @@ cargo run -p native-window --release
 
 ### Python Example
 
-> ℹ **`mkui-py` builds on Python 3.9–3.14.** The PyO3 0.28.3 bump
+> ℹ **`mkui-py` builds on Python 3.9–3.14.** The PyO3 0.29.0 bump
 > ([#5](https://github.com/mikbry/ui/issues/5)) cleared the old Python
 > 3.13 ceiling, so the full workspace — including `mkui-py` — tests on a
 > current interpreter.
@@ -451,15 +452,16 @@ the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
   `mkui-wgpu`.
 - **Layout engine** — flexbox-style layout integration for the shared
   contract.
-- **RSX macro** — `mkui-rsx` is a placeholder; JSX-like authoring is the
-  target.
+- **RSX macro** — JSX-like authoring is a target ([#76](https://github.com/mikbry/ui/issues/76)).
+  The previous `mkui-rsx` placeholder crate was deleted in Sprint 6 (#74); a
+  future implementation would land as a new crate when the design is scoped.
 - **Native text rendering** — extending `mkui-text` beyond the bitmap
   prototype is on the roadmap. The specific approach is internal; the
   trait surface is the public contract.
 - **FFI hardening** — `mkui-c` is gated in CI (build + clippy + test) with
   `// SAFETY:` annotations on every `unsafe` block since the Sprint 4
   handle-based rewrite; `mkui-py` builds + tests on Python 3.9–3.14 since
-  the PyO3 0.28.3 bump ([#5](https://github.com/mikbry/ui/issues/5)).
+  the PyO3 0.29.0 bump ([#5](https://github.com/mikbry/ui/issues/5)).
 
 ### 🔮 Longer-horizon
 
