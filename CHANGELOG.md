@@ -351,6 +351,75 @@ breaking changes can land on minor bumps).
   acceptance tests in #66 (Slug pipeline) and #67 (TTF/font), which own
   their own backend-specific tests.
 
+## [0.9.3] — 2026-06-10
+
+### Fixed
+- **macOS live-resize jerk — `about_to_wait`-driven resize pump (#99, PR #100).**
+  Post-v0.9.2 the wgpu examples rendered correctly on first paint but visibly
+  jerked on resize with an asymmetric shrink-direction-only pattern (bottom→top +
+  right→left). Root cause was architectural divergence from wgpu+winit reference
+  apps: mkui-wgpu lacked an `about_to_wait` handler driving continuous redraws
+  during resize, so swapchain transitions caught the render pump between input
+  events. Fix ships a narrow `about_to_wait`-driven resize pump —
+  `resize_redraw_pending: u8` armed on `Resized` + `ScaleFactorChanged` to a
+  `RESIZE_REDRAW_PUMP_TICKS` cap; `about_to_wait` requests redraws while armed;
+  decays via `RenderOutcome::Drawn`-only-decrement (`Skipped` frames under GPU
+  pressure never drain the bridge). Non-monotonic cap iteration during PR #100
+  (4 → 60 → 120 → 60) confirmed cap=60 as the operator-verified architectural
+  ceiling; cap=120 over-fired redraws during fast drag and saturated
+  GPU/swapchain. Residual fast-drag vibration remains (tracked in #101 for
+  v0.9.4+ CursorMoved-armed bridge substrate work — subsequently fixed at the
+  presentation layer via `CAMetalLayer.presentsWithTransaction` in v0.10.0).
+
+## [0.9.2] — 2026-06-09
+
+### Fixed
+- **Viewport units — logical vs physical pixels (#97, PR #98).** Post-v0.9.1 the
+  wgpu examples rendered primitives but on Retina displays (`scale_factor=2.0`)
+  they landed in the upper-left quadrant instead of expected positions.
+  `Scene::viewport` was logical pixels after resize but `Renderer::render`
+  projected vertices against `self.config.{width, height}` (physical pixels,
+  wgpu's surface-config contract). Fix (Codex round-N Candidate B.2 via
+  `scene.viewport`): project against `scene.viewport.{width, height}` (logical)
+  instead of `self.config.{width, height}` (physical). No new `Renderer` field,
+  no `scale_factor` plumbing. Added `logical_viewport_from_physical_size` helper
+  at the resize/scale-change boundary, `WindowEvent::ScaleFactorChanged` handler,
+  and 3 unit tests including fractional-scale (1.5×).
+
+### Changed
+- **ADR 0006 §"Viewport units contract" added.** `Scene::viewport` + primitive
+  coords are **logical pixels** (matches web's CSS-pixel + console's
+  character-grid conventions). Wgpu surface config stays physical. The
+  cross-binding identity contract is now explicit.
+
+## [0.9.1] — 2026-06-09
+
+### Fixed
+- **Wgpu examples first-paint + resize regressions (#93, PR #96).** Operator
+  visual sanity-check post-v0.9.0 found both wgpu examples (`atoms-on-wgpu`,
+  `native-window`) rendering only the clear color (gray) — primitives invisible.
+  The wgpu backend had been visually unverified since v0.6.0 across four minor
+  releases (0.6.0 → 0.7.0 → 0.8.0 → 0.9.0) because CI's `HEADLESS=1` smoke gate
+  validates walker-doesn't-crash but NOT walker-emits-primitives-that-reach-screen.
+  Three fixes ship in one PR (Codex round-N+1 BLOCK scope-fix per the
+  substrate-tier 4-round cycle):
+  - **`WindowEvent::Resized` clobbers `with_scene` primitives.** Resize
+    unconditionally replaced `self.scene = Scene::new(new_viewport)`, wiping
+    user primitives in `with_scene` mode before first paint (macOS fires a
+    `Resized` post-creation). Fix: split per-path resize contract — AppTree
+    scenes rebuild from tree; raw scenes preserve primitives + update viewport
+    in place.
+  - **First-paint `Skipped→retry` state machine.** `RenderOutcome::Skipped` was
+    a no-op; if the initial `resumed()` `request_redraw` hit a not-yet-ready
+    surface, the window stayed blank-gray until the user resized or interacted.
+    Adds `first_paint_pending: bool` + `first_paint_skip_retries: u8` with retry
+    cap, decay on `Drawn`, idle-quiescence preserved post-first-paint.
+  - **MSAA disabled (`sample_count=1`).** Sprint 5's 4× MSAA path
+    (no upstream reference) was the suspected source of resize-time darkening
+    and atoms-on-wgpu rendering empty despite emitting 9012 valid triangles.
+    MSAA-resolve-into-sRGB was double-applying sRGB encoding on macOS Metal.
+    Disable pending correct sRGB orchestration (deferred to #95).
+
 ## [0.9.0] — 2026-06-04
 
 ### Added
