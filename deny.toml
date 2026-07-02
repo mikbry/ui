@@ -27,7 +27,34 @@ yanked = "warn"
 # RUSTSEC-2024-0436 + `stabby` → `rand 0.8` unsound RUSTSEC-2026-0097): the
 # Sprint 4 mkui-c rewrite uses raw opaque pointers + handle indices, so the
 # unused `safer-ffi` dep was dropped entirely.
-ignore = []
+#
+# RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (both published 2026-06-29):
+# `quick-xml 0.39.4` DoS advisories (quadratic parse on duplicate attribute
+# names; unbounded namespace-declaration allocation in `NsReader`), both
+# patched in `quick-xml >= 0.41.0`. mkui reaches `quick-xml` exactly once via
+# `winit → sctk-adwaita → smithay-client-toolkit → wayland-scanner`, and only
+# on Linux/Wayland compiles (verified: absent on `x86_64-apple-darwin` and
+# `x86_64-pc-windows-msvc`). `wayland-scanner` is a proc-macro that parses
+# static, trusted Wayland protocol XML files (bundled with `wayland-protocols`)
+# at BUILD TIME to generate Rust bindings — `quick-xml` code is NOT linked
+# into any runtime binary. The advisories' threat model (CVSS:AV:N — remote
+# unauthenticated network attacker with crafted XML) does not apply to
+# mkui: mkui never parses XML from any source at runtime, and even the
+# build-time input is upstream-controlled static protocol specs, not
+# adversarial input. `cargo update -p quick-xml` verified `0 packages` (the
+# `wayland-scanner` `^0.39` pin makes 0.41 unreachable via cargo resolver
+# alone). Tracked upstream as #132 — remove both entries when
+# `smithay-client-toolkit` ships a release that bumps `quick-xml >= 0.41.0`.
+# Soft re-review deadline: 2026-10-01 (90 days). deny.toml v2 has no
+# schema-enforced `expires` field; the deadline is enforced by the #132
+# tracker's `[ ] ` checklist item + Sprint 8 close ritual (audit round-8
+# will grep for stale ignore entries).
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml is build-time-only via wayland-scanner proc-macro on Linux/Wayland; runtime binaries contain no quick-xml code; upstream fix tracked in #132" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml is build-time-only via wayland-scanner proc-macro on Linux/Wayland; runtime binaries contain no quick-xml code; upstream fix tracked in #132" },
+    # RUSTSEC-2026-0192 (2026-06-28): ttf-parser 0.25.1 unmaintained (informational, no vulnerability). Two reach paths, both bounded: (1) runtime via winit → sctk-adwaita → ab_glyph → owned_ttf_parser → ttf-parser on Linux/Wayland only, used for window-decoration font parsing (input is system fonts, not user input; no CVE-class threat model applies); (2) mkui-text [dev-dependencies] parity oracle per Sprint 7 plan v10 §3.6 (test-only). Skrifa migration is Sprint 8+ candidate; upstream sctk-adwaita bump tracked via same chain as #132.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is informational-unmaintained (not exploitable). Runtime reach only on Linux/Wayland via sctk-adwaita window-decoration font parsing (system fonts, not user input); also mkui-text [dev-dependencies] parity oracle per Sprint 7 §3.6. Skrifa migration tracked as Sprint 8+ candidate." },
+]
 
 [licenses]
 version = 2
