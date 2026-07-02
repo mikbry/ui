@@ -6,7 +6,15 @@
 # the unused `safer-ffi` dep from mkui-c — the Sprint 4 rewrite uses raw
 # opaque pointers + handle indices, so the FFI sugar was never load-bearing.
 #
-# This mirrors the `[advisories].ignore` list in `deny.toml`.
+# This mirrors the `[advisories].ignore` list in `deny.toml`. Rationale for
+# each ID lives there (deny.toml v2 accepts `{id, reason}` object form;
+# cargo-audit's ignore is plain string IDs, so the reason must be looked up
+# in deny.toml). Upstream sctk-adwaita chain tracker for the quick-xml 0.39.4
+# + ttf-parser 0.25.1 removals: #132.
 
 [advisories]
-ignore = []
+ignore = [
+    "RUSTSEC-2026-0194",  # quick-xml 0.39.4 DoS (build-time-only via wayland-scanner proc-macro); see deny.toml
+    "RUSTSEC-2026-0195",  # quick-xml 0.39.4 DoS (build-time-only via wayland-scanner proc-macro); see deny.toml
+    "RUSTSEC-2026-0192",  # ttf-parser 0.25.1 unmaintained (informational, not exploitable); see deny.toml
+]
