@@ -7,6 +7,8 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-07-03
+
 ### Added
 - **SFNT text-system integration — Phase 1, CPU-side (#67).** A narrow,
   from-scratch SFNT/TrueType decoder in `mkui-text` (`SfntFace`) reads the
@@ -122,8 +124,27 @@ breaking changes can land on minor bumps).
   mkui-py does not call any of the affected APIs directly, so the bump is a
   pure dependency update with no source changes. Unblocks `cargo-deny` +
   `cargo-audit` CI, which treat `vulnerability` as `error`.
-
-### Fixed
+- **Bump memmap2 0.9.10 → 0.9.11 + ignore three build-time-only advisories
+  (#132, PR #133).** Resolves RUSTSEC-2026-0186 (memmap2 unsound
+  `pointer::offset` in `Mmap::[unchecked_]advise_range`) via a
+  cargo-resolver-reachable patch bump within `^0.9`. Three additional
+  advisories published 2026-06-28/29 against the Wayland/Linux
+  windowing chain — RUSTSEC-2026-0194 + RUSTSEC-2026-0195 (quick-xml 0.39.4
+  DoS: quadratic parse + unbounded namespace-declaration allocation) and
+  RUSTSEC-2026-0192 (ttf-parser 0.25.1 unmaintained, informational) — are
+  ignored in both `deny.toml` and `.cargo/audit.toml` with detailed
+  rationale: quick-xml is reached only at BUILD TIME via `wayland-scanner`
+  (`proc-macro = true`) parsing static, trusted Wayland protocol XML
+  bundled with `wayland-protocols` — its `CVSS:AV:N` threat model
+  (remote network attacker with crafted XML) does not apply; ttf-parser
+  is reached at runtime only via `sctk-adwaita → ab_glyph` for
+  window-decoration font parsing on Linux/Wayland (system fonts, not
+  user input) plus a `[dev-dependencies]` parity oracle in `mkui-text`
+  per Sprint 7 plan v10 §3.6 (test-only). All three transitive pins are
+  out of reach of `cargo update` (`wayland-scanner` pins `quick-xml
+  ^0.39`; `ab_glyph` pins `owned_ttf_parser` pins `ttf-parser`);
+  clean upstream removal path tracked in #132 with soft 2026-10-01
+  re-review deadline.
 - **Completed `showcase-common` wgpu action arms and corrected example run
   commands (#94).** All seven shared-showcase button actions (GitHub, Primary,
   Secondary, Destructive, Outline, Ghost, Source Code) previously carried only
