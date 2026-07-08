@@ -225,7 +225,7 @@ fn solid_red_pipeline(renderer: &OffscreenRenderer) -> wgpu::RenderPipeline {
 #[test]
 fn slug_pipeline_renders_handauthored_glyph_with_calibrated_changed_pixels() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 
     // Baseline: clear to black, no glyph.
     let baseline = render_pixels(&renderer, &adapter, &[], |_| {}, wgpu::Color::BLACK);
@@ -275,7 +275,7 @@ fn slug_pipeline_renders_handauthored_glyph_with_calibrated_changed_pixels() {
 #[test]
 fn overlapping_ui_and_slug_respect_command_order_both_ways() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let solid = solid_red_pipeline(&renderer);
 
     // Order A: UI (red, fills target) first, then the green Slug glyph → the
@@ -359,5 +359,5 @@ fn slug_adapter_builds_on_the_vulkan_cpu_contract() {
     // The harness asserts the #106 Vulkan + CPU contract; building the Slug
     // pipeline against that device proves the adapter provisions there.
     let renderer = harness();
-    let _adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let _adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 }

@@ -391,28 +391,54 @@ first-paint while leaving the resize pump untouched. These invariants are
 asserted by unit tests (`drawn_decrements_resize_redraw_pending`,
 `skipped_does_not_consume_resize_redraw_budget`).
 
-### MSAA disabled pending correct sRGB orchestration
+### MSAA and sRGB resolve
 
-The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
-in `render/mod.rs`). This is a **deliberate temporary policy**, not the target
-state:
+The UI pass runs at **4× MSAA** (`MSAA_SAMPLE_COUNT_PREF = 4` in
+`render/mod.rs`), degrading to `1` on adapters whose chosen color format does
+not advertise 4× (`pick_sample_count`). This re-enables the anti-aliasing that
+Sprint 6 v0.9.1 disabled, and is the fix for #95 (which closes the Sprint 6
+deferral). It is load-bearing for the Slug outline-text lane: analytic coverage
+produces one alpha per fragment, so at small sizes (~32–48 px) single-sample
+output shows visible pixel-step fringing on diagonals; 4× MSAA resolves that to
+crisp vector text.
 
-- The Sprint 5 4× MSAA path has **no StoneSketch upstream parent** — the
-  reference HUD pipeline runs at `MultisampleState::default()` (`sample_count
-  = 1`). MSAA was a mkui-wgpu-local addition.
-- It is the suspected source of two #93 symptoms on macOS Metal: the gray
-  backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
-  despite emitting thousands of valid triangles at the CPU stage — both
-  consistent with the MSAA-resolve-into-sRGB step double-applying sRGB
-  encoding (`srgb_encode(srgb_to_linear(c))`).
-- `sample_count = 1` writes the swapchain view directly with no resolve step,
-  which is the StoneSketch-proven, visually-correct path.
+**History.** Sprint 6 pinned the pass to `sample_count = 1` as one of three
+first-paint recovery fixes for #93, on the theory that the MSAA-resolve-into-
+sRGB step double-applied sRGB encoding on macOS Metal (the gray-backdrop
+darkening on resize). The two resize fixes that actually closed #93 landed
+afterward and at a different layer — the `CAMetalLayer`
+`presentsWithTransaction` root-cause fix (#101) and the `CursorMoved` M2 redraw
+bridge (#117) — so the darkening was a presentation-layer race, not the resolve
+step. With those in place MSAA is safe to re-enable.
 
-The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
-`msaa_color_view` attachment) is retained but dormant so the policy can be
-reversed cleanly. Re-introducing MSAA with a non-sRGB color view + manual
-fragment-stage sRGB encode (or a verified-correct sRGB resolve) is tracked in
-**#95**; until that lands, anti-aliasing is intentionally off.
+**The sRGB resolve contract (the load-bearing part).** wgpu requires a
+multisampled color view and its resolve target to share a texture format
+(`wgpu-core` rejects a mismatch with `MismatchedResolveTextureFormat`). So the
+intermediate MSAA texture (`create_msaa_color_view`) is created in the **same
+format as the swapchain** — an sRGB format such as `Bgra8UnormSrgb`. The
+pipeline order of operations is then:
+
+1. the fragment stage writes **linear** values (`gui_vertices` linearizes
+   authored sRGB via `srgb_to_linear` when the target is sRGB);
+2. the ROP encodes linear→sRGB **once per sample** on store into the MSAA
+   texture;
+3. the resolve is spec-defined (Vulkan/Metal/Lavapipe) to decode sRGB→linear,
+   average the samples, then re-encode linear→sRGB into the swapchain — a
+   **single** logical sRGB encode, no double-encoding.
+
+This is the canonical shape #95 called for. Note the issue's Option-A phrasing
+("linear `Rgba8Unorm` MSAA texture, sRGB resolve target") is **not expressible**
+under wgpu 29's format-match rule — a cross-format resolve is a validation
+error. The matching-sRGB resolve above is its correct realization: it achieves
+the same single-encode result the issue wanted (shaders emit linear; exactly one
+sRGB encode reaches the swapchain). `tests/msaa_no_regression.rs` proves it on
+the Lavapipe harness by asserting a 4× MSAA + resolve solid-color readback is
+byte-identical to the single-sample reference.
+
+All three pipelines that draw into this pass — UI triangles, the bitmap-text
+lane (shares the UI pipeline), and the Slug lane (`SlugAdapter::new` takes the
+sample count) — declare `MultisampleState { count: sample_count, .. }`; a
+mismatch is a wgpu pipeline/attachment validation error.
 
 ### Layout v1
 

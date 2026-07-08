@@ -7,6 +7,28 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Changed
+- **Re-enabled 4× MSAA with a correct sRGB resolve (#95, closes the Sprint 6
+  v0.9.1 deferral).** The `mkui-wgpu` UI pass renders at `sample_count = 4`
+  again (`MSAA_SAMPLE_COUNT_PREF = 4`, degrading to `1` on adapters without 4×
+  support), resolving the multisampled color attachment into the swapchain
+  texture. Sprint 6 disabled MSAA (`sample_count = 1`) as one of three #93
+  first-paint fixes, suspecting the resolve-into-sRGB step of double-encoding on
+  macOS Metal; the resize-darkening it was blamed for was actually a
+  presentation-layer race independently fixed by #101 (`CAMetalLayer`
+  `presentsWithTransaction`) and #117 (`CursorMoved` M2 redraw bridge). The
+  intermediate MSAA texture now matches the swapchain's sRGB format (wgpu
+  requires the resolve source and target to share a format), so shaders write
+  linear values and exactly one sRGB encode reaches the swapchain — no
+  double-encoding. This visibly sharpens the Slug outline-text lane at small
+  sizes (~32–48 px), where single-sample analytic coverage previously showed
+  pixel-step diagonal fringing. The UI-triangle, bitmap-text, and Slug pipelines
+  all declare a matching `multisample` state (`SlugAdapter::new` now takes the
+  sample count). New `crates/mkui-wgpu/tests/msaa_no_regression.rs` smoke test
+  (Lavapipe `gpu-tests` lane) confirms the 4× resolve is a single lossless sRGB
+  round-trip; ADR 0006 §"MSAA and sRGB resolve" documents the format contract.
+  No MSRV change, no new dependencies.
+
 ## [0.10.0] — 2026-07-03
 
 ### Added

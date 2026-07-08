@@ -199,9 +199,19 @@ pub struct SlugAdapter {
 }
 
 impl SlugAdapter {
-    /// Build the Slug pipeline for `target_format`. The device is borrowed —
-    /// the adapter takes no ownership of GPU lifecycle.
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    /// Build the Slug pipeline for `target_format` at `sample_count`. The
+    /// device is borrowed — the adapter takes no ownership of GPU lifecycle.
+    ///
+    /// `sample_count` must match the MSAA sample count of the render pass the
+    /// glyphs draw into (#95): the host renderer draws Slug runs inside its own
+    /// UI pass, so a mismatch is a wgpu pipeline/attachment validation error.
+    /// Pass `1` for a non-multisampled pass (the pre-#95 behavior and the
+    /// surfaceless readback tests).
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mkui-vector2d-wgpu Slug Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("slug.wgsl").into()),
@@ -241,7 +251,11 @@ impl SlugAdapter {
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_slug"),

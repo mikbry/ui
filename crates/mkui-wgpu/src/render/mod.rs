@@ -106,20 +106,36 @@ mod sfnt_slug_gpu;
 
 /// Preferred MSAA sample count for the UI pass.
 ///
-/// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
-/// path added in Sprint 5 has no StoneSketch parent (the upstream HUD
-/// pipeline runs at `MultisampleState::default()` = `sample_count=1`) and
-/// is the suspected source of two #93 symptoms on macOS Metal: the gray
-/// backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
-/// despite emitting 9012 valid triangles at the CPU stage — both consistent
-/// with the MSAA-resolve-into-sRGB step double-applying sRGB encoding.
-/// `sample_count=1` is the StoneSketch-proven, visually-correct path; it
-/// writes the swapchain view directly with no resolve step.
+/// **4× MSAA, re-enabled with correct sRGB resolve (#95, closes the Sprint 6
+/// v0.9.1 deferral).** Sprint 6 pinned this to `1` as one of three first-paint
+/// recovery fixes for #93: the 4× path had no StoneSketch parent and was the
+/// *suspected* source of resize-time darkening on macOS Metal. The two
+/// orthogonal resize fixes that actually closed #93 landed since — the
+/// `CAMetalLayer` `presentsWithTransaction` root-cause fix (#101) and the
+/// `CursorMoved` M2 redraw bridge (#117) — so the darkening was a
+/// presentation-layer race, not the resolve step. With those in place MSAA is
+/// re-enabled as the correct default.
 ///
-/// The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
-/// `msaa_color_view` attachment) is retained but dormant so the follow-up
-/// can re-enable it with correct sRGB orchestration — see #95.
-const MSAA_SAMPLE_COUNT_PREF: u32 = 1;
+/// # sRGB resolve contract (the load-bearing part)
+///
+/// The intermediate MSAA color texture is created in the **same format as the
+/// swapchain** (an sRGB format such as `Bgra8UnormSrgb`), because wgpu requires
+/// the multisampled color view and its resolve target to share a format
+/// (`wgpu-core` `MismatchedResolveTextureFormat`). The fragment stage writes
+/// **linear** values (`gui_vertices` linearizes authored sRGB via
+/// `srgb_to_linear` when the target is sRGB), the ROP encodes linear→sRGB once
+/// per sample on store, and the resolve is spec-defined to decode sRGB→linear,
+/// average, then re-encode — a **single** logical sRGB encode, no
+/// double-encoding. This is the canonical shape #95 asked for; the issue's
+/// "linear MSAA texture, sRGB resolve target" phrasing is not expressible under
+/// wgpu 29's format-match rule, and the matching-sRGB resolve is its correct
+/// realization. See ADR 0006 §"MSAA and sRGB resolve" and the
+/// `tests/msaa_no_regression.rs` readback smoke test.
+///
+/// `pick_sample_count` still degrades this to `1` on adapters that do not
+/// advertise 4× on the chosen color format, where the pass writes the swapchain
+/// view directly with no resolve step.
+const MSAA_SAMPLE_COUNT_PREF: u32 = 4;
 
 /// Outcome of a single `Renderer::render` call. Mirrors the upstream
 /// reference's contract so the event-loop shell knows when to reconfigure
@@ -242,8 +258,11 @@ impl Renderer {
         let ui_pipeline = build_ui_pipeline(&device, format, sample_count);
         let msaa_color_view = create_msaa_color_view(&device, width, height, format, sample_count);
 
+        // The Slug pipeline draws inside the same UI render pass, so its
+        // multisample state must match the pass sample count (#95). Off the
+        // 1× fallback this is `1`, identical to the pre-#95 behavior.
         #[cfg(feature = "slug")]
-        let slug_adapter = SlugAdapter::new(&device, format);
+        let slug_adapter = SlugAdapter::new(&device, format, sample_count);
 
         Ok(Self {
             _window: window,
@@ -819,16 +838,18 @@ mod tests {
     }
 
     #[test]
-    fn msaa_pref_is_off_pending_srgb_orchestration() {
-        // #93: MSAA is pinned off (sample_count=1) — the StoneSketch-proven
-        // path — until #95 re-introduces it with correct sRGB resolve.
-        assert_eq!(MSAA_SAMPLE_COUNT_PREF, 1);
+    fn msaa_pref_is_four_with_correct_srgb_resolve() {
+        // #95: MSAA re-enabled at 4× (the wgpu-portable ceiling on most GPUs)
+        // now that the resize-darkening root cause is closed by #101/#117. On a
+        // color format that advertises 4×, the probe hands the preferred count
+        // straight through so the pass renders multisampled + resolves.
+        assert_eq!(MSAA_SAMPLE_COUNT_PREF, 4);
         assert_eq!(
             pick_sample_count(
                 wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4,
                 MSAA_SAMPLE_COUNT_PREF
             ),
-            1
+            4
         );
     }
 

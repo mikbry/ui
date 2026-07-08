@@ -214,7 +214,7 @@ fn changed_in_rect(baseline: &[u8], drawn: &[u8], rect: (i64, i64, i64, i64)) ->
 #[test]
 fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let (sys, id) = registered();
 
     let face = sys.sfnt_face(id).unwrap();
@@ -292,7 +292,7 @@ fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
 #[test]
 fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let (sys, id) = registered();
 
     // "M中": M maps to Abel (Slug), 中 is unmapped → bitmap fallback. Real
