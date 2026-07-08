@@ -7,6 +7,28 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Added
+- **`mkui-vector2d` extended beyond glyph outlines — Sprint 8 substrate Wave 1
+  (#137).** The backend-neutral path crate now encodes *arbitrary* 2D vector
+  geometry, not only resolved glyph outlines:
+  - **`Stroke` descriptor** (`stroke` module) — a value-type stroke descriptor
+    (`width_px`, `LineCap` {Butt, Round, Square}, `LineJoin` {Miter, Round,
+    Bevel}, optional `DashPattern`) carried alongside a `VectorPath`. Descriptor
+    only; stroke *expansion* is deferred to a later sprint.
+  - **General Bézier encoder** (`encode::encode_vector_path`) — emits the same
+    Slug-compatible curve/band records as the glyph lane for any `VectorPath`.
+    Cubics are lowered to quadratics by the new `bezier` module using a
+    hard-coded 1° angular-error tolerance
+    (`CUBIC_SUBDIVISION_TOLERANCE_DEG`); NaN/Inf coordinates are rejected at the
+    input boundary; band bounds are derived from the flattened geometry; fill is
+    hard-coded non-zero winding.
+  - **Content-derived cache key** (`encode::VectorPathKey` +
+    `VectorPathBlobCache`) — a canonical, deterministic byte serialization of a
+    path's commands (`-0.0` folded to `+0.0`) that is byte-identical across
+    threads, enabling per-frame caching and reuse without font identity.
+  - No public API break to the existing `SlugGlyph`/`encode_slug_glyph` path;
+    zero new dependencies; MSRV unchanged.
+
 ### Changed
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
   rustdoc with `# Examples` sections to the bridge `Mkui::new`, `Mkui::child`,
