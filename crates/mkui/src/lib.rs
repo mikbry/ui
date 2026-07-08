@@ -48,7 +48,7 @@
 //!
 //! Adding a new backend means copying the five-module template, depending on
 //! [`mkui_core`], implementing `Mkui::new() / .child(...) / .run()`, and
-//! threading a feature into [`mkui`]'s `Cargo.toml`. No contract changes
+//! threading a feature into `mkui`'s `Cargo.toml`. No contract changes
 //! required.
 //!
 //! ## Using the bridge
@@ -135,6 +135,52 @@ pub struct Mkui {
     all(feature = "console", feature = "wgpu"),
 )))]
 impl Mkui {
+    /// Create a new [`Mkui`] app for the backend selected by Cargo features.
+    ///
+    /// Exactly one primary backend feature (`web`, `console`, or `wgpu`) must
+    /// be enabled; the selected backend's initialization runs here. With **no**
+    /// backend feature enabled this returns an [`MkuiError`]
+    /// explaining what to enable, so library consumers get a clear message
+    /// instead of an opaque link error.
+    ///
+    /// The result is a builder: attach a root component tree with
+    /// [`child`](Mkui::child), then start the event loop with
+    /// [`run`](Mkui::run). Components come from [`mkui_core`] — for example
+    /// [`Text`](mkui_core::components::Text),
+    /// [`Button`](mkui_core::components::Button),
+    /// [`View`](mkui_core::components::View), and anything implementing
+    /// [`Component`](mkui_core::components::Component).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`MkuiError`] if the backend
+    /// fails to initialize, or if no backend feature is enabled.
+    ///
+    /// # Examples
+    ///
+    /// With a backend feature enabled, `new` yields an app builder:
+    ///
+    /// ```no_run
+    /// use mkui::prelude::*;
+    ///
+    /// # fn main() -> Result<(), MkuiError> {
+    /// let app = Mkui::new()?.child(Text::new("hello"));
+    /// app.run()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// With no backend feature enabled, `new` reports the misconfiguration
+    /// instead of panicking:
+    ///
+    /// ```
+    /// # #[cfg(not(any(feature = "web", feature = "console", feature = "wgpu")))]
+    /// # {
+    /// use mkui::prelude::*;
+    ///
+    /// assert!(Mkui::new().is_err());
+    /// # }
+    /// ```
     pub fn new() -> Result<Self, MkuiError> {
         #[cfg(feature = "console")]
         {
@@ -162,6 +208,35 @@ impl Mkui {
         }
     }
 
+    /// Attach a root component to the app's tree, returning the app for
+    /// chaining.
+    ///
+    /// `child` accepts anything implementing
+    /// [`Component`](mkui_core::components::Component) — the cross-platform
+    /// components from [`mkui_core`] such as
+    /// [`View`](mkui_core::components::View),
+    /// [`Text`](mkui_core::components::Text), and
+    /// [`Button`](mkui_core::components::Button), or your own. Calls chain
+    /// builder-style; a typical app nests a
+    /// [`View`](mkui_core::components::View) container holding
+    /// [`Text`](mkui_core::components::Text) and
+    /// [`Button`](mkui_core::components::Button) leaves.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mkui::prelude::*;
+    ///
+    /// # fn main() -> Result<(), MkuiError> {
+    /// let app = Mkui::new()?.child(
+    ///     View::new()
+    ///         .child(Text::new("Counter"))
+    ///         .child(Button::new("Increment")),
+    /// );
+    /// # let _ = app;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn child(self, child: impl mkui_core::components::Component + 'static) -> Self {
         #[cfg(any(feature = "web", feature = "console", feature = "wgpu"))]
         {
@@ -176,6 +251,32 @@ impl Mkui {
         }
     }
 
+    /// Start the backend's event loop, rendering the app until it exits.
+    ///
+    /// This hands control to the selected backend — the DOM on `web`, the
+    /// terminal on `console`, a GPU window on `wgpu` — and returns when the
+    /// loop ends. It is the terminal call in the `new` → `child` → `run`
+    /// builder flow. Showcase binaries usually go through the
+    /// [`run!`](crate::run) macro instead, which wraps this with
+    /// platform-specific error conversion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`MkuiError`] if the backend's
+    /// render loop fails, or if no backend feature is enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use mkui::prelude::*;
+    ///
+    /// # fn main() -> Result<(), MkuiError> {
+    /// Mkui::new()?
+    ///     .child(Text::new("hello"))
+    ///     .run()?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn run(self) -> Result<(), MkuiError> {
         #[cfg(feature = "console")]
         {

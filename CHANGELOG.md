@@ -7,6 +7,16 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Changed
+- **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
+  rustdoc with `# Examples` sections to the bridge `Mkui::new`, `Mkui::child`,
+  and `Mkui::run` methods in `crates/mkui/src/lib.rs`, so adopters landing on
+  crates.io see the `new` → `child` → `run` builder flow instead of bare
+  signatures. Examples use the real public API (`Text`, `Button`, `View` from
+  `mkui_core`), compile under `cargo test --doc -p mkui`, and cross-reference
+  the relevant `mkui-core` component types. Documentation-only; no public API
+  change.
+
 ## [0.10.0] — 2026-07-03
 
 ### Added
