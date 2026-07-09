@@ -251,14 +251,21 @@ impl Mkui {
         }
     }
 
-    /// Start the backend's event loop, rendering the app until it exits.
+    /// Start the backend's render / event loop for the app.
     ///
-    /// This hands control to the selected backend — the DOM on `web`, the
-    /// terminal on `console`, a GPU window on `wgpu` — and returns when the
-    /// loop ends. It is the terminal call in the `new` → `child` → `run`
-    /// builder flow. Showcase binaries usually go through the
-    /// [`run!`](crate::run) macro instead, which wraps this with
-    /// platform-specific error conversion.
+    /// The meaning of "returns" depends on the selected backend:
+    ///
+    /// - **`wgpu`**: blocks on the winit event loop and returns when the
+    ///   window is closed.
+    /// - **`web`**: mounts the tree into the DOM and returns immediately;
+    ///   the browser owns the rendering loop from that point.
+    /// - **`console`**: renders and returns immediately for non-interactive
+    ///   trees.
+    ///
+    /// It is the terminal call in the `new` → `child` → `run` builder
+    /// flow. Showcase binaries usually go through the [`run!`](crate::run)
+    /// macro instead, which wraps this with platform-specific error
+    /// conversion.
     ///
     /// # Errors
     ///
