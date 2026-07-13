@@ -63,6 +63,13 @@ jobs:
     # config, so a dependency-bump or MSRV-pin PR still runs the full matrix
     # (the issue's 3-glob list omits these, which would wrongly skip tests on a
     # lockfile-only bump).
+    #
+    # Gates use `code != 'false'` (fail-closed), not `code == 'true'`: if this
+    # classifier job itself fails (checkout, git diff, shell error), its output
+    # is missing rather than 'false', and `needs: changes` skips downstream
+    # jobs — which branch protection would treat as success on required checks.
+    # The invert keeps docs-only PRs cheap while ensuring classifier failure
+    # runs the full matrix instead of silently letting a code PR through.
     name: changes
     runs-on: ubuntu-latest
     outputs:
@@ -246,7 +253,7 @@ jobs:
     # change, so they skip when `changes` reports no code paths touched.
     name: gpu-offscreen
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -296,7 +303,7 @@ jobs:
     # displayless runner.
     name: feature-slug
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -342,7 +349,7 @@ jobs:
     # invalid combo compile, which fails this job loudly.
     name: mkui-backend-matrix
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -409,7 +416,7 @@ jobs:
     # that variant is deferred to a follow-up issue.
     name: mkui-examples
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -456,7 +463,7 @@ jobs:
   build-release:
     name: build-release
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -493,7 +500,7 @@ jobs:
     # PATH, supplied by `actions/setup-python`.
     name: msrv
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -540,7 +547,7 @@ jobs:
     # preserving full coverage on code PRs. See PR body "Scope decision".
     name: mkui-py-bindings
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -581,7 +588,7 @@ jobs:
     # consumer at link time.
     name: cbindgen-header-clean
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: needs.changes.outputs.code != 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
