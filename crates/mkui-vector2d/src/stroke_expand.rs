@@ -299,6 +299,35 @@ fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
         if on {
             current.push(b);
         }
+
+        // A dash boundary can land exactly on (or within EPS of) the segment
+        // end. Advance the dash state *now*: deferring to the next segment's
+        // boundary walk would re-emit this point as a zero-length edge at the
+        // start of that segment, and `expand_contour` would then derive a
+        // degenerate end-cap direction from the duplicated terminal points,
+        // silently dropping square/round caps (Codex round-1 finding on
+        // PR #150). Invariant restored: an emitted run never carries a
+        // zero-length terminal edge from a boundary-on-vertex split. A single
+        // advance suffices — any zero-length intervals that follow are
+        // consumed by the next segment's boundary walk as before.
+        if remaining <= EPS {
+            if on {
+                if current.len() >= 2 {
+                    runs.push(Contour {
+                        points: std::mem::take(&mut current),
+                        closed: false,
+                    });
+                } else {
+                    current.clear();
+                }
+            } else {
+                current.clear();
+                current.push(b);
+            }
+            on = !on;
+            idx = (idx + 1) % dash.intervals.len();
+            remaining = dash.intervals[idx];
+        }
     }
 
     if on && current.len() >= 2 {
@@ -355,12 +384,18 @@ fn expand_contour(
         add_join(prev, v, next, half, join, out);
     }
 
-    // Caps at the two ends of an open contour.
+    // Caps at the two ends of an open contour. Each cap direction comes from
+    // the nearest *non-degenerate* segment, not blindly from the two terminal
+    // points: a zero-length terminal edge (e.g. a dash boundary duplicated
+    // onto a path vertex) must not erase the cap. `apply_dash` no longer
+    // produces such edges, but deriving the direction robustly here is a
+    // one-line backstop that also covers any other producer of near-duplicate
+    // endpoints. The `segment_dirs` guard above ensures a direction exists.
     if !closed {
-        if let Some(d0) = dir(pts[0], pts[1]) {
+        if let Some(d0) = pts.windows(2).find_map(|w| dir(w[0], w[1])) {
             add_cap(pts[0], scale(d0, -1.0), half, cap, out);
         }
-        if let Some(dn) = dir(pts[n - 2], pts[n - 1]) {
+        if let Some(dn) = pts.windows(2).rev().find_map(|w| dir(w[0], w[1])) {
             add_cap(pts[n - 1], dn, half, cap, out);
         }
     }
@@ -596,6 +631,14 @@ mod tests {
             FillRule::NonZero,
             Bounds::new(Vec2::ZERO, Vec2::ZERO),
         )
+    }
+
+    fn polyline(pts: &[Vec2]) -> VectorPath {
+        let mut cmds = vec![PathCommand::MoveTo(pts[0])];
+        for &p in &pts[1..] {
+            cmds.push(PathCommand::LineTo(p));
+        }
+        VectorPath::new(cmds, FillRule::NonZero, Bounds::new(Vec2::ZERO, Vec2::ZERO))
     }
 
     /// Winding number of `p` w.r.t. all closed sub-contours of a fill path;
@@ -836,6 +879,111 @@ mod tests {
             &Stroke::new(f32::NAN),
         );
         assert!(out.commands.is_empty());
+    }
+
+    /// Codex round-1 regression (#138 / PR #150): a dash boundary that lands
+    /// exactly on an existing path vertex must not erase the end cap. The
+    /// first dash of `M0,0 L10,0 L20,0` with pattern `[10, 10]` ends at the
+    /// vertex `(10, 0)`; its square cap extends half-width (2) past it.
+    #[test]
+    fn codex_r1_dash_boundary_at_path_vertex_preserves_cap() {
+        let path = polyline(&[Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(20.0, 0.0)]);
+        let stroke = Stroke {
+            cap: LineCap::Square,
+            dash: Some(DashPattern::new(vec![10.0, 10.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&path, &stroke);
+        assert_ne!(
+            winding(&out, Vec2::new(11.0, 0.0)),
+            0,
+            "square cap missing where the dash ends on a path vertex"
+        );
+        assert!(out.bounds.max.x >= 11.0, "max.x={}", out.bounds.max.x);
+    }
+
+    /// Same boundary-on-vertex scenario as
+    /// [`codex_r1_dash_boundary_at_path_vertex_preserves_cap`], round cap.
+    #[test]
+    fn dash_boundary_at_path_vertex_preserves_round_cap() {
+        let path = polyline(&[Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(20.0, 0.0)]);
+        let stroke = Stroke {
+            cap: LineCap::Round,
+            dash: Some(DashPattern::new(vec![10.0, 10.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&path, &stroke);
+        assert_ne!(
+            winding(&out, Vec2::new(11.0, 0.0)),
+            0,
+            "round cap missing where the dash ends on a path vertex"
+        );
+        assert!(out.bounds.max.x >= 11.5, "max.x={}", out.bounds.max.x);
+    }
+
+    /// Butt caps add nothing by definition, but the boundary-on-vertex case
+    /// must still produce the plain dash rectangle without artifacts.
+    #[test]
+    fn dash_boundary_at_path_vertex_butt_is_unchanged() {
+        let path = polyline(&[Vec2::ZERO, Vec2::new(10.0, 0.0), Vec2::new(20.0, 0.0)]);
+        let stroke = Stroke {
+            cap: LineCap::Butt,
+            dash: Some(DashPattern::new(vec![10.0, 10.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&path, &stroke);
+        assert!(!out.commands.is_empty());
+        assert_ne!(winding(&out, Vec2::new(5.0, 0.0)), 0, "dash body inked");
+        assert_eq!(winding(&out, Vec2::new(11.0, 0.0)), 0, "no cap extent");
+        assert!(
+            (out.bounds.max.x - 10.0).abs() < 1e-3,
+            "max.x={}",
+            out.bounds.max.x
+        );
+    }
+
+    /// Property-style: dashing a straight polyline must be indistinguishable
+    /// from dashing a single segment of the same total length — vertices the
+    /// pattern crosses (or lands on) contribute nothing. Coverage is compared
+    /// on a sample grid whose x values sit at `*.x5` offsets so no sample
+    /// lands exactly on a dash/cap boundary (all boundaries here are integer).
+    #[test]
+    fn dashes_crossing_vertices_match_single_segment_equivalent() {
+        let multi = polyline(&[
+            Vec2::ZERO,
+            Vec2::new(10.0, 0.0),
+            Vec2::new(20.0, 0.0),
+            Vec2::new(30.0, 0.0),
+        ]);
+        let single = line(Vec2::ZERO, Vec2::new(30.0, 0.0));
+        let patterns: [&[f32]; 4] = [
+            &[10.0, 10.0],
+            &[5.0, 5.0],
+            &[7.0, 3.0],
+            &[10.0, 5.0, 5.0, 5.0],
+        ];
+        for pattern in patterns {
+            for cap in [LineCap::Butt, LineCap::Square, LineCap::Round] {
+                let stroke = Stroke {
+                    cap,
+                    dash: Some(DashPattern::new(pattern.to_vec(), 0.0)),
+                    ..Stroke::new(4.0)
+                };
+                let a = stroke_to_fill(&multi, &stroke);
+                let b = stroke_to_fill(&single, &stroke);
+                for xi in 0..=360 {
+                    let x = xi as f32 * 0.1 - 3.05;
+                    for y in [-1.95, -1.0, -0.05, 1.0, 1.95] {
+                        let p = Vec2::new(x, y);
+                        assert_eq!(
+                            winding(&a, p) != 0,
+                            winding(&b, p) != 0,
+                            "coverage mismatch at ({x}, {y}) for dash {pattern:?}, cap {cap:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
