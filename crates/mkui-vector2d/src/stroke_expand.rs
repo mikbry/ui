@@ -226,8 +226,12 @@ fn dash_is_active(dash: &DashPattern) -> bool {
         && dash.intervals.iter().sum::<f32>() > EPS
 }
 
-/// Split a contour into its "on" runs (all open) per the dash pattern, walked by
-/// arc length. A closed contour is walked including its closing edge.
+/// Split a contour into its "on" runs per the dash pattern, walked by arc
+/// length. A closed contour is walked including its closing edge; an "on" run
+/// that wraps its closing seam comes back as **one** open run with the seam
+/// vertex interior (so it takes the configured join, not two caps), and a
+/// pattern that never switches off within the perimeter yields a single
+/// *closed* run. All other runs are open.
 fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
     let mut pts = contour.points.clone();
     if contour.closed {
@@ -255,6 +259,9 @@ fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
         on = !on;
     }
     let mut remaining = dash.intervals[idx] - phase;
+    // Dash state at t=0, before the walk mutates `on`; a closed contour needs
+    // it at the end to detect an "on" run wrapping the closing seam.
+    let started_on = on;
 
     let mut runs: Vec<Contour> = Vec::new();
     let mut current: Vec<Vec2> = Vec::new();
@@ -330,11 +337,49 @@ fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
         }
     }
 
-    if on && current.len() >= 2 {
-        runs.push(Contour {
-            points: current,
-            closed: false,
-        });
+    // Seam wrap-merge for closed contours (Codex round-2 finding on PR #150):
+    // when the walk both starts and ends "on", the pattern's final on-run and
+    // its first on-run are one continuous dash crossing the closing seam.
+    // Stitch the pre-seam tail (`current`) onto the post-seam head (`runs[0]`,
+    // which began at `pts[0]` because the walk started on) so the seam vertex
+    // becomes an interior vertex of a single run — `expand_contour` then
+    // paints the configured join there instead of two caps. The pattern
+    // cursor/phase logic above is untouched: the walk stays linear in arc
+    // length and only already-emitted geometry is stitched. `push_point`
+    // dedupes the seam point the tail and head share. When no off-boundary
+    // ever fired (`runs` is empty), the dash covers the whole ring: emit it as
+    // a *closed* run — every vertex joined, no caps — dropping the duplicated
+    // seam point the closing-edge walk appended.
+    if on && !current.is_empty() {
+        if contour.closed && started_on {
+            if runs.is_empty() {
+                if current.len() >= 2 && length(sub(*current.last().unwrap(), current[0])) <= EPS {
+                    current.pop();
+                }
+                if current.len() >= 2 {
+                    runs.push(Contour {
+                        points: current,
+                        closed: true,
+                    });
+                }
+            } else {
+                let head = runs.remove(0);
+                for p in head.points {
+                    push_point(&mut current, p);
+                }
+                if current.len() >= 2 {
+                    runs.push(Contour {
+                        points: current,
+                        closed: false,
+                    });
+                }
+            }
+        } else if current.len() >= 2 {
+            runs.push(Contour {
+                points: current,
+                closed: false,
+            });
+        }
     }
     runs
 }
@@ -940,6 +985,134 @@ mod tests {
             "max.x={}",
             out.bounds.max.x
         );
+    }
+
+    /// A closed 10×10 square used by the seam-wrap regression tests below.
+    fn closed_square10() -> VectorPath {
+        VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, 10.0)),
+                PathCommand::LineTo(Vec2::new(0.0, 10.0)),
+                PathCommand::Close,
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        )
+    }
+
+    /// Codex round-2 regression (#138 / PR #150): on a closed contour, an "on"
+    /// run wrapping the closing seam must be one run with the seam vertex as
+    /// an interior *joined* vertex, not two capped open runs. Perimeter 40,
+    /// dash `[30, 10]` at offset 5: on from t=35 through the seam to t=25, so
+    /// the seam corner (0,0) carries the miter whose apex reaches (-2,-2).
+    #[test]
+    fn codex_r2_closed_seam_dash_wrap_preserves_join() {
+        let stroke = Stroke {
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            dash: Some(DashPattern::new(vec![30.0, 10.0], 5.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&closed_square10(), &stroke);
+        assert_ne!(
+            winding(&out, Vec2::new(-1.5, -1.5)),
+            0,
+            "seam miter missing: wrapping dash run split into two capped runs"
+        );
+        // The off gap t in [25, 35] (midpoint of the top edge down the left
+        // side) stays unpainted.
+        assert_eq!(winding(&out, Vec2::new(2.5, 10.0)), 0, "gap painted");
+    }
+
+    /// All three join styles must render at the seam when the run wraps.
+    /// (-0.6,-0.6) sits inside every join wedge; the outer probes tell the
+    /// styles apart (miter reaches the apex, round stays within radius 2,
+    /// bevel cuts the diagonal x+y=-2).
+    #[test]
+    fn closed_seam_dash_wrap_joins_all_styles() {
+        for join in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+            let stroke = Stroke {
+                cap: LineCap::Butt,
+                join,
+                dash: Some(DashPattern::new(vec![30.0, 10.0], 5.0)),
+                ..Stroke::new(4.0)
+            };
+            let out = stroke_to_fill(&closed_square10(), &stroke);
+            assert_ne!(
+                winding(&out, Vec2::new(-0.6, -0.6)),
+                0,
+                "{join:?} join missing at the wrapped seam"
+            );
+            let apex = winding(&out, Vec2::new(-1.5, -1.5)) != 0;
+            match join {
+                LineJoin::Miter => assert!(apex, "miter reaches the seam apex"),
+                LineJoin::Bevel => assert!(!apex, "bevel cuts the seam apex"),
+                LineJoin::Round => {
+                    assert!(!apex, "round stays inside the seam apex");
+                    assert_ne!(winding(&out, Vec2::new(-1.0, -1.0)), 0, "round arc inked");
+                }
+            }
+        }
+    }
+
+    /// An "on" run that terminates *before* the closing seam keeps its caps:
+    /// no join material may appear at the seam corner.
+    #[test]
+    fn closed_seam_dash_not_wrapping_keeps_caps() {
+        let stroke = Stroke {
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            dash: Some(DashPattern::new(vec![12.0, 28.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&closed_square10(), &stroke);
+        // On-run covers t in [0, 12]: bottom edge plus 2 units up the right.
+        assert_ne!(winding(&out, Vec2::new(5.0, 0.0)), 0, "dash body inked");
+        assert_ne!(winding(&out, Vec2::new(10.0, 1.5)), 0, "dash tail inked");
+        // Butt cap at the seam start: nothing beyond it, no seam join.
+        assert_eq!(winding(&out, Vec2::new(-0.6, -0.6)), 0, "stray seam join");
+        assert_eq!(winding(&out, Vec2::new(-1.5, -1.5)), 0, "stray seam miter");
+        assert_eq!(winding(&out, Vec2::new(0.0, 5.0)), 0, "off region painted");
+    }
+
+    /// A pattern that never switches off within the perimeter paints the whole
+    /// ring as a closed stroke: joins everywhere (including the seam), no caps.
+    #[test]
+    fn fully_on_dash_ring_closes_with_seam_join() {
+        let stroke = Stroke {
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            dash: Some(DashPattern::new(vec![100.0, 20.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&closed_square10(), &stroke);
+        assert_ne!(winding(&out, Vec2::new(5.0, 0.0)), 0, "edge is stroked");
+        assert_eq!(winding(&out, Vec2::new(5.0, 5.0)), 0, "centre is hollow");
+        assert_ne!(
+            winding(&out, Vec2::new(-1.5, -1.5)),
+            0,
+            "seam corner takes a miter join like every other corner"
+        );
+    }
+
+    /// Open contours are exempt from the wrap-merge: a dashed open polyline
+    /// whose walk starts and ends "on" keeps a cap at each run end.
+    #[test]
+    fn open_contour_runs_keep_caps_no_wrap_merge() {
+        let stroke = Stroke {
+            cap: LineCap::Square,
+            dash: Some(DashPattern::new(vec![12.0, 6.0], 0.0)),
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&line(Vec2::ZERO, Vec2::new(30.0, 0.0)), &stroke);
+        // Runs [0,12] and [18,30]; square caps extend 2 past every run end.
+        assert_ne!(winding(&out, Vec2::new(-1.0, 0.0)), 0, "start cap");
+        assert_ne!(winding(&out, Vec2::new(31.0, 0.0)), 0, "end cap");
+        assert_ne!(winding(&out, Vec2::new(13.0, 0.0)), 0, "cap into the gap");
+        assert_ne!(winding(&out, Vec2::new(17.0, 0.0)), 0, "cap into the gap");
+        assert_eq!(winding(&out, Vec2::new(15.0, 0.0)), 0, "gap centre clear");
     }
 
     /// Property-style: dashing a straight polyline must be indistinguishable
