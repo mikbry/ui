@@ -133,6 +133,15 @@ fn normalize(a: Vec2) -> Option<Vec2> {
 
 /// Walk `path` into flattened contours, lowering quads/cubics to polylines and
 /// dropping consecutive duplicate points.
+///
+/// A contour is only *seeded* (with the pen position) when a drawing command
+/// actually follows — never eagerly on `MoveTo`/`Close`. Eager seeding leaked
+/// the bare cursor out as a phantom one-point open contour, which a round or
+/// square cap then painted as a ghost dot: after every `Close` (Codex round-3
+/// finding on PR #150) and after a lone trailing `MoveTo` (same family; SVG
+/// does not stroke a subpath consisting of only a moveto). A genuine
+/// zero-length subpath (`MoveTo` + degenerate draw command) still comes out as
+/// a one-point contour, which SVG *does* mark under round/square caps.
 fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
     let mut out: Vec<Contour> = Vec::new();
     let mut cur: Vec<Vec2> = Vec::new();
@@ -140,13 +149,16 @@ fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
     let mut pen = Vec2::ZERO;
 
     let flush = |out: &mut Vec<Contour>, pts: &mut Vec<Vec2>, closed: bool| {
-        if pts.len() >= 2 || (pts.len() == 1) {
+        if !pts.is_empty() {
             out.push(Contour {
                 points: std::mem::take(pts),
                 closed,
             });
-        } else {
-            pts.clear();
+        }
+    };
+    let seed = |cur: &mut Vec<Vec2>, pen: Vec2| {
+        if cur.is_empty() {
+            cur.push(pen);
         }
     };
 
@@ -156,13 +168,14 @@ fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
                 flush(&mut out, &mut cur, false);
                 start = p;
                 pen = p;
-                cur.push(p);
             }
             PathCommand::LineTo(p) => {
+                seed(&mut cur, pen);
                 push_point(&mut cur, p);
                 pen = p;
             }
             PathCommand::QuadTo { control, to } => {
+                seed(&mut cur, pen);
                 flatten_quad(&mut cur, pen, control, to);
                 pen = to;
             }
@@ -171,6 +184,7 @@ fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
                 control2,
                 to,
             } => {
+                seed(&mut cur, pen);
                 let mut seg_start = pen;
                 for (control, end) in subdivide_cubic(pen, control1, control2, to) {
                     flatten_quad(&mut cur, seg_start, control, end);
@@ -185,8 +199,9 @@ fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
                     cur.pop();
                 }
                 flush(&mut out, &mut cur, true);
+                // The pen returns to the subpath start; a following drawing
+                // command re-seeds a new contour from there (SVG semantics).
                 pen = start;
-                cur.push(start);
             }
         }
     }
@@ -239,9 +254,6 @@ fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
             pts.push(first);
         }
     }
-    if pts.len() < 2 {
-        return Vec::new();
-    }
 
     let total: f32 = dash.intervals.iter().sum();
     // Phase: how far into the (cyclic) pattern drawing begins.
@@ -262,6 +274,17 @@ fn apply_dash(contour: &Contour, dash: &DashPattern) -> Vec<Contour> {
     // Dash state at t=0, before the walk mutates `on`; a closed contour needs
     // it at the end to detect an "on" run wrapping the closing seam.
     let started_on = on;
+
+    // A zero-length subpath has no arc to walk, but the pattern still decides
+    // its visibility: keep the cap-dot contour when the pattern is "on" at its
+    // position (a closed degenerate paints nothing downstream either way).
+    if pts.len() < 2 {
+        return if started_on && !contour.closed {
+            vec![contour.clone()]
+        } else {
+            Vec::new()
+        };
+    }
 
     let mut runs: Vec<Contour> = Vec::new();
     let mut current: Vec<Vec2> = Vec::new();
@@ -396,12 +419,23 @@ fn expand_contour(
 ) {
     let pts = &contour.points;
 
-    // A degenerate contour (a single point, or all points coincident) paints a
-    // dot only under a round cap.
+    // A degenerate contour (a single point, or all points coincident): SVG
+    // marks a zero-length open subpath under a round cap (a dot) or a square
+    // cap (an axis-aligned width×width square — the subpath has no direction
+    // to orient it by); butt caps and closed contours paint nothing.
     if segment_dirs(pts, contour.closed).is_empty() {
-        if !contour.closed && cap == LineCap::Round {
+        if !contour.closed {
             if let Some(&c) = pts.first() {
-                out.push(circle(c, half));
+                match cap {
+                    LineCap::Round => out.push(circle(c, half)),
+                    LineCap::Square => out.push(ccw(vec![
+                        Vec2::new(c.x - half, c.y - half),
+                        Vec2::new(c.x + half, c.y - half),
+                        Vec2::new(c.x + half, c.y + half),
+                        Vec2::new(c.x - half, c.y + half),
+                    ])),
+                    LineCap::Butt => {}
+                }
             }
         }
         return;
@@ -487,7 +521,15 @@ fn add_join(prev: Vec2, v: Vec2, next: Vec2, half: f32, join: LineJoin, out: &mu
     };
     let turn = cross(d0, d1);
     if turn.abs() <= EPS {
-        return; // Collinear: the two rectangles already meet flush.
+        // Straight-through: the two rectangles already meet flush. An exact
+        // 180° reversal (a spike) has no outer side to wedge, but a round
+        // join must still bulge past the turning point — the shape is exactly
+        // a round cap pointing along the incoming direction. Miter (infinite
+        // apex → limit fallback) and bevel both degenerate to zero area there.
+        if join == LineJoin::Round && dot(d0, d1) < 0.0 {
+            add_cap(v, d0, half, LineCap::Round, out);
+        }
+        return;
     }
     let sign = turn.signum();
     // Outer offset points: the outer corners of the two adjacent rectangles.
@@ -1157,6 +1199,564 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Build an open or closed path from a point list.
+    fn contour_path(pts: &[Vec2], closed: bool) -> VectorPath {
+        let mut cmds = vec![PathCommand::MoveTo(pts[0])];
+        for &p in &pts[1..] {
+            cmds.push(PathCommand::LineTo(p));
+        }
+        if closed {
+            cmds.push(PathCommand::Close);
+        }
+        VectorPath::new(cmds, FillRule::NonZero, Bounds::new(Vec2::ZERO, Vec2::ZERO))
+    }
+
+    fn vecs(pts: &[(f32, f32)], s: f32) -> Vec<Vec2> {
+        pts.iter().map(|&(x, y)| Vec2::new(x * s, y * s)).collect()
+    }
+
+    /// Winding-coverage signature of `path` over `probes`.
+    fn coverage_sig(path: &VectorPath, probes: &[Vec2]) -> Vec<bool> {
+        probes.iter().map(|&p| winding(path, p) != 0).collect()
+    }
+
+    /// An n×n probe grid over `[min, max]²`, scaled by `s`, offset off round
+    /// coordinates so probes avoid the integer-aligned geometry edges these
+    /// tests use.
+    fn probe_grid(min: f32, max: f32, n: usize, s: f32) -> Vec<Vec2> {
+        let step = (max - min) / n as f32;
+        let mut probes = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                probes.push(Vec2::new(
+                    (min + step * (i as f32 + 0.531)) * s,
+                    (min + step * (j as f32 + 0.531)) * s,
+                ));
+            }
+        }
+        probes
+    }
+
+    /// Minimum distance from `p` to the polyline (or ring) through `pts`.
+    fn dist_to_contour(p: Vec2, pts: &[Vec2], closed: bool) -> f32 {
+        let n = pts.len();
+        if n == 1 {
+            return length(sub(p, pts[0]));
+        }
+        let seg_count = if closed { n } else { n - 1 };
+        let mut best = f32::INFINITY;
+        for i in 0..seg_count {
+            let a = pts[i];
+            let b = pts[(i + 1) % n];
+            let ab = sub(b, a);
+            let t = (dot(sub(p, a), ab) / dot(ab, ab).max(1e-12)).clamp(0.0, 1.0);
+            best = best.min(length(sub(p, add(a, scale(ab, t)))));
+        }
+        best
+    }
+
+    /// Codex round-3 regression (#138 / PR #150): flattening must not leak the
+    /// post-`Close` cursor as a phantom one-point open contour — with a round
+    /// (or square) cap it painted a ghost dot at the closed contour's seam.
+    /// Cap style is meaningless on a closed contour, so coverage must be
+    /// identical across all caps; with bevel joins the probe (-1.2, -1.2)
+    /// sits outside the bevel and must stay unpainted for every cap.
+    #[test]
+    fn codex_r3_closed_contour_round_cap_no_ghost_circle() {
+        let probes = [
+            Vec2::new(-1.2, -1.2),
+            Vec2::new(-1.5, -1.5),
+            Vec2::new(-0.5, -0.5),
+            Vec2::new(5.0, 0.0),
+            Vec2::new(5.0, 5.0),
+            Vec2::new(11.0, 5.0),
+        ];
+        let sig = |cap: LineCap| {
+            let stroke = Stroke {
+                cap,
+                join: LineJoin::Bevel,
+                ..Stroke::new(4.0)
+            };
+            coverage_sig(&stroke_to_fill(&closed_square10(), &stroke), &probes)
+        };
+        let butt = sig(LineCap::Butt);
+        assert!(!butt[0], "bevel seam corner leaks at (-1.2,-1.2)");
+        assert!(butt[3] && !butt[4], "square edge inked, centre hollow");
+        assert_eq!(
+            butt,
+            sig(LineCap::Round),
+            "round cap changed a closed contour"
+        );
+        assert_eq!(
+            butt,
+            sig(LineCap::Square),
+            "square cap changed a closed contour"
+        );
+    }
+
+    /// A subpath consisting of a lone `MoveTo` is not stroked (SVG): no ghost
+    /// cap dot may appear at the bare cursor position.
+    #[test]
+    fn lone_moveto_paints_nothing() {
+        let stroke = Stroke {
+            cap: LineCap::Round,
+            ..Stroke::new(4.0)
+        };
+        let lone = VectorPath::new(
+            vec![PathCommand::MoveTo(Vec2::new(5.0, 5.0))],
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        );
+        assert!(stroke_to_fill(&lone, &stroke).commands.is_empty());
+
+        let mixed = VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(5.0, 5.0)),
+                PathCommand::MoveTo(Vec2::new(20.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(30.0, 0.0)),
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        );
+        let out = stroke_to_fill(&mixed, &stroke);
+        assert_eq!(
+            winding(&out, Vec2::new(5.0, 5.0)),
+            0,
+            "abandoned MoveTo dot"
+        );
+        assert_ne!(winding(&out, Vec2::new(25.0, 0.0)), 0, "real segment inked");
+    }
+
+    /// A drawing command after `Close` starts a new subpath at the closed
+    /// contour's start point (SVG pen semantics) — guarding the lazy-seeding
+    /// rewrite of `flatten_contours`.
+    #[test]
+    fn close_then_lineto_starts_new_subpath_at_seam() {
+        let path = VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(0.0, 10.0)),
+                PathCommand::Close,
+                PathCommand::LineTo(Vec2::new(0.0, -10.0)),
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        );
+        let butt = stroke_to_fill(&path, &Stroke::new(4.0));
+        assert_ne!(winding(&butt, Vec2::new(5.0, 0.5)), 0, "triangle stroked");
+        assert_ne!(
+            winding(&butt, Vec2::new(0.0, -5.0)),
+            0,
+            "tail subpath stroked"
+        );
+        assert_eq!(winding(&butt, Vec2::new(0.0, -11.0)), 0, "butt adds no cap");
+        let round = stroke_to_fill(
+            &path,
+            &Stroke {
+                cap: LineCap::Round,
+                ..Stroke::new(4.0)
+            },
+        );
+        assert_ne!(
+            winding(&round, Vec2::new(0.0, -11.0)),
+            0,
+            "tail is open: round cap extends past its endpoint"
+        );
+    }
+
+    /// An exact 180° reversal (a spike) must bulge under a round join — the
+    /// outer arc degenerates to a semicircle past the turning point. Miter
+    /// (infinite apex) and bevel (zero area) paint nothing extra there.
+    #[test]
+    fn spike_reversal_round_join_bulges() {
+        let spike = polyline(&vecs(&[(0.0, 0.0), (10.0, 0.0), (0.0, 0.0)], 1.0));
+        let probe = Vec2::new(11.5, 0.0);
+        for (join, bulges) in [
+            (LineJoin::Round, true),
+            (LineJoin::Miter, false),
+            (LineJoin::Bevel, false),
+        ] {
+            let out = stroke_to_fill(
+                &spike,
+                &Stroke {
+                    join,
+                    ..Stroke::new(4.0)
+                },
+            );
+            assert_ne!(winding(&out, Vec2::new(5.0, 0.0)), 0, "{join:?}: body");
+            assert_eq!(
+                winding(&out, probe) != 0,
+                bulges,
+                "{join:?} at the spike tip"
+            );
+        }
+    }
+
+    /// A degenerate closed two-point ring (`M a L b Z`) is a there-and-back
+    /// line: round joins at both reversals make it a capsule.
+    #[test]
+    fn closed_two_point_ring_round_join_is_a_capsule() {
+        let ring = contour_path(&vecs(&[(0.0, 0.0), (10.0, 0.0)], 1.0), true);
+        let round = stroke_to_fill(
+            &ring,
+            &Stroke {
+                join: LineJoin::Round,
+                ..Stroke::new(4.0)
+            },
+        );
+        assert_ne!(winding(&round, Vec2::new(5.0, 1.5)), 0, "body inked");
+        assert_ne!(winding(&round, Vec2::new(-1.5, 0.0)), 0, "left bulge");
+        assert_ne!(winding(&round, Vec2::new(11.5, 0.0)), 0, "right bulge");
+        let miter = stroke_to_fill(&ring, &Stroke::new(4.0));
+        assert_eq!(
+            winding(&miter, Vec2::new(11.5, 0.0)),
+            0,
+            "miter spike is cut"
+        );
+    }
+
+    /// SVG marks a zero-length subpath under a square cap too: an axis-aligned
+    /// width×width square (there is no direction to orient it by). Butt caps
+    /// paint nothing.
+    #[test]
+    fn square_cap_marks_zero_length_subpath() {
+        let dot = contour_path(&[Vec2::new(5.0, 5.0), Vec2::new(5.0, 5.0)], false);
+        let square = stroke_to_fill(
+            &dot,
+            &Stroke {
+                cap: LineCap::Square,
+                ..Stroke::new(4.0)
+            },
+        );
+        assert_ne!(winding(&square, Vec2::new(6.9, 6.9)), 0, "square corner");
+        assert_eq!(
+            winding(&square, Vec2::new(5.0, 7.5)),
+            0,
+            "beyond half-width"
+        );
+        assert_eq!(
+            winding(&square, Vec2::new(8.0, 5.0)),
+            0,
+            "beyond half-width"
+        );
+        let butt = stroke_to_fill(&dot, &Stroke::new(4.0));
+        assert!(butt.commands.is_empty(), "butt paints no zero-length mark");
+    }
+
+    /// The dash pattern decides whether a zero-length subpath shows its mark:
+    /// "on" at the subpath's position keeps the dot, "off" drops it.
+    #[test]
+    fn dashed_zero_length_subpath_follows_pattern_phase() {
+        let dot = contour_path(&[Vec2::new(5.0, 5.0), Vec2::new(5.0, 5.0)], false);
+        let dashed = |offset: f32, cap: LineCap| {
+            stroke_to_fill(
+                &dot,
+                &Stroke {
+                    cap,
+                    dash: Some(DashPattern::new(vec![10.0, 10.0], offset)),
+                    ..Stroke::new(4.0)
+                },
+            )
+        };
+        let on = dashed(0.0, LineCap::Round);
+        assert_ne!(winding(&on, Vec2::new(5.8, 5.8)), 0, "on-phase dot kept");
+        let off = dashed(10.0, LineCap::Round);
+        assert!(off.commands.is_empty(), "off-phase dot dropped");
+        let on_square = dashed(0.0, LineCap::Square);
+        assert_ne!(
+            winding(&on_square, Vec2::new(6.9, 6.9)),
+            0,
+            "square mark kept"
+        );
+    }
+
+    /// Property: on a **solid closed** contour cap style is meaningless — the
+    /// coverage must be bit-identical for butt/round/square across shapes,
+    /// join styles, and path scales.
+    #[test]
+    fn prop_solid_closed_contours_are_cap_invariant() {
+        let shapes: [&[(f32, f32)]; 2] = [
+            &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)],
+            &[(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)],
+        ];
+        for shape in shapes {
+            for s in [1e-3, 1.0, 1e3] {
+                let path = contour_path(&vecs(shape, s), true);
+                let probes = probe_grid(-6.0, 16.0, 22, s);
+                for join in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+                    let sig = |cap: LineCap| {
+                        let stroke = Stroke {
+                            cap,
+                            join,
+                            width_px: 4.0 * s,
+                            dash: None,
+                        };
+                        coverage_sig(&stroke_to_fill(&path, &stroke), &probes)
+                    };
+                    let butt = sig(LineCap::Butt);
+                    assert!(butt.iter().any(|&b| b), "nothing painted ({s}, {join:?})");
+                    for cap in [LineCap::Round, LineCap::Square] {
+                        assert_eq!(
+                            butt,
+                            sig(cap),
+                            "cap {cap:?} altered closed coverage (scale {s}, {join:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property: no ghost geometry. Nothing may be painted farther than
+    /// 2×width from the source contour (the worst legitimate reach is the
+    /// miter limit, 4 × half-width) — across shapes, caps, joins, and dashes.
+    #[test]
+    fn prop_no_ghost_geometry_far_from_contour() {
+        let shapes: [(&[(f32, f32)], bool); 4] = [
+            (&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)], false),
+            (&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)], true),
+            (&[(0.0, 0.0), (10.0, 0.0), (0.0, 0.0)], false),
+            (&[(0.0, 0.0), (10.0, 0.0), (5.0, 8.0)], true),
+        ];
+        let dashes: [Option<(Vec<f32>, f32)>; 3] = [
+            None,
+            Some((vec![7.0, 3.0], 5.0)),
+            Some((vec![10.0, 5.0, 5.0, 5.0], 13.0)),
+        ];
+        let probes = probe_grid(-12.0, 22.0, 18, 1.0);
+        for (shape, closed) in shapes {
+            let pts = vecs(shape, 1.0);
+            let path = contour_path(&pts, closed);
+            for dash in &dashes {
+                for cap in [LineCap::Butt, LineCap::Round, LineCap::Square] {
+                    for join in [LineJoin::Miter, LineJoin::Round, LineJoin::Bevel] {
+                        let stroke = Stroke {
+                            cap,
+                            join,
+                            width_px: 4.0,
+                            dash: dash.as_ref().map(|(i, o)| DashPattern::new(i.clone(), *o)),
+                        };
+                        let out = stroke_to_fill(&path, &stroke);
+                        for &p in &probes {
+                            if dist_to_contour(p, &pts, closed) > 8.2 {
+                                assert_eq!(
+                                    winding(&out, p),
+                                    0,
+                                    "ghost at {p:?} ({shape:?}, closed={closed}, \
+                                     {cap:?}, {join:?}, dash={dash:?})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property: open-contour endpoints carry exactly their cap shape, at any
+    /// path scale. Probes past the end of a horizontal line distinguish butt
+    /// (no extension), square (half-width box), and round (half-width disk).
+    #[test]
+    fn prop_open_endpoint_caps_match_style_across_scales() {
+        for s in [1e-3, 1.0, 1e3] {
+            let path = line(Vec2::ZERO, Vec2::new(10.0 * s, 0.0));
+            // (probe, expected butt/square/round)
+            let cases = [
+                (Vec2::new(9.5 * s, 1.5 * s), [true, true, true]),
+                (Vec2::new(10.5 * s, 0.0), [false, true, true]),
+                (Vec2::new(11.9 * s, 1.9 * s), [false, true, false]),
+                (Vec2::new(12.5 * s, 0.0), [false, false, false]),
+            ];
+            for (i, cap) in [LineCap::Butt, LineCap::Square, LineCap::Round]
+                .into_iter()
+                .enumerate()
+            {
+                let out = stroke_to_fill(
+                    &path,
+                    &Stroke {
+                        cap,
+                        width_px: 4.0 * s,
+                        ..Stroke::new(0.0)
+                    },
+                );
+                for (probe, expect) in cases {
+                    assert_eq!(
+                        winding(&out, probe) != 0,
+                        expect[i],
+                        "{cap:?} at {probe:?} (scale {s})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Property: on a closed contour, dash coverage is a function of arc
+    /// length alone — re-cutting the ring at a different start vertex while
+    /// compensating the dash offset by the start's arc distance must yield
+    /// identical coverage. This pins the closing-seam handling to "the seam is
+    /// an authoring artifact, never visible geometry".
+    ///
+    /// Precondition: the pattern total must divide the perimeter (40 here).
+    /// Otherwise the cut point genuinely changes the dash layout — the walk is
+    /// linear from the start point, exactly as in SVG — and no offset can
+    /// compensate.
+    #[test]
+    fn prop_closed_dash_coverage_independent_of_start_vertex() {
+        let verts = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let square_from = |k: usize| {
+            let pts: Vec<Vec2> = (0..4)
+                .map(|i| {
+                    let (x, y) = verts[(i + k) % 4];
+                    Vec2::new(x, y)
+                })
+                .collect();
+            contour_path(&pts, true)
+        };
+        let probes = probe_grid(-4.0, 14.0, 20, 1.0);
+        // Totals 20, 10, 20 — all divide the perimeter of 40.
+        let patterns: [&[f32]; 3] = [&[10.0, 10.0], &[7.0, 3.0], &[10.0, 5.0, 3.0, 2.0]];
+        for pattern in patterns {
+            for offset in [0.0, 5.0, 13.0] {
+                for cap in [LineCap::Butt, LineCap::Square] {
+                    let stroke = |off: f32| Stroke {
+                        cap,
+                        dash: Some(DashPattern::new(pattern.to_vec(), off)),
+                        ..Stroke::new(4.0)
+                    };
+                    let base =
+                        coverage_sig(&stroke_to_fill(&square_from(0), &stroke(offset)), &probes);
+                    for k in 1..4 {
+                        let rot = coverage_sig(
+                            &stroke_to_fill(&square_from(k), &stroke(offset + 10.0 * k as f32)),
+                            &probes,
+                        );
+                        assert_eq!(
+                            base, rot,
+                            "start vertex {k} changed coverage \
+                             (dash {pattern:?}, offset {offset}, {cap:?})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property: redundant vertices are invisible — collinear midpoints and
+    /// duplicate consecutive points must not change coverage, solid or dashed
+    /// (they contribute no arc length and no join wedge).
+    #[test]
+    fn prop_redundant_vertices_are_invisible() {
+        let plain = contour_path(
+            &vecs(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)], 1.0),
+            true,
+        );
+        let midpoints = contour_path(
+            &vecs(
+                &[
+                    (0.0, 0.0),
+                    (5.0, 0.0),
+                    (10.0, 0.0),
+                    (10.0, 5.0),
+                    (10.0, 10.0),
+                    (5.0, 10.0),
+                    (0.0, 10.0),
+                    (0.0, 5.0),
+                ],
+                1.0,
+            ),
+            true,
+        );
+        let duplicates = contour_path(
+            &vecs(
+                &[
+                    (0.0, 0.0),
+                    (10.0, 0.0),
+                    (10.0, 0.0),
+                    (10.0, 10.0),
+                    (10.0, 10.0),
+                    (0.0, 10.0),
+                ],
+                1.0,
+            ),
+            true,
+        );
+        let probes = probe_grid(-4.0, 14.0, 20, 1.0);
+        for dash in [None, Some(DashPattern::new(vec![7.0, 3.0], 5.0))] {
+            for (cap, join) in [
+                (LineCap::Butt, LineJoin::Miter),
+                (LineCap::Round, LineJoin::Round),
+                (LineCap::Square, LineJoin::Bevel),
+            ] {
+                let stroke = Stroke {
+                    cap,
+                    join,
+                    width_px: 4.0,
+                    dash: dash.clone(),
+                };
+                let base = coverage_sig(&stroke_to_fill(&plain, &stroke), &probes);
+                assert!(base.iter().any(|&b| b));
+                assert_eq!(
+                    base,
+                    coverage_sig(&stroke_to_fill(&midpoints, &stroke), &probes),
+                    "collinear midpoints changed coverage ({cap:?}, {join:?}, dashed={})",
+                    dash.is_some()
+                );
+                assert_eq!(
+                    base,
+                    coverage_sig(&stroke_to_fill(&duplicates, &stroke), &probes),
+                    "duplicate vertices changed coverage ({cap:?}, {join:?}, dashed={})",
+                    dash.is_some()
+                );
+            }
+        }
+    }
+
+    /// Dash offsets are cyclic: negative offsets and offsets beyond the
+    /// pattern total wrap (`rem_euclid`), and a shifted offset really shifts.
+    #[test]
+    fn dash_offset_wraps_negative_and_beyond_total() {
+        let path = line(Vec2::ZERO, Vec2::new(30.0, 0.0));
+        let mut probes = Vec::new();
+        for i in 0..40 {
+            probes.push(Vec2::new(-3.05 + i as f32 * 0.95, 0.45));
+        }
+        let sig = |offset: f32| {
+            let stroke = Stroke {
+                dash: Some(DashPattern::new(vec![10.0, 10.0], offset)),
+                ..Stroke::new(4.0)
+            };
+            coverage_sig(&stroke_to_fill(&path, &stroke), &probes)
+        };
+        assert_eq!(sig(-5.0), sig(15.0), "negative offset wraps");
+        assert_eq!(sig(45.0), sig(5.0), "offset beyond total wraps");
+        assert_ne!(sig(5.0), sig(0.0), "offset actually shifts the pattern");
+    }
+
+    /// An invalid dash pattern (negative interval, empty, or all-zero) is not
+    /// an error: it degrades to a solid stroke, matching SVG's invalid
+    /// `stroke-dasharray` rule. A negative width paints nothing.
+    #[test]
+    fn invalid_dash_degrades_to_solid_and_negative_width_paints_nothing() {
+        let path = line(Vec2::ZERO, Vec2::new(30.0, 0.0));
+        let probes = probe_grid(-4.0, 34.0, 20, 1.0);
+        let solid = coverage_sig(&stroke_to_fill(&path, &Stroke::new(4.0)), &probes);
+        for intervals in [vec![10.0, -5.0], vec![], vec![0.0, 0.0]] {
+            let stroke = Stroke {
+                dash: Some(DashPattern::new(intervals.clone(), 3.0)),
+                ..Stroke::new(4.0)
+            };
+            assert_eq!(
+                solid,
+                coverage_sig(&stroke_to_fill(&path, &stroke), &probes),
+                "dash {intervals:?} should degrade to solid"
+            );
+        }
+        assert!(stroke_to_fill(&path, &Stroke::new(-4.0))
+            .commands
+            .is_empty());
     }
 
     #[test]
