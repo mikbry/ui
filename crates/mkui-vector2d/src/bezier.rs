@@ -42,6 +42,28 @@
 //!   (`B′ = 0`) defeats it, and there the depth cap applies (Sprint 8 §9
 //!   garbage-in-garbage-out policy).
 //!
+//! # The depth cap emits a straight line, never an uncertified quadratic
+//!
+//! Recursive `f32` de Casteljau can reach pieces whose control deltas collapse
+//! to (or reverse at) rounding noise before the analytic bound certifies them —
+//! Codex round-2 reproduced ~90° of tangent error on the `[0.5, 0.5000038]`
+//! piece of `p0=(0,0), c1=(1/12, 1e-6/3), c2=(0, 2e-6/3), p3=(1/12, 1e-6)`, a
+//! finite non-cusp cubic, because the depth cap emitted the averaged quadratic
+//! *without* certification. The encoder therefore never emits an uncertified
+//! curved piece: a piece that is still over tolerance at [`MAX_SUBDIVISION_DEPTH`]
+//! degrades to the straight segment between its endpoints instead (a quadratic
+//! with its control at the chord midpoint). This fallback was chosen over a
+//! fallible `Result` API because it keeps `subdivide_cubic` / `subdivide_pieces`
+//! infallible for every caller ([`crate::encode`]) while still refusing to emit
+//! an uncertified curve, and because the degradation is quantifiably below
+//! visual scale: a depth-capped piece spans `2⁻¹⁸` of the parameter range, so
+//! its chord (and its positional deviation from the true curve) is at most
+//! `max|B′|·2⁻¹⁸ ≈ 10⁻⁵` of the curve's extent — `f32` rendering noise. The 1°
+//! *tangent* contract is certified for every curved piece; on the (sub-pixel at
+//! any realistic zoom) straight fallbacks the guarantee is positional rather
+//! than angular, which is the strongest statement possible where `f32` can no
+//! longer represent the piece's geometry distinctly.
+//!
 //! The tolerance is hard-coded per Sprint 8 §3.1 Wave 1; exposing it as an
 //! opt-in encoder knob is a Sprint 9+ candidate.
 
@@ -54,9 +76,10 @@ use crate::path::Vec2;
 pub const CUBIC_SUBDIVISION_TOLERANCE_DEG: f32 = 1.0;
 
 /// Safety backstop on recursion depth. A well-behaved cubic converges in a
-/// handful of splits; this only bounds pathological inputs (e.g. a cusp) so the
-/// encoder always terminates. Sprint 8 §9 policy is garbage-in-garbage-out on
-/// degenerate geometry — we cap rather than validate.
+/// handful of splits; this only bounds pathological inputs (a cusp, or `f32`
+/// subdivision collapsing a piece into rounding noise) so the encoder always
+/// terminates. A piece that is still uncertified here is emitted as a straight
+/// segment, never as an uncertified quadratic (see module docs).
 const MAX_SUBDIVISION_DEPTH: u32 = 18;
 
 /// Lower a cubic Bézier `(p0, c1, c2, p3)` into a chain of quadratic segments.
@@ -85,6 +108,14 @@ pub(crate) struct Piece {
     pub t0: f32,
     #[cfg_attr(not(test), allow(dead_code))]
     pub t1: f32,
+    // Inner control points of the sub-cubic this piece was emitted from (its
+    // endpoints are the chain's start/end). Read only by the precision tests,
+    // which recompute the analytic bound to prove every emitted piece is
+    // either certified or a straight-line fallback.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub src_c1: Vec2,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub src_c2: Vec2,
 }
 
 pub(crate) fn subdivide_pieces(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> Vec<Piece> {
@@ -106,12 +137,33 @@ fn flatten(
     t1: f32,
     out: &mut Vec<Piece>,
 ) {
-    if depth >= MAX_SUBDIVISION_DEPTH || angular_error_bound(p0, c1, c2, p3) <= tolerance_rad {
+    if angular_error_bound(p0, c1, c2, p3) <= tolerance_rad {
         out.push(Piece {
             control: quadratic_control(p0, c1, c2, p3),
             end: p3,
             t0,
             t1,
+            src_c1: c1,
+            src_c2: c2,
+        });
+        return;
+    }
+    if depth >= MAX_SUBDIVISION_DEPTH {
+        // Precision-safe fallback (Codex round-2): the piece is still over
+        // tolerance but `f32` subdivision cannot refine it further — its
+        // control deltas are at rounding-noise scale, so the averaged
+        // quadratic's tangent is meaningless (up to ~90° off). Emit the chord
+        // as a degenerate quadratic instead: a straight line has a certified
+        // tangent (its own) and its positional deviation from the true curve
+        // is bounded by the piece's `2⁻¹⁸`-of-the-curve extent. See module
+        // docs for why this upholds the crate contract.
+        out.push(Piece {
+            control: midpoint(p0, p3),
+            end: p3,
+            t0,
+            t1,
+            src_c1: c1,
+            src_c2: c2,
         });
         return;
     }
@@ -485,6 +537,175 @@ mod tests {
         let (control, end) = quads[0];
         assert!((control.x - q.x).abs() < 1e-3 && (control.y - q.y).abs() < 1e-3);
         assert_eq!(end, p2);
+    }
+
+    /// Point on a cubic Bézier at `t` (direct Bernstein evaluation, independent
+    /// of the subdivision code under test).
+    fn cubic_point(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+        let mt = 1.0 - t;
+        let (a, b, c, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
+        Vec2::new(
+            a * p0.x + b * c1.x + c * c2.x + d * p3.x,
+            a * p0.y + b * c1.y + c * c2.y + d * p3.y,
+        )
+    }
+
+    /// Bounding-box diagonal of the cubic's control hull — the scale every
+    /// relative tolerance below is measured against.
+    fn hull_extent(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> f32 {
+        let xs = [p0.x, c1.x, c2.x, p3.x];
+        let ys = [p0.y, c1.y, c2.y, p3.y];
+        let span = |v: &[f32; 4]| {
+            v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
+                - v.iter().cloned().fold(f32::INFINITY, f32::min)
+        };
+        let (w, h) = (span(&xs), span(&ys));
+        (w * w + h * h).sqrt()
+    }
+
+    fn dist(a: Vec2, b: Vec2) -> f32 {
+        let (dx, dy) = (a.x - b.x, a.y - b.y);
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// Core precision invariant (Codex round-2): every emitted piece is either
+    /// (a) certified by the analytic hodograph bound — recomputed here from the
+    /// piece's recorded sub-cubic, bit-exactly reproducing the encoder's own
+    /// check — or (b) a straight-line fallback whose control sits exactly on
+    /// the chord midpoint and whose endpoints match the source cubic within
+    /// (accumulated) `f32` epsilon. Fallback pieces must additionally be tiny
+    /// relative to the curve — that smallness is what makes the straight
+    /// segment visually indistinguishable from the uncertifiable true piece.
+    /// Returns the number of fallback pieces so callers can assert the path
+    /// was actually exercised.
+    fn assert_pieces_certified_or_line_fallback(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> usize {
+        let tolerance_rad = CUBIC_SUBDIVISION_TOLERANCE_DEG.to_radians();
+        let extent = hull_extent(p0, c1, c2, p3);
+        assert!(extent > 0.0);
+        let pieces = subdivide_pieces(p0, c1, c2, p3);
+        assert!(!pieces.is_empty());
+        let mut start = p0;
+        let mut fallbacks = 0;
+        for piece in &pieces {
+            let bound = angular_error_bound(start, piece.src_c1, piece.src_c2, piece.end);
+            if bound > tolerance_rad {
+                // Must be the straight-line fallback: control exactly on the
+                // chord midpoint (same computation, bit-exact) …
+                let mid = midpoint(start, piece.end);
+                assert_eq!(
+                    (piece.control.x, piece.control.y),
+                    (mid.x, mid.y),
+                    "uncertified piece [{}, {}] is not a chord fallback",
+                    piece.t0,
+                    piece.t1,
+                );
+                // … endpoints on the source cubic within accumulated f32
+                // rounding (≤ 18 levels of exact-dyadic averaging) …
+                let eps = 64.0 * f32::EPSILON * extent;
+                assert!(
+                    dist(start, cubic_point(p0, c1, c2, p3, piece.t0)) <= eps,
+                    "fallback start drifted off the source cubic at t0 = {}",
+                    piece.t0,
+                );
+                assert!(
+                    dist(piece.end, cubic_point(p0, c1, c2, p3, piece.t1)) <= eps,
+                    "fallback end drifted off the source cubic at t1 = {}",
+                    piece.t1,
+                );
+                // … and at f32-noise scale: a depth-capped piece spans 2⁻¹⁸ of
+                // the parameter range, so its chord is ≤ max|B′|·2⁻¹⁸ ≈ 10⁻⁵
+                // of the extent (1e-4 leaves rounding headroom).
+                assert!(
+                    dist(start, piece.end) <= 1e-4 * extent,
+                    "fallback piece [{}, {}] is not at noise scale",
+                    piece.t0,
+                    piece.t1,
+                );
+                fallbacks += 1;
+            }
+            start = piece.end;
+        }
+        fallbacks
+    }
+
+    /// Regression for the Codex round-2 finding: on this finite, non-cusp
+    /// cubic, repeated `f32` halving collapses/reverses tiny x-deltas and the
+    /// depth cap then emitted an *uncertified* averaged quadratic with ~90° of
+    /// tangent error on the `[0.5, 0.5000038]` piece. The encoder must instead
+    /// emit only certified quadratics or chord fallbacks — and the curve must
+    /// actually exercise the fallback path (it reaches the depth cap).
+    #[test]
+    fn codex_r2_f32_collapsed_cubic_does_not_emit_uncertified_piece() {
+        let p0 = Vec2::new(0.0, 0.0);
+        let c1 = Vec2::new(1.0 / 12.0, 1e-6 / 3.0);
+        let c2 = Vec2::new(0.0, 2e-6 / 3.0);
+        let p3 = Vec2::new(1.0 / 12.0, 1e-6);
+        let fallbacks = assert_pieces_certified_or_line_fallback(p0, c1, c2, p3);
+        assert!(
+            fallbacks > 0,
+            "reproducer no longer reaches the depth cap; regression not exercised"
+        );
+    }
+
+    /// Property-style precision sweep: finite non-cusp cubics scaled across
+    /// twelve decades of extent (`1e-6` to `1e6`) all satisfy the piece
+    /// invariant — certified by the analytic bound, or a chord fallback pinned
+    /// to the source curve within `f32` epsilon.
+    #[test]
+    fn pieces_certified_or_line_fallback_across_scales() {
+        // Unit-ish base shapes; each is scaled so its hull extent hits the
+        // target exactly. All are finite with nonvanishing derivative.
+        let base_cubics = [
+            // Codex round-2 f32-collapse reproducer.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0 / 12.0, 1e-6 / 3.0),
+                Vec2::new(0.0, 2e-6 / 3.0),
+                Vec2::new(1.0 / 12.0, 1e-6),
+            ),
+            // Codex round-1 near-cusp loop.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(9.371965, 0.099994),
+                Vec2::new(8.02181, 0.048572),
+                Vec2::new(1.0, 0.0),
+            ),
+            // Plain arch.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.0, 100.0),
+                Vec2::new(100.0, 100.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            // Sharp-inflection S.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(150.0, 5.0),
+                Vec2::new(-50.0, -5.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            // Cusp-adjacent retrograde controls.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 100.5),
+                Vec2::new(0.0, 99.5),
+                Vec2::new(100.0, 100.0),
+            ),
+        ];
+        let target_extents = [1e-6_f32, 1e-3, 1.0, 1e3, 1e6];
+        for &(p0, c1, c2, p3) in &base_cubics {
+            let base = hull_extent(p0, c1, c2, p3);
+            for &target in &target_extents {
+                let s = target / base;
+                let scale = |p: Vec2| Vec2::new(p.x * s, p.y * s);
+                assert_pieces_certified_or_line_fallback(
+                    scale(p0),
+                    scale(c1),
+                    scale(c2),
+                    scale(p3),
+                );
+            }
+        }
     }
 
     /// A straight cubic (all controls collinear) never over-subdivides.
