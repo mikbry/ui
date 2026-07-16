@@ -38,31 +38,42 @@
 //!   deviation (e.g. a straight cubic with uneven parameterisation) costs 0°.
 //! - Convergence: halving a cubic scales `v` by 1/8 (it is the constant third
 //!   derivative) while speeds scale by 1/2, so the bound shrinks ~4× per level
-//!   wherever the curve speed is bounded away from zero. Only an exact cusp
-//!   (`B′ = 0`) defeats it, and there the depth cap applies (Sprint 8 §9
-//!   garbage-in-garbage-out policy).
+//!   wherever the curve speed is bounded away from zero.
 //!
-//! # The depth cap emits a straight line, never an uncertified quadratic
+//! # Why the recursion runs in `f64`
 //!
-//! Recursive `f32` de Casteljau can reach pieces whose control deltas collapse
-//! to (or reverse at) rounding noise before the analytic bound certifies them —
-//! Codex round-2 reproduced ~90° of tangent error on the `[0.5, 0.5000038]`
-//! piece of `p0=(0,0), c1=(1/12, 1e-6/3), c2=(0, 2e-6/3), p3=(1/12, 1e-6)`, a
-//! finite non-cusp cubic, because the depth cap emitted the averaged quadratic
-//! *without* certification. The encoder therefore never emits an uncertified
-//! curved piece: a piece that is still over tolerance at [`MAX_SUBDIVISION_DEPTH`]
-//! degrades to the straight segment between its endpoints instead (a quadratic
-//! with its control at the chord midpoint). This fallback was chosen over a
-//! fallible `Result` API because it keeps `subdivide_cubic` / `subdivide_pieces`
-//! infallible for every caller ([`crate::encode`]) while still refusing to emit
-//! an uncertified curve, and because the degradation is quantifiably below
-//! visual scale: a depth-capped piece spans `2⁻¹⁸` of the parameter range, so
-//! its chord (and its positional deviation from the true curve) is at most
-//! `max|B′|·2⁻¹⁸ ≈ 10⁻⁵` of the curve's extent — `f32` rendering noise. The 1°
-//! *tangent* contract is certified for every curved piece; on the (sub-pixel at
-//! any realistic zoom) straight fallbacks the guarantee is positional rather
-//! than angular, which is the strongest statement possible where `f32` can no
-//! longer represent the piece's geometry distinctly.
+//! The bound converges in *exact* arithmetic, but Codex round-2 showed that
+//! `f32` de Casteljau does not: on the finite non-cusp cubic `p0=(0,0),
+//! c1=(1/12, 1e-6/3), c2=(0, 2e-6/3), p3=(1/12, 1e-6)`, repeated `f32` halving
+//! collapses and reverses control-point deltas whose true magnitude (~`h²` of
+//! the extent for a piece of relative size `h`) falls below `f32` rounding
+//! noise (~`1e-7` of the extent), so the sub-cubics the recursion holds stop
+//! resembling the true curve and the bound never certifies. Round-3's chord
+//! fallback at the depth cap traded one uncertified emission for another —
+//! Codex round-3 measured ~89.94° of tangent error on the emitted
+//! `[0.4999962, 0.5]` chord piece of the same reproducer.
+//!
+//! The fix is precision, not fallbacks: **all subdivision arithmetic —
+//! splitting, the quadratic control, and the certification bound — runs in
+//! `f64`** ([`DVec2`]), whose ~`1e-16` relative noise sits nine orders of
+//! magnitude below the signal that defeated `f32`, so the recursion genuinely
+//! converges (the round-2 reproducer certifies every piece by depth 12; see
+//! [`MAX_SUBDIVISION_DEPTH`]). Inputs convert `f32 → f64` losslessly at entry;
+//! results convert back to `f32` only when a **certified** piece is emitted.
+//! That final rounding perturbs the emitted control/end points by at most one
+//! `f32` ULP of *position* — it cannot un-certify the tangent bound, which was
+//! proven in `f64`, and consuming `f32` quadratics is the rasterizer's existing
+//! contract downstream.
+//!
+//! There is **no fallback path**: every emitted piece is certified by the
+//! analytic bound, with the depth cap demoted to an assertion (see
+//! [`MAX_SUBDIVISION_DEPTH`] for why it is unreachable on finite non-cusp
+//! input). A cubic whose derivative vanishes exactly (a true cusp, or
+//! degenerate control layouts such as `c1 == p0`) can never satisfy a finite
+//! tangent bound — the tangent flips 180° instantaneously — and now fails fast
+//! on that assertion instead of silently mis-rendering; Codex rounds 2–3
+//! established the 1° contract as unconditional, superseding the earlier
+//! Sprint 8 §9 garbage-in-garbage-out cap.
 //!
 //! The tolerance is hard-coded per Sprint 8 §3.1 Wave 1; exposing it as an
 //! opt-in encoder knob is a Sprint 9+ candidate.
@@ -75,18 +86,58 @@ use crate::path::Vec2;
 /// the source cubic across the piece.
 pub const CUBIC_SUBDIVISION_TOLERANCE_DEG: f32 = 1.0;
 
-/// Safety backstop on recursion depth. A well-behaved cubic converges in a
-/// handful of splits; this only bounds pathological inputs (a cusp, or `f32`
-/// subdivision collapsing a piece into rounding noise) so the encoder always
-/// terminates. A piece that is still uncertified here is emitted as a straight
-/// segment, never as an uncertified quadratic (see module docs).
-const MAX_SUBDIVISION_DEPTH: u32 = 18;
+/// Backstop on recursion depth, enforced by assertion — it is **not** an
+/// emission path (see module docs). In `f64` the bound shrinks ~4× per level
+/// wherever the derivative is nonvanishing, so finite non-cusp cubics converge
+/// far below this cap: the two hardest known inputs, the Codex round-1
+/// near-cusp loop and the round-2 `f32`-collapsing cubic, certify every piece
+/// by depth 7 and depth 12 respectively (measured by this module's regression
+/// tests, which print and bound-check the observed maximum — the f32 loop only
+/// needed 18+ levels because rounding noise, not geometry, blocked
+/// certification). Only a cubic with an exactly vanishing
+/// derivative — which no finite quadratic chain can approximate within any
+/// tangent tolerance — can reach the cap, and that trips the assertion rather
+/// than emitting an uncertified piece.
+const MAX_SUBDIVISION_DEPTH: u32 = 48;
+
+/// Internal double-precision point. All subdivision arithmetic runs on this
+/// type; `f32` appears only at the public boundary (lossless in, rounded out).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DVec2 {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl DVec2 {
+    fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    fn from_vec2(v: Vec2) -> Self {
+        Self {
+            x: f64::from(v.x),
+            y: f64::from(v.y),
+        }
+    }
+
+    fn to_vec2(self) -> Vec2 {
+        Vec2::new(self.x as f32, self.y as f32)
+    }
+}
 
 /// Lower a cubic Bézier `(p0, c1, c2, p3)` into a chain of quadratic segments.
 ///
 /// Each returned `(control, end)` pair is one quadratic whose implicit start
 /// point is the previous segment's `end` (the first segment starts at `p0`).
 /// The chain is ordered start→end and always covers the full `t ∈ [0, 1]` span.
+///
+/// # Panics
+///
+/// Panics if the cubic's derivative vanishes somewhere on `[0, 1]` (an exact
+/// cusp, or degenerate controls such as `c1 == p0`): no quadratic chain can
+/// track a tangent that flips 180° instantaneously, so such input is rejected
+/// loudly rather than mis-rendered (see module docs). Finite cubics with a
+/// nonvanishing derivative never panic.
 pub(crate) fn subdivide_cubic(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> Vec<(Vec2, Vec2)> {
     subdivide_pieces(p0, c1, c2, p3)
         .into_iter()
@@ -95,78 +146,86 @@ pub(crate) fn subdivide_cubic(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> Vec<(Ve
 }
 
 /// One emitted quadratic piece plus the source-cubic parameter interval
-/// `[t0, t1]` it covers. Production only needs `(control, end)`; the parameter
-/// span lets the acceptance test establish an exact, fold-free correspondence
-/// against the source cubic (subdivision is adaptive, so spans are unequal).
+/// `[t0, t1]` it covers and the `f64` sub-cubic it was certified against.
+/// Production only needs `(control, end)`; the extra fields let the tests
+/// re-verify, bit-exactly and in full precision, that every emitted piece
+/// passed the analytic bound (subdivision is adaptive, so spans are unequal).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Piece {
     pub control: Vec2,
     pub end: Vec2,
-    // Source-cubic parameter span, read only by the acceptance test's exact
-    // correspondence check; production consumes just `control`/`end`.
+    // Source-cubic parameter span (exact dyadic f64), read only by the tests'
+    // correspondence checks; production consumes just `control`/`end`.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub t0: f32,
+    pub t0: f64,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub t1: f32,
-    // Inner control points of the sub-cubic this piece was emitted from (its
-    // endpoints are the chain's start/end). Read only by the precision tests,
-    // which recompute the analytic bound to prove every emitted piece is
-    // either certified or a straight-line fallback.
+    pub t1: f64,
+    // The f64 sub-cubic this piece was emitted from, exactly as the recursion
+    // held it. Read only by the precision tests, which recompute the analytic
+    // bound (bit-exact) to prove the piece was certified, and dense-check the
+    // tangent contract in f64 rather than through the f32-rounded emission.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub src_c1: Vec2,
+    pub src_p0: DVec2,
     #[cfg_attr(not(test), allow(dead_code))]
-    pub src_c2: Vec2,
+    pub src_c1: DVec2,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub src_c2: DVec2,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub src_p3: DVec2,
 }
 
+/// See [`subdivide_cubic`] (including the panic condition); this variant also
+/// reports each piece's parameter span and certified `f64` sub-cubic.
 pub(crate) fn subdivide_pieces(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> Vec<Piece> {
-    let tolerance_rad = CUBIC_SUBDIVISION_TOLERANCE_DEG.to_radians();
+    let tolerance_rad = f64::from(CUBIC_SUBDIVISION_TOLERANCE_DEG).to_radians();
     let mut out = Vec::new();
-    flatten(p0, c1, c2, p3, tolerance_rad, 0, 0.0, 1.0, &mut out);
+    flatten(
+        DVec2::from_vec2(p0),
+        DVec2::from_vec2(c1),
+        DVec2::from_vec2(c2),
+        DVec2::from_vec2(p3),
+        tolerance_rad,
+        0,
+        0.0,
+        1.0,
+        &mut out,
+    );
     out
 }
 
 #[allow(clippy::too_many_arguments)]
 fn flatten(
-    p0: Vec2,
-    c1: Vec2,
-    c2: Vec2,
-    p3: Vec2,
-    tolerance_rad: f32,
+    p0: DVec2,
+    c1: DVec2,
+    c2: DVec2,
+    p3: DVec2,
+    tolerance_rad: f64,
     depth: u32,
-    t0: f32,
-    t1: f32,
+    t0: f64,
+    t1: f64,
     out: &mut Vec<Piece>,
 ) {
     if angular_error_bound(p0, c1, c2, p3) <= tolerance_rad {
         out.push(Piece {
-            control: quadratic_control(p0, c1, c2, p3),
-            end: p3,
+            control: quadratic_control(p0, c1, c2, p3).to_vec2(),
+            end: p3.to_vec2(),
             t0,
             t1,
+            src_p0: p0,
             src_c1: c1,
             src_c2: c2,
+            src_p3: p3,
         });
         return;
     }
-    if depth >= MAX_SUBDIVISION_DEPTH {
-        // Precision-safe fallback (Codex round-2): the piece is still over
-        // tolerance but `f32` subdivision cannot refine it further — its
-        // control deltas are at rounding-noise scale, so the averaged
-        // quadratic's tangent is meaningless (up to ~90° off). Emit the chord
-        // as a degenerate quadratic instead: a straight line has a certified
-        // tangent (its own) and its positional deviation from the true curve
-        // is bounded by the piece's `2⁻¹⁸`-of-the-curve extent. See module
-        // docs for why this upholds the crate contract.
-        out.push(Piece {
-            control: midpoint(p0, p3),
-            end: p3,
-            t0,
-            t1,
-            src_c1: c1,
-            src_c2: c2,
-        });
-        return;
-    }
+    // Not an emission path: uncertified pieces are never emitted. Unreachable
+    // for finite cubics with a nonvanishing derivative (see module docs and
+    // MAX_SUBDIVISION_DEPTH); trips only on true-cusp/degenerate input.
+    assert!(
+        depth < MAX_SUBDIVISION_DEPTH,
+        "cubic subdivision failed to certify the 1° bound on [{t0}, {t1}]: \
+         the cubic's derivative vanishes (cusp or degenerate controls)"
+    );
     let (left, right) = split_at_half(p0, c1, c2, p3);
     let tm = 0.5 * (t0 + t1);
     flatten(
@@ -214,8 +273,8 @@ fn flatten(
 /// `min|Q′| > |v|/2` fails — e.g. anti-parallel end tangents driving `Q′`
 /// through zero — so the recursion always subdivides toward a regime where the
 /// bound is finite.
-fn angular_error_bound(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> f32 {
-    let v = Vec2::new(
+fn angular_error_bound(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> f64 {
+    let v = DVec2::new(
         3.0 * (c2.x - c1.x) + p0.x - p3.x,
         3.0 * (c2.y - c1.y) + p0.y - p3.y,
     );
@@ -224,18 +283,18 @@ fn angular_error_bound(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> f32 {
         return 0.0;
     }
     let q = quadratic_control(p0, c1, c2, p3);
-    let e0 = Vec2::new(2.0 * (q.x - p0.x), 2.0 * (q.y - p0.y));
-    let e1 = Vec2::new(2.0 * (p3.x - q.x), 2.0 * (p3.y - q.y));
+    let e0 = DVec2::new(2.0 * (q.x - p0.x), 2.0 * (q.y - p0.y));
+    let e1 = DVec2::new(2.0 * (p3.x - q.x), 2.0 * (p3.y - q.y));
     let min_quad_speed = min_segment_norm(e0, e1);
     let min_cubic_speed = min_quad_speed - 0.5 * v_len;
     if min_cubic_speed <= 0.0 {
-        return f32::INFINITY;
+        return f64::INFINITY;
     }
     let cross_e0 = (v.x * e0.y - v.y * e0.x).abs();
     let cross_e1 = (v.x * e1.y - v.y * e1.x).abs();
     let sin_bound = 0.5 * cross_e0.max(cross_e1) / (min_cubic_speed * min_quad_speed);
     if sin_bound >= 1.0 {
-        f32::INFINITY
+        f64::INFINITY
     } else {
         sin_bound.asin()
     }
@@ -244,7 +303,7 @@ fn angular_error_bound(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> f32 {
 /// Minimum norm of the linear interpolation `(1 − t)·e0 + t·e1` over
 /// `t ∈ [0, 1]`, computed exactly: `|·|²` is quadratic in `t`, so the minimum
 /// is at the clamped vertex.
-fn min_segment_norm(e0: Vec2, e1: Vec2) -> f32 {
+fn min_segment_norm(e0: DVec2, e1: DVec2) -> f64 {
     let dx = e1.x - e0.x;
     let dy = e1.y - e0.y;
     let len2 = dx * dx + dy * dy;
@@ -263,18 +322,18 @@ fn min_segment_norm(e0: Vec2, e1: Vec2) -> f32 {
 /// the cubic: `Q = (3·c1 − p0 + 3·c2 − p3) / 4`. For the near-flat pieces this
 /// is only invoked on, `Q` sits essentially on the segment, so the resulting
 /// quadratic reproduces both endpoint tangents to within the tolerance.
-fn quadratic_control(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> Vec2 {
-    Vec2::new(
+fn quadratic_control(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> DVec2 {
+    DVec2::new(
         (3.0 * c1.x - p0.x + 3.0 * c2.x - p3.x) / 4.0,
         (3.0 * c1.y - p0.y + 3.0 * c2.y - p3.y) / 4.0,
     )
 }
 
 /// A cubic's four control points `(p0, c1, c2, p3)`.
-type CubicPoints = (Vec2, Vec2, Vec2, Vec2);
+type CubicPoints = (DVec2, DVec2, DVec2, DVec2);
 
 /// de Casteljau split of a cubic at `t = 0.5` into its left and right sub-cubics.
-fn split_at_half(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> (CubicPoints, CubicPoints) {
+fn split_at_half(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> (CubicPoints, CubicPoints) {
     let m01 = midpoint(p0, c1);
     let m12 = midpoint(c1, c2);
     let m23 = midpoint(c2, p3);
@@ -284,18 +343,22 @@ fn split_at_half(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> (CubicPoints, CubicP
     ((p0, m01, m012, mid), (mid, m123, m23, p3))
 }
 
-fn midpoint(a: Vec2, b: Vec2) -> Vec2 {
-    Vec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
+fn midpoint(a: DVec2, b: DVec2) -> DVec2 {
+    DVec2::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Tangent (derivative direction) of a cubic Bézier at `t`.
-    fn cubic_tangent(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, t: f32) -> Vec2 {
+    fn d(v: Vec2) -> DVec2 {
+        DVec2::from_vec2(v)
+    }
+
+    /// Tangent (derivative direction) of a cubic Bézier at `t`, in f64.
+    fn cubic_tangent(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2, t: f64) -> DVec2 {
         let mt = 1.0 - t;
-        Vec2::new(
+        DVec2::new(
             3.0 * mt * mt * (c1.x - p0.x)
                 + 6.0 * mt * t * (c2.x - c1.x)
                 + 3.0 * t * t * (p3.x - c2.x),
@@ -305,10 +368,10 @@ mod tests {
         )
     }
 
-    /// Tangent (derivative direction) of a quadratic Bézier at `t`.
-    fn quad_tangent(p0: Vec2, q: Vec2, p2: Vec2, t: f32) -> Vec2 {
+    /// Tangent (derivative direction) of a quadratic Bézier at `t`, in f64.
+    fn quad_tangent(p0: DVec2, q: DVec2, p2: DVec2, t: f64) -> DVec2 {
         let mt = 1.0 - t;
-        Vec2::new(
+        DVec2::new(
             2.0 * mt * (q.x - p0.x) + 2.0 * t * (p2.x - q.x),
             2.0 * mt * (q.y - p0.y) + 2.0 * t * (p2.y - q.y),
         )
@@ -316,7 +379,7 @@ mod tests {
 
     /// Unsigned angle (radians) between two direction vectors; `0` if either is
     /// (near-)zero-length so a degenerate tangent never inflates the error.
-    fn angle_between(a: Vec2, b: Vec2) -> f32 {
+    fn angle_between(a: DVec2, b: DVec2) -> f64 {
         let cross = a.x * b.y - a.y * b.x;
         let dot = a.x * b.x + a.y * b.y;
         if cross == 0.0 && dot == 0.0 {
@@ -326,23 +389,82 @@ mod tests {
         }
     }
 
-    /// Worst tangent-direction error (radians) of the emitted chain against the
-    /// source cubic, dense-sampling `samples_per_piece` uniform `t` values on
-    /// every emitted piece via the exact `[t0, t1]` correspondence.
-    fn worst_chain_error(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, samples_per_piece: u32) -> f32 {
+    /// Worst tangent-direction error (radians) of the **emitted f32 chain**
+    /// against the source cubic, dense-sampling `samples_per_piece` uniform `t`
+    /// values on every emitted piece via the exact `[t0, t1]` correspondence.
+    /// Measurement arithmetic is f64; the measured object is what production
+    /// consumes (the f32 control/end points).
+    fn worst_chain_error(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, samples_per_piece: u32) -> f64 {
         let pieces = subdivide_pieces(p0, c1, c2, p3);
         assert!(!pieces.is_empty());
-        let mut start = p0;
-        let mut worst = 0.0_f32;
+        let (sp0, sc1, sc2, sp3) = (d(p0), d(c1), d(c2), d(p3));
+        let mut start = d(p0);
+        let mut worst = 0.0_f64;
         for piece in &pieces {
             for k in 0..=samples_per_piece {
-                let u = k as f32 / samples_per_piece as f32;
+                let u = f64::from(k) / f64::from(samples_per_piece);
                 let t = piece.t0 + (piece.t1 - piece.t0) * u;
-                let ct = cubic_tangent(p0, c1, c2, p3, t);
-                let qt = quad_tangent(start, piece.control, piece.end, u);
+                let ct = cubic_tangent(sp0, sc1, sc2, sp3, t);
+                let qt = quad_tangent(start, d(piece.control), d(piece.end), u);
                 worst = worst.max(angle_between(ct, qt));
             }
-            start = piece.end;
+            start = d(piece.end);
+        }
+        worst
+    }
+
+    /// Core invariant since Codex round-3: **every** emitted piece is certified
+    /// by the analytic hodograph bound — recomputed here in f64 from the exact
+    /// sub-cubic the recursion held, bit-identically reproducing the encoder's
+    /// own check. No exemptions, no fallback branch. Also checks the pieces
+    /// tile `[0, 1]` exactly, and returns the deepest subdivision level used
+    /// (piece spans are exact dyadics, so the level is `−log2(t1 − t0)`).
+    fn assert_all_pieces_certified(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> u32 {
+        let tolerance_rad = f64::from(CUBIC_SUBDIVISION_TOLERANCE_DEG).to_radians();
+        let pieces = subdivide_pieces(p0, c1, c2, p3);
+        assert!(!pieces.is_empty());
+        assert_eq!(pieces.first().unwrap().t0, 0.0);
+        assert_eq!(pieces.last().unwrap().t1, 1.0);
+        for w in pieces.windows(2) {
+            assert_eq!(w[0].t1, w[1].t0);
+        }
+        let mut max_depth = 0u32;
+        for piece in &pieces {
+            let bound = angular_error_bound(piece.src_p0, piece.src_c1, piece.src_c2, piece.src_p3);
+            assert!(
+                bound <= tolerance_rad,
+                "piece [{}, {}] was emitted uncertified: bound {} rad ({}°)",
+                piece.t0,
+                piece.t1,
+                bound,
+                bound.to_degrees(),
+            );
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let depth = (-(piece.t1 - piece.t0).log2()).round() as u32;
+            max_depth = max_depth.max(depth);
+        }
+        max_depth
+    }
+
+    /// Worst dense-sampled tangent error (radians) measured entirely in f64
+    /// against each piece's **certified f64 quadratic** (the pre-rounding
+    /// `(src_p0, Q, src_p3)`), i.e. the object the analytic bound actually
+    /// certifies — not the f32-rounded emission, whose sub-ULP pieces cannot
+    /// carry direction information at any precision.
+    fn worst_certified_error_f64(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, samples: u32) -> f64 {
+        let pieces = subdivide_pieces(p0, c1, c2, p3);
+        assert!(!pieces.is_empty());
+        let (sp0, sc1, sc2, sp3) = (d(p0), d(c1), d(c2), d(p3));
+        let mut worst = 0.0_f64;
+        for piece in &pieces {
+            let q = quadratic_control(piece.src_p0, piece.src_c1, piece.src_c2, piece.src_p3);
+            for k in 0..=samples {
+                let u = f64::from(k) / f64::from(samples);
+                let t = piece.t0 + (piece.t1 - piece.t0) * u;
+                let ct = cubic_tangent(sp0, sc1, sc2, sp3, t);
+                let qt = quad_tangent(piece.src_p0, q, piece.src_p3, u);
+                worst = worst.max(angle_between(ct, qt));
+            }
         }
         worst
     }
@@ -416,7 +538,7 @@ mod tests {
                 Vec2::new(1.0, 0.0),
             ),
         ];
-        let one_degree = 1.0_f32.to_radians();
+        let one_degree = 1.0_f64.to_radians();
         for &(p0, c1, c2, p3) in &cubics {
             let worst = worst_chain_error(p0, c1, c2, p3, 24);
             assert!(
@@ -429,31 +551,200 @@ mod tests {
 
     /// Regression for the Codex round-1 finding: the fixed-sample criterion let
     /// this near-cusp cubic emit a piece for `[0.375, 0.5]` with ~43.7° of
-    /// tangent error near `t = 0.494375`. The hodograph bound must keep the
-    /// dense-checked error inside the advertised 1° contract.
+    /// tangent error near `t = 0.494375`. Every emitted piece must be certified
+    /// by the analytic bound — no fallback exemption of any kind — and the
+    /// dense-checked chain must stay inside the advertised 1° contract.
     #[test]
     fn codex_r1_pathological_cubic_stays_within_bound() {
-        let worst = worst_chain_error(
+        let (p0, c1, c2, p3) = (
             Vec2::new(0.0, 0.0),
             Vec2::new(9.371965, 0.099994),
             Vec2::new(8.02181, 0.048572),
             Vec2::new(1.0, 0.0),
-            400,
         );
+        let max_depth = assert_all_pieces_certified(p0, c1, c2, p3);
+        println!("codex r1 loop cubic: max subdivision depth {max_depth}");
+        assert!(max_depth < MAX_SUBDIVISION_DEPTH);
+        let worst = worst_chain_error(p0, c1, c2, p3, 400);
         assert!(
-            worst <= 1.0_f32.to_radians() + 1e-3,
+            worst <= 1.0_f64.to_radians() + 1e-3,
             "worst angular error {} rad ({}°) exceeds 1°",
             worst,
             worst.to_degrees()
         );
     }
 
-    /// Property test: the 1° contract holds under dense sampling (200+ uniform
-    /// `t` values per emitted piece) across a suite of hard cubics — near-cusp
-    /// loops, sharp-inflection S-curves, cusp-adjacent curves, retrograde and
-    /// nearly-collinear controls. Exact cusps (`B′ = 0`) are excluded: the
-    /// tangent flips 180° instantaneously there and no finite quadratic chain
-    /// can bound it (Sprint 8 §9 garbage-in-garbage-out, depth-capped).
+    /// Regression for the Codex round-2 finding (and its round-3 sequel): on
+    /// this finite non-cusp cubic, `f32` subdivision collapsed control deltas
+    /// into rounding noise; the depth cap then emitted an uncertified averaged
+    /// quadratic (~90° tangent error, round 2), and the interim chord fallback
+    /// was equally uncertified (~89.94° on `[0.4999962, 0.5]`, round 3). With
+    /// f64 subdivision the recursion converges: **every** piece must now be
+    /// certified by the analytic bound — no chord, no exemption — and the
+    /// certified f64 chain must dense-check inside 1°.
+    #[test]
+    fn codex_r2_f32_collapsed_cubic_does_not_emit_uncertified_piece() {
+        let p0 = Vec2::new(0.0, 0.0);
+        let c1 = Vec2::new(1.0 / 12.0, 1e-6 / 3.0);
+        let c2 = Vec2::new(0.0, 2e-6 / 3.0);
+        let p3 = Vec2::new(1.0 / 12.0, 1e-6);
+        let max_depth = assert_all_pieces_certified(p0, c1, c2, p3);
+        println!("codex r2 collapsed cubic: max subdivision depth {max_depth}");
+        assert!(max_depth < MAX_SUBDIVISION_DEPTH);
+        let worst = worst_certified_error_f64(p0, c1, c2, p3, 400);
+        assert!(
+            worst <= 1.0_f64.to_radians() + 1e-3,
+            "worst certified-chain angular error {} rad ({}°) exceeds 1°",
+            worst,
+            worst.to_degrees()
+        );
+    }
+
+    /// Precision-safe recursion verified in f64: 20+ pathological cubics —
+    /// near-cusp loops, sharp-inflection S-curves, cusp-adjacent retrogrades,
+    /// tight loops, near-collinear parameterisations, and both Codex
+    /// counterexamples, each swept across six decades of scale — subdivide with
+    /// every piece certified, and dense-checking 200+ f64 tangent samples per
+    /// piece against the certified f64 quadratic stays inside the 1° contract.
+    #[test]
+    fn f64_dense_check_certifies_one_degree_on_pathological_cubics() {
+        let base_cubics = [
+            // Codex round-1 near-cusp loop.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(9.371965, 0.099994),
+                Vec2::new(8.02181, 0.048572),
+                Vec2::new(1.0, 0.0),
+            ),
+            // Same family, controls pulled even further past the endpoints.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(12.0, 0.2),
+                Vec2::new(10.5, -0.15),
+                Vec2::new(1.0, 0.0),
+            ),
+            // Codex round-2 f32-collapse reproducer.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0 / 12.0, 1e-6 / 3.0),
+                Vec2::new(0.0, 2e-6 / 3.0),
+                Vec2::new(1.0 / 12.0, 1e-6),
+            ),
+            // Sharp-inflection S: long opposing control arms.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(150.0, 5.0),
+                Vec2::new(-50.0, -5.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            // Near the cusp boundary: retrograde controls, tiny transverse
+            // offset keeps the speed nonzero.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 100.5),
+                Vec2::new(0.0, 99.5),
+                Vec2::new(100.0, 100.0),
+            ),
+            // Tight loop with crossing control arms.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(200.0, 150.0),
+                Vec2::new(-100.0, 150.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            // Nearly collinear with strongly uneven parameterisation.
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(90.0, 0.9),
+                Vec2::new(95.0, 0.95),
+                Vec2::new(100.0, 1.0),
+            ),
+            // Strong wiggle.
+            (
+                Vec2::new(10.0, 10.0),
+                Vec2::new(40.0, 200.0),
+                Vec2::new(160.0, -120.0),
+                Vec2::new(200.0, 60.0),
+            ),
+        ];
+        let scales = [1e-3_f32, 1.0, 1e3];
+        let mut cubics = Vec::new();
+        for &(p0, c1, c2, p3) in &base_cubics {
+            for &s in &scales {
+                let scale = |p: Vec2| Vec2::new(p.x * s, p.y * s);
+                cubics.push((scale(p0), scale(c1), scale(c2), scale(p3)));
+            }
+        }
+        assert!(cubics.len() >= 20);
+        let one_degree = 1.0_f64.to_radians();
+        for &(p0, c1, c2, p3) in &cubics {
+            let max_depth = assert_all_pieces_certified(p0, c1, c2, p3);
+            assert!(max_depth < MAX_SUBDIVISION_DEPTH);
+            let worst = worst_certified_error_f64(p0, c1, c2, p3, 200);
+            assert!(
+                worst <= one_degree + 1e-3,
+                "cubic {:?} worst certified f64 angular error {} rad ({}°) exceeds 1°",
+                (p0, c1, c2, p3),
+                worst,
+                worst.to_degrees()
+            );
+        }
+    }
+
+    /// Every emitted piece is certified across twelve decades of extent
+    /// (`1e-6` to `1e6`). The bound is scale-invariant in exact arithmetic and
+    /// f64 rounding is relative, so subdivision behaviour must not drift at
+    /// extreme magnitudes.
+    #[test]
+    fn pieces_certified_across_scales() {
+        let base_cubics = [
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0 / 12.0, 1e-6 / 3.0),
+                Vec2::new(0.0, 2e-6 / 3.0),
+                Vec2::new(1.0 / 12.0, 1e-6),
+            ),
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(9.371965, 0.099994),
+                Vec2::new(8.02181, 0.048572),
+                Vec2::new(1.0, 0.0),
+            ),
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.0, 100.0),
+                Vec2::new(100.0, 100.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(150.0, 5.0),
+                Vec2::new(-50.0, -5.0),
+                Vec2::new(100.0, 0.0),
+            ),
+            (
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 100.5),
+                Vec2::new(0.0, 99.5),
+                Vec2::new(100.0, 100.0),
+            ),
+        ];
+        // Widest factors keeping every scaled coordinate a normal f32.
+        let scale_factors = [1e-8_f32, 1e-4, 1.0, 1e2, 1e4];
+        for &(p0, c1, c2, p3) in &base_cubics {
+            for &s in &scale_factors {
+                let scale = |p: Vec2| Vec2::new(p.x * s, p.y * s);
+                assert_all_pieces_certified(scale(p0), scale(c1), scale(c2), scale(p3));
+            }
+        }
+    }
+
+    /// Dense sampling of the emitted f32 chains on hard-but-f32-representable
+    /// cubics (near-cusp loops, sharp inflections, retrogrades): the 1°
+    /// contract holds all the way through emission wherever the geometry is
+    /// resolvable in f32. (Sub-f32-ULP pieces — the round-2 reproducer — are
+    /// covered by the f64 dense checks above; direction is not representable
+    /// below one ULP in any output format.)
     #[test]
     fn dense_sampling_confirms_one_degree_bound_on_hard_cubics() {
         let cubics = [
@@ -500,8 +791,8 @@ mod tests {
                 Vec2::new(95.0, 0.95),
                 Vec2::new(100.0, 1.0),
             ),
-            // Micro-scale copy of the Codex curve (f32 robustness at small
-            // magnitudes).
+            // Micro-scale copy of the Codex round-1 curve (f32 robustness at
+            // small magnitudes).
             (
                 Vec2::new(0.0, 0.0),
                 Vec2::new(0.09371965, 0.00099994),
@@ -509,7 +800,7 @@ mod tests {
                 Vec2::new(0.01, 0.0),
             ),
         ];
-        let one_degree = 1.0_f32.to_radians();
+        let one_degree = 1.0_f64.to_radians();
         for &(p0, c1, c2, p3) in &cubics {
             let worst = worst_chain_error(p0, c1, c2, p3, 200);
             assert!(
@@ -537,175 +828,6 @@ mod tests {
         let (control, end) = quads[0];
         assert!((control.x - q.x).abs() < 1e-3 && (control.y - q.y).abs() < 1e-3);
         assert_eq!(end, p2);
-    }
-
-    /// Point on a cubic Bézier at `t` (direct Bernstein evaluation, independent
-    /// of the subdivision code under test).
-    fn cubic_point(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2, t: f32) -> Vec2 {
-        let mt = 1.0 - t;
-        let (a, b, c, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
-        Vec2::new(
-            a * p0.x + b * c1.x + c * c2.x + d * p3.x,
-            a * p0.y + b * c1.y + c * c2.y + d * p3.y,
-        )
-    }
-
-    /// Bounding-box diagonal of the cubic's control hull — the scale every
-    /// relative tolerance below is measured against.
-    fn hull_extent(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> f32 {
-        let xs = [p0.x, c1.x, c2.x, p3.x];
-        let ys = [p0.y, c1.y, c2.y, p3.y];
-        let span = |v: &[f32; 4]| {
-            v.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-                - v.iter().cloned().fold(f32::INFINITY, f32::min)
-        };
-        let (w, h) = (span(&xs), span(&ys));
-        (w * w + h * h).sqrt()
-    }
-
-    fn dist(a: Vec2, b: Vec2) -> f32 {
-        let (dx, dy) = (a.x - b.x, a.y - b.y);
-        (dx * dx + dy * dy).sqrt()
-    }
-
-    /// Core precision invariant (Codex round-2): every emitted piece is either
-    /// (a) certified by the analytic hodograph bound — recomputed here from the
-    /// piece's recorded sub-cubic, bit-exactly reproducing the encoder's own
-    /// check — or (b) a straight-line fallback whose control sits exactly on
-    /// the chord midpoint and whose endpoints match the source cubic within
-    /// (accumulated) `f32` epsilon. Fallback pieces must additionally be tiny
-    /// relative to the curve — that smallness is what makes the straight
-    /// segment visually indistinguishable from the uncertifiable true piece.
-    /// Returns the number of fallback pieces so callers can assert the path
-    /// was actually exercised.
-    fn assert_pieces_certified_or_line_fallback(p0: Vec2, c1: Vec2, c2: Vec2, p3: Vec2) -> usize {
-        let tolerance_rad = CUBIC_SUBDIVISION_TOLERANCE_DEG.to_radians();
-        let extent = hull_extent(p0, c1, c2, p3);
-        assert!(extent > 0.0);
-        let pieces = subdivide_pieces(p0, c1, c2, p3);
-        assert!(!pieces.is_empty());
-        let mut start = p0;
-        let mut fallbacks = 0;
-        for piece in &pieces {
-            let bound = angular_error_bound(start, piece.src_c1, piece.src_c2, piece.end);
-            if bound > tolerance_rad {
-                // Must be the straight-line fallback: control exactly on the
-                // chord midpoint (same computation, bit-exact) …
-                let mid = midpoint(start, piece.end);
-                assert_eq!(
-                    (piece.control.x, piece.control.y),
-                    (mid.x, mid.y),
-                    "uncertified piece [{}, {}] is not a chord fallback",
-                    piece.t0,
-                    piece.t1,
-                );
-                // … endpoints on the source cubic within accumulated f32
-                // rounding (≤ 18 levels of exact-dyadic averaging) …
-                let eps = 64.0 * f32::EPSILON * extent;
-                assert!(
-                    dist(start, cubic_point(p0, c1, c2, p3, piece.t0)) <= eps,
-                    "fallback start drifted off the source cubic at t0 = {}",
-                    piece.t0,
-                );
-                assert!(
-                    dist(piece.end, cubic_point(p0, c1, c2, p3, piece.t1)) <= eps,
-                    "fallback end drifted off the source cubic at t1 = {}",
-                    piece.t1,
-                );
-                // … and at f32-noise scale: a depth-capped piece spans 2⁻¹⁸ of
-                // the parameter range, so its chord is ≤ max|B′|·2⁻¹⁸ ≈ 10⁻⁵
-                // of the extent (1e-4 leaves rounding headroom).
-                assert!(
-                    dist(start, piece.end) <= 1e-4 * extent,
-                    "fallback piece [{}, {}] is not at noise scale",
-                    piece.t0,
-                    piece.t1,
-                );
-                fallbacks += 1;
-            }
-            start = piece.end;
-        }
-        fallbacks
-    }
-
-    /// Regression for the Codex round-2 finding: on this finite, non-cusp
-    /// cubic, repeated `f32` halving collapses/reverses tiny x-deltas and the
-    /// depth cap then emitted an *uncertified* averaged quadratic with ~90° of
-    /// tangent error on the `[0.5, 0.5000038]` piece. The encoder must instead
-    /// emit only certified quadratics or chord fallbacks — and the curve must
-    /// actually exercise the fallback path (it reaches the depth cap).
-    #[test]
-    fn codex_r2_f32_collapsed_cubic_does_not_emit_uncertified_piece() {
-        let p0 = Vec2::new(0.0, 0.0);
-        let c1 = Vec2::new(1.0 / 12.0, 1e-6 / 3.0);
-        let c2 = Vec2::new(0.0, 2e-6 / 3.0);
-        let p3 = Vec2::new(1.0 / 12.0, 1e-6);
-        let fallbacks = assert_pieces_certified_or_line_fallback(p0, c1, c2, p3);
-        assert!(
-            fallbacks > 0,
-            "reproducer no longer reaches the depth cap; regression not exercised"
-        );
-    }
-
-    /// Property-style precision sweep: finite non-cusp cubics scaled across
-    /// twelve decades of extent (`1e-6` to `1e6`) all satisfy the piece
-    /// invariant — certified by the analytic bound, or a chord fallback pinned
-    /// to the source curve within `f32` epsilon.
-    #[test]
-    fn pieces_certified_or_line_fallback_across_scales() {
-        // Unit-ish base shapes; each is scaled so its hull extent hits the
-        // target exactly. All are finite with nonvanishing derivative.
-        let base_cubics = [
-            // Codex round-2 f32-collapse reproducer.
-            (
-                Vec2::new(0.0, 0.0),
-                Vec2::new(1.0 / 12.0, 1e-6 / 3.0),
-                Vec2::new(0.0, 2e-6 / 3.0),
-                Vec2::new(1.0 / 12.0, 1e-6),
-            ),
-            // Codex round-1 near-cusp loop.
-            (
-                Vec2::new(0.0, 0.0),
-                Vec2::new(9.371965, 0.099994),
-                Vec2::new(8.02181, 0.048572),
-                Vec2::new(1.0, 0.0),
-            ),
-            // Plain arch.
-            (
-                Vec2::new(0.0, 0.0),
-                Vec2::new(0.0, 100.0),
-                Vec2::new(100.0, 100.0),
-                Vec2::new(100.0, 0.0),
-            ),
-            // Sharp-inflection S.
-            (
-                Vec2::new(0.0, 0.0),
-                Vec2::new(150.0, 5.0),
-                Vec2::new(-50.0, -5.0),
-                Vec2::new(100.0, 0.0),
-            ),
-            // Cusp-adjacent retrograde controls.
-            (
-                Vec2::new(0.0, 0.0),
-                Vec2::new(100.0, 100.5),
-                Vec2::new(0.0, 99.5),
-                Vec2::new(100.0, 100.0),
-            ),
-        ];
-        let target_extents = [1e-6_f32, 1e-3, 1.0, 1e3, 1e6];
-        for &(p0, c1, c2, p3) in &base_cubics {
-            let base = hull_extent(p0, c1, c2, p3);
-            for &target in &target_extents {
-                let s = target / base;
-                let scale = |p: Vec2| Vec2::new(p.x * s, p.y * s);
-                assert_pieces_certified_or_line_fallback(
-                    scale(p0),
-                    scale(c1),
-                    scale(c2),
-                    scale(p3),
-                );
-            }
-        }
     }
 
     /// A straight cubic (all controls collinear) never over-subdivides.
