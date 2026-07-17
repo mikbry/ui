@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::bezier::subdivide_cubic;
+use crate::bezier::{subdivide_cubic, SubdivisionError};
 use crate::path::{PathCommand, Vec2, VectorPath};
 use crate::slug::{build_bands, GlyphBounds, SlugConfig, SlugCurve, SlugGlyph};
 
@@ -39,6 +39,13 @@ pub enum VectorPathEncodeError {
     /// The path produced no drawable curves (no on-curve geometry).
     #[error("path is empty: no drawable curves")]
     EmptyPath,
+    /// A `CubicTo` segment could not be lowered to a certified quadratic chain
+    /// (see [`SubdivisionError`]): the geometry needs pieces below `f32`
+    /// resolution, or a cubic has no tangent direction at all. Emitting an
+    /// uncertified approximation would silently break the 1° lowering
+    /// contract, so the encode is rejected instead.
+    #[error("cubic subdivision failed: {0}")]
+    Subdivision(#[from] SubdivisionError),
 }
 
 /// Encode an arbitrary [`VectorPath`] into a [`SlugGlyph`] curve/band blob.
@@ -53,7 +60,7 @@ pub fn encode_vector_path(
 ) -> Result<SlugGlyph, VectorPathEncodeError> {
     reject_non_finite(path)?;
 
-    let curves = flatten_path_curves(path);
+    let curves = flatten_path_curves(path)?;
     if curves.is_empty() {
         return Err(VectorPathEncodeError::EmptyPath);
     }
@@ -114,7 +121,9 @@ fn reject_non_finite(path: &VectorPath) -> Result<(), VectorPathEncodeError> {
 
 /// Walk the path into a flat quadratic-curve list, subdividing cubics. Lines use
 /// the Slug duplicated-endpoint sentinel; cubics become one or more quadratics.
-fn flatten_path_curves(path: &VectorPath) -> Vec<SlugCurve> {
+/// A no-op cubic (all points at the pen position) is skipped like a no-op quad;
+/// any other subdivision failure aborts the encode with a typed error.
+fn flatten_path_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, VectorPathEncodeError> {
     let mut curves = Vec::new();
     let mut start = Vec2::ZERO;
     let mut cur = Vec2::ZERO;
@@ -141,14 +150,20 @@ fn flatten_path_curves(path: &VectorPath) -> Vec<SlugCurve> {
                 control2,
                 to,
             } => {
-                let mut piece_start = cur;
-                for (control, end) in subdivide_cubic(cur, control1, control2, to) {
-                    // Skip a fully-degenerate sub-piece (a zero-length quadratic
-                    // contributes no geometry and no band membership).
-                    if !(end == piece_start && control == piece_start) {
-                        curves.push(SlugCurve::quad(piece_start, control, end));
+                // A no-op cubic (everything at the pen position) draws nothing,
+                // exactly like the no-op quad above — skip it rather than
+                // surface `DegenerateInput` for a segment with no geometry.
+                if !(control1 == cur && control2 == cur && to == cur) {
+                    let mut piece_start = cur;
+                    for (control, end) in subdivide_cubic(cur, control1, control2, to)? {
+                        // Skip a fully-degenerate sub-piece (a zero-length
+                        // quadratic contributes no geometry and no band
+                        // membership).
+                        if !(end == piece_start && control == piece_start) {
+                            curves.push(SlugCurve::quad(piece_start, control, end));
+                        }
+                        piece_start = end;
                     }
-                    piece_start = end;
                 }
                 cur = to;
             }
@@ -160,7 +175,7 @@ fn flatten_path_curves(path: &VectorPath) -> Vec<SlugCurve> {
             }
         }
     }
-    curves
+    Ok(curves)
 }
 
 /// Axis-aligned bounds of the flattened curves' control points — a conservative

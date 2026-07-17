@@ -76,7 +76,7 @@ pub mod path;
 pub mod slug;
 pub mod stroke;
 
-pub use bezier::CUBIC_SUBDIVISION_TOLERANCE_DEG;
+pub use bezier::{subdivide_cubic, SubdivisionError, CUBIC_SUBDIVISION_TOLERANCE_DEG};
 pub use encode::{encode_vector_path, VectorPathBlobCache, VectorPathEncodeError, VectorPathKey};
 pub use outline::glyph_outline_to_path;
 pub use path::{Affine2, Bounds, FillRule, PathCommand, Vec2, VectorPath};
