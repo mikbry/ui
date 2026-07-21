@@ -391,67 +391,6 @@ first-paint while leaving the resize pump untouched. These invariants are
 asserted by unit tests (`drawn_decrements_resize_redraw_pending`,
 `skipped_does_not_consume_resize_redraw_budget`).
 
-### Color space + blending (linear-in / sRGB-at-boundary) (#135)
-
-**Contract: render in linear light; encode to sRGB once, at the surface
-boundary.** Every lane (UI triangles, bitmap text, Slug curves) composites into
-a **linear-space intermediate framebuffer** (`INTERMEDIATE_FORMAT =
-Rgba8Unorm`, a plain linear UNORM with no hardware sRGB encode on write). A
-final full-screen **present pass** (`render/present.wgsl`) samples that linear
-result and writes it to the swapchain, applying the linear→sRGB OETF only when
-the surface is UNORM; when the surface is sRGB (the preferred, common case) the
-present fragment returns the linear value and the swapchain view performs the
-single encode. There is exactly one encode, ever.
-
-**Why.** Alpha blending is only physically correct in linear light. The
-pre-Sprint-8 renderer composited straight into an sRGB swapchain; the UI lane
-pre-linearized its vertex colors on the CPU (so it leaned on the driver's
-sRGB-target blend), but the **Slug lane did not linearize its glyph color at
-all** — so anti-aliased outline text composited in a different space than the UI
-around it, and partial-coverage edges darkened. Blending in the wrong space is
-mathematically incorrect, not merely an aesthetic preference (do **not**
-"fix" it by darkening colors). Moving all compositing into a linear
-intermediate makes the space uniform and correct for every lane by
-construction.
-
-**Color literals are sRGB-perceptual; alpha is linear.** The color-literal
-audit (#135) found every `Color` literal in the tree — the ~50-token
-`theme.rs` palette, component defaults, example fills — is a designer-picked
-**sRGB perceptual** value, and every alpha is a linear coverage weight. So the
-model is: `Color` stores sRGB; the render boundary converts to linear exactly
-once via [`Color::to_linear_rgba`] (`srgb_to_linear` on RGB, alpha passthrough).
-No literal stores linear channels, so **no literal needed rewriting**.
-`Color::from_srgb` / `from_srgb_a` are intent-signalling constructors (identical
-storage to `rgb`/`rgba`) for call sites that want the space explicit. The
-conversion happens in three symmetric places — `gui_vertices` (triangle
-colors), `scene_slug_glyphs` (Slug fill color), and `clear_color` (backdrop) —
-never per-literal at construction.
-
-**A/B verification.** The GPU acceptance test `render/linear_blend_gpu.rs`
-(Lavapipe lane) drives the real UI pipeline into the linear target and reads
-back raw bytes: an authored sRGB `0.5` gray stores as byte **~55** (linear
-0.214), *not* the byte **128** the old sRGB-space compositing produced — a
-direct numeric A/B of the two color pipelines. A second test confirms white at
-50% alpha over black is the linear midpoint (byte ~128). The perceptual
-before/after screenshot of `examples/text --features slug` (visible edge
-darkening on `M`/`g` diagonals gone) is the deferred operator visual-verify
-(the windowed present pass has no offscreen surface to assert against; its
-shader is naga-validated in the default test job).
-
-**Interaction with MSAA (#134).** MSAA now belongs *inside* the linear
-intermediate: the multisampled attachment resolves into the linear
-intermediate (a correct linear→linear average) and the present pass performs
-the sole sRGB encode afterward — so the resolve step can never double-encode.
-The machinery is shaped for that today (the resolve target is already the
-intermediate view) but MSAA stays pinned off here; re-enabling it is #134's
-scope, not this change's.
-
-**Sprint 6 double-encode, closed by construction.** The v0.9.1 CHANGELOG noted
-an MSAA-resolve-into-sRGB step double-applying encoding
-(`srgb_encode(srgb_to_linear(c))`) on macOS Metal. With a linear intermediate
-there is no sRGB texture in the compositing path to decode/re-encode, so the
-double-encode is structurally impossible — not merely patched.
-
 ### MSAA disabled pending correct sRGB orchestration
 
 The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
@@ -471,14 +410,9 @@ state:
 
 The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
 `msaa_color_view` attachment) is retained but dormant so the policy can be
-reversed cleanly. Since #135 (see §"Color space + blending") the render pass
-composites into a **linear intermediate**, which is exactly the correct home
-for MSAA: the multisampled attachment resolves into that linear target (a
-linear→linear average) and the separate present pass performs the sole sRGB
-encode — no resolve-into-sRGB double-encode is possible. The `msaa_color_view`
-resolve target is already wired to the intermediate view; re-enabling
-anti-aliasing is now just flipping `MSAA_SAMPLE_COUNT_PREF`, tracked in **#134**
-(closer of **#95**). Until that lands, anti-aliasing is intentionally off.
+reversed cleanly. Re-introducing MSAA with a non-sRGB color view + manual
+fragment-stage sRGB encode (or a verified-correct sRGB resolve) is tracked in
+**#95**; until that lands, anti-aliasing is intentionally off.
 
 ### Layout v1
 
