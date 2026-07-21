@@ -41,21 +41,6 @@ pub struct CornerRadii {
     pub bottom_left: f32,
 }
 
-/// An RGBA color, authored in **sRGB perceptual space** (a designer-picked
-/// shade, `0.0..=1.0` per channel; alpha is a linear coverage weight, never
-/// gamma-encoded).
-///
-/// # Color-space contract (ADR 0006 §"Color space + blending")
-///
-/// mkui renders in **linear space**: the render pass composites into a linear
-/// intermediate framebuffer and a final present pass encodes linear → sRGB at
-/// the surface boundary. Every `Color` value is therefore converted to linear
-/// exactly once, at that boundary, via [`Color::to_linear_rgba`]. Callers keep
-/// authoring perceptual colors (`Color::rgb` / `Color::from_srgb`); they never
-/// pre-linearize by hand, and no color literal in the tree stores linear
-/// channels (the color-literal audit confirmed all are sRGB perceptual, alpha
-/// linear). Blending in the wrong (sRGB-encoded) space — the pre-Sprint-8 bug
-/// this contract closes — darkened partial-coverage edges on anti-aliased text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
     pub r: f32,
@@ -308,33 +293,6 @@ pub fn rect_contains(rect: Rect, point: Point) -> bool {
         && point.y <= rect.origin.y + rect.size.height
 }
 
-/// sRGB → linear transfer (the sRGB EOTF). Maps a gamma-encoded perceptual
-/// channel in `[0, 1]` to its linear-light value so alpha blending composites
-/// in the physically-correct space. `0.0`/`1.0` are fixed points; `0.5` → ~0.214.
-/// Inverse of [`linear_to_srgb`]. Shared by [`Color::to_linear_rgba`] and the
-/// renderer's clear/vertex boundary; the present shader carries the same math
-/// in WGSL for the encode direction.
-pub fn srgb_to_linear(component: f32) -> f32 {
-    let component = component.clamp(0.0, 1.0);
-    if component <= 0.04045 {
-        component / 12.92
-    } else {
-        ((component + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// linear → sRGB transfer (the sRGB OETF). Inverse of [`srgb_to_linear`]. The
-/// windowed present pass performs this encode on the GPU (see `present.wgsl`);
-/// this CPU copy backs the round-trip unit tests and any headless encode.
-pub fn linear_to_srgb(component: f32) -> f32 {
-    let component = component.clamp(0.0, 1.0);
-    if component <= 0.0031308 {
-        component * 12.92
-    } else {
-        1.055 * component.powf(1.0 / 2.4) - 0.055
-    }
-}
-
 impl Point {
     pub const fn new(x: f32, y: f32) -> Self {
         Self { x, y }
@@ -419,36 +377,6 @@ impl Color {
 
     pub const fn rgb(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
-    }
-
-    /// Construct an opaque color from **sRGB perceptual** channels.
-    ///
-    /// Semantically identical to [`rgb`](Self::rgb) — `Color` is defined in
-    /// sRGB space — but the explicit spelling documents intent at call sites
-    /// that pass raw literals, per ADR 0006 §"Color space + blending". The
-    /// perceptual → linear conversion happens once at the render boundary
-    /// ([`to_linear_rgba`](Self::to_linear_rgba)); do not pre-linearize here.
-    pub const fn from_srgb(r: f32, g: f32, b: f32) -> Self {
-        Self { r, g, b, a: 1.0 }
-    }
-
-    /// [`from_srgb`](Self::from_srgb) with an explicit linear alpha coverage.
-    pub const fn from_srgb_a(r: f32, g: f32, b: f32, a: f32) -> Self {
-        Self { r, g, b, a }
-    }
-
-    /// Convert this sRGB-perceptual color to the **linear** RGBA the render
-    /// pass composites with. The RGB channels pass through the sRGB EOTF
-    /// ([`srgb_to_linear`]); alpha is a linear coverage weight and is copied
-    /// through unchanged. This is the single color-space boundary conversion —
-    /// see the type-level contract.
-    pub fn to_linear_rgba(self) -> [f32; 4] {
-        [
-            srgb_to_linear(self.r),
-            srgb_to_linear(self.g),
-            srgb_to_linear(self.b),
-            self.a,
-        ]
     }
 
     pub const fn with_alpha(self, a: f32) -> Self {
@@ -621,49 +549,5 @@ mod tests {
     fn panel_layout_contains_panel_is_false_without_rect() {
         let layout: PanelLayout<()> = PanelLayout::default();
         assert!(!layout.contains_panel(Point::new(0.0, 0.0)));
-    }
-
-    #[test]
-    fn srgb_linear_fixed_points_and_midpoint() {
-        // 0 and 1 are fixed points in both directions.
-        assert!(srgb_to_linear(0.0).abs() < f32::EPSILON);
-        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
-        assert!(linear_to_srgb(0.0).abs() < f32::EPSILON);
-        assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-6);
-        // sRGB 0.5 → ~0.214 linear (the canonical mid-gray value).
-        assert!((srgb_to_linear(0.5) - 0.21404114).abs() < 1e-5);
-    }
-
-    #[test]
-    fn srgb_linear_round_trips() {
-        for step in 0..=20 {
-            let c = step as f32 / 20.0;
-            let round = linear_to_srgb(srgb_to_linear(c));
-            assert!((round - c).abs() < 1e-4, "round-trip failed at {c}");
-        }
-    }
-
-    #[test]
-    fn to_linear_rgba_linearizes_rgb_but_preserves_alpha() {
-        // Alpha is a linear coverage weight and must pass through untouched,
-        // while RGB is linearized. A 50%-alpha mid-gray is the discriminating
-        // case: sRGB-space blending (the old bug) would have used 0.5 for the
-        // color channels instead of ~0.214.
-        let linear = Color::from_srgb_a(0.5, 0.5, 0.5, 0.5).to_linear_rgba();
-        assert!((linear[0] - 0.21404114).abs() < 1e-5);
-        assert!((linear[1] - 0.21404114).abs() < 1e-5);
-        assert!((linear[2] - 0.21404114).abs() < 1e-5);
-        assert_eq!(linear[3], 0.5, "alpha stays linear");
-    }
-
-    #[test]
-    fn from_srgb_matches_rgb_storage() {
-        // The intent-signalling constructor stores the same channels as `rgb` —
-        // the conversion is deferred to the render boundary, not construction.
-        assert_eq!(Color::from_srgb(0.2, 0.4, 0.6), Color::rgb(0.2, 0.4, 0.6));
-        assert_eq!(
-            Color::from_srgb_a(0.2, 0.4, 0.6, 0.8),
-            Color::rgba(0.2, 0.4, 0.6, 0.8)
-        );
     }
 }

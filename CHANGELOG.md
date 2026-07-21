@@ -16,23 +16,6 @@ breaking changes can land on minor bumps).
   `mkui_core`), compile under `cargo test --doc -p mkui`, and cross-reference
   the relevant `mkui-core` component types. Documentation-only; no public API
   change.
-- **Gamma-correct alpha blending in linear color space (#135).** The wgpu
-  backend now renders every lane (UI triangles, bitmap text, Slug curves) into
-  a **linear-space intermediate framebuffer** (`Rgba8Unorm`) and encodes
-  linear→sRGB once, in a final full-screen present pass, at the surface
-  boundary. Alpha blending therefore composites in physically-correct linear
-  light. Previously the UI lane pre-linearized its vertex colors but the Slug
-  outline-text lane did not linearize its glyph color at all, so anti-aliased
-  edges composited in sRGB-encoded space and darkened — visible as the
-  "bitmap-enhanced" look on `examples/text --features slug`. `Color` is now
-  documented as an sRGB-perceptual value converted to linear exactly once at the
-  render boundary (`Color::to_linear_rgba`); `Color::from_srgb` /
-  `from_srgb_a` are added as intent-signalling constructors. A Lavapipe GPU
-  acceptance test reads back raw bytes proving an authored sRGB `0.5` gray
-  linearizes to byte ~55 (not the byte ~128 of the old pipeline). The Sprint 6
-  v0.9.1 MSAA-resolve-into-sRGB double-encode is closed by construction — the
-  intermediate is linear, so no sRGB texture sits in the compositing path. No
-  new dependencies, no MSRV change. See ADR 0006 §"Color space + blending".
 
 ### Tooling
 - **CI cost reduction — fail-fast + path-gated code jobs + `[skip ci]`
