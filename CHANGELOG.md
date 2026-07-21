@@ -17,6 +17,32 @@ breaking changes can land on minor bumps).
   the relevant `mkui-core` component types. Documentation-only; no public API
   change.
 
+### Tooling
+- **CI cost reduction — fail-fast + path-gated code jobs + `[skip ci]`
+  discipline (#151).** GitHub Actions billing hit ~$14 over three days of the
+  Sprint 7 tail; at Sprint 8 pace an unchanged pipeline projected to $50–100.
+  Four cheap wins in `.github/workflows/ci.yml` (and contributor docs):
+  - The package-aware `test` matrix flips from `fail-fast: false` to
+    `fail-fast: true` — a failing feature combo now stops the matrix instead of
+    letting the other 13 legs run to completion (~30–50% less on a red run).
+  - A new lightweight `changes` job computes whether a PR touches code paths
+    (`crates/`, `examples/`, `bindings/`, workflows, Cargo manifests,
+    toolchain/deny config) and gates the expensive code jobs — the two Lavapipe
+    GPU lanes, `mkui-py-bindings`, `feature-slug`, `mkui-backend-matrix`,
+    `mkui-examples`, `build-release`, `msrv`, and `cbindgen-header-clean` — with
+    `needs: changes` + `if:`. A docs-only PR (README / CHANGELOG / ADR refresh)
+    now runs ~20 jobs instead of ~28; code PRs are unchanged (full coverage
+    preserved). Job-level `if:` skips report as "skipped" (branch-protection
+    treats them as success), so gating never wedges a required check.
+  - `docs/CONTRIBUTING.md` documents the `[skip ci]` iteration convention: mark
+    intermediate review-round fix commits `[skip ci]`, drop it on the final
+    push so CI runs once against the state that merges.
+  - **Before/after (per PR):** docs-only PR ~28 → ~20 jobs (skips both GPU
+    lanes + bindings ≈ the run's most expensive minutes); a red code PR saves
+    the wasted matrix legs; a 4-commit review round that marks the first three
+    `[skip ci]` pays for one CI run instead of four. No public API change, no
+    MSRV bump, no new dependencies; `ci.yml` remains a single file.
+
 ## [0.10.0] — 2026-07-03
 
 ### Added
