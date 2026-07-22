@@ -25,11 +25,13 @@
 //! degrees between adjacent samples (Codex round-1 reproduced 43.7° of missed
 //! error on `p0=(0,0), c1=(9.371965,0.099994), c2=(8.021810,0.048572),
 //! p3=(1,0)`). The criterion is an analytic bound built on the hodograph: the
-//! cubic's derivative `B′(t)` is a quadratic Bézier, the emitted quadratic's
-//! derivative is linear, and every factor of `sin θ(t) = |B′ × Q′|/(|B′|·|Q′|)`
-//! can be bounded in closed form (cross products of linear vector functions are
-//! polynomials with computable Bernstein coefficient hulls; minimum speeds have
-//! closed-form segment minima). Subdivision runs entirely in `f64`
+//! cubic's derivative `B′(t)` is a quadratic Bézier, a quadratic candidate's
+//! derivative `Q′(t)` is linear, and `cross(B′, Q′)` / `dot(B′, Q′)` are each
+//! an *exact* cubic polynomial (product of a quadratic and a linear Bézier
+//! function). [`general_sin_bound`] finds their global extrema exactly, via
+//! the cubic's (quadratic) derivative roots — not a loose coefficient-hull
+//! bound, which Codex round-5's investigation showed is too weak to certify
+//! near a genuine high-curvature feature. Subdivision runs entirely in `f64`
 //! ([`DVec2`]) — Codex round-2 showed `f32` de Casteljau collapses control
 //! deltas into rounding noise before certification can succeed.
 //!
@@ -39,55 +41,68 @@
 //! certifying the pre-rounding `f64` quadratic is not enough: rounding the
 //! round-2 reproducer's certified chain to `f32` reintroduced ~75° of tangent
 //! error. The criterion therefore measures the exact quadratic the caller will
-//! receive: each candidate piece's start/control/end are rounded to `f32`
-//! first, and the analytic bound is evaluated **against that rounded
-//! quadratic**, with the rounding perturbation (a linear-in-`t` derivative
-//! term, computed from the actual rounded values, not a worst-case ULP model)
-//! folded into both the numerator and the speed lower bounds. A piece is
-//! emitted only when the rounded quadratic itself certifies.
+//! receive: a candidate control point's start/control/end are rounded to
+//! `f32` *first*, and the analytic bound is evaluated against that rounded
+//! quadratic's derivative. A piece is emitted only when the rounded quadratic
+//! itself certifies.
 //!
-//! Because coordinate ULPs are fixed by `f32` representation while piece
-//! extents shrink under subdivision, splitting *cannot* rescue a piece whose
-//! quantization jitter alone exceeds the tolerance — deeper pieces are
-//! strictly noisier. When one ULP of perpendicular-axis rounding, measured
-//! against the piece's own hull extent, already out-jitters the tolerance
-//! (see `f32_noise_floor_sin`), recursion stops and the whole call returns
-//! [`SubdivisionError::PrecisionUnderflow`]: the input needs pieces finer than
-//! `f32` can represent (curvature features at the `f32` resolution limit),
-//! and emitting an uncertified chain or grinding to the depth cap would be
-//! dishonest and wasteful respectively. This is exactly the fate of the Codex
-//! round-2 reproducer — its pseudo-cusp needs pieces whose `f32`
-//! x-coordinates quantize to garbage directions — and why [`subdivide_cubic`]
-//! returns a `Result` rather than pretending every finite cubic has a
-//! certified `f32` chain. The floor deliberately measures quantization
-//! against piece extent rather than the current candidate quadratic's speed:
-//! a *geometrically* degenerate candidate (e.g. a retrograde averaged control
-//! on a strongly uneven parameterisation) also has tiny speeds, but splitting
-//! fixes geometry, so it must split, not bail.
+//! # Control-point selection, not just depth
+//!
+//! `PrecisionUnderflow` is returned iff no `f32` chain within
+//! [`MAX_SUBDIVISION_DEPTH`] can honor the 1° bound — this depth cap is the
+//! *only* trigger for that error; there is no heuristic pre-check that could
+//! false-positive (an earlier revision had one, and Codex round-5 found it
+//! over-rejected ordinary, well-resolved curves). But removing the pre-check
+//! alone is not sufficient: Codex round-5's `(999.65,1000.0), (999.4,999.1),
+//! (999.95,999.65), (999.25,1000.55)` sits in a region of genuinely high
+//! local curvature (~11° of true tangent rotation across a piece only ~1.5
+//! millipixels wide at that offset), and the **averaged** degree-reduction
+//! control's approximate endpoint-tangent match cannot reach 1° there —
+//! empirically, its error *increases* monotonically on further subdivision
+//! (1.2° → 15° over the next three levels) as `f32` rounding of the
+//! ever-smaller piece overwhelms the true (shrinking) geometric error, so no
+//! amount of depth alone fixes it.
+//!
+//! The fix is a second, independent control-point candidate: the
+//! **tangent-line intersection** ([`tangent_intersection_control`]) —
+//! intersecting the ray from `p0` along `c1 − p0` with the ray from `p3`
+//! along `c2 − p3` — matches *both* endpoint tangent directions exactly (zero
+//! angular error at `u = 0` and `u = 1` by construction), leaving only the
+//! interior curvature mismatch to bound, typically far smaller than the
+//! averaged formula's error. `flatten` evaluates every viable candidate with
+//! [`general_sin_bound`] and keeps the tightest; a piece is emitted once
+//! *any* candidate certifies. This resolves the round-5 reproducer at depth
+//! 7 with true error ~0.02° (down from the averaged formula's 1.2°) — see
+//! `codex_r5_normal_scale_cubic_certifies_not_underflow`. `PrecisionUnderflow`
+//! remains reserved for genuine `f32`-resolution limits: the round-2
+//! reproducer's pseudo-cusp still exhausts every candidate down to the depth
+//! cap and returns `Err` (see its regression) — `f32`-scale non-convergence
+//! localizes to a shrinking sub-interval around the pathological point, so at
+//! most two branches (not a full `2^depth` fan-out) ever run that deep.
 //!
 //! # Endpoint-stationary cubics are valid input
 //!
 //! A cubic with `c1 == p0` (or `c2 == p3`) has `B′ = 0` at that endpoint —
 //! common in real paths and *not* a tangent-flip cusp (Codex round-4's
 //! counterexample `(0,0), (0,0), (50,100), (100,0)` is a perfectly smooth
-//! arch). The generic bound cannot certify such pieces (its speed lower bound
-//! degenerates), but the derivative factors exactly: with `c1 == p0`,
+//! arch). [`general_sin_bound`]'s denominator floor collapses for such pieces
+//! (nothing on the `B′` side partially cancels the `Q′` hull term at the
+//! vanishing endpoint), but the derivative factors exactly: with `c1 == p0`,
 //! `B′(u) = u·ψ(u)` where `ψ(u) = 6(1−u)(c2−c1) + 3u(p3−c2)` is **linear**,
-//! so for `u > 0` the tangent direction is ψ's direction and the limit tangent
-//! at the stationary endpoint is `ψ(0)` — well-defined geometry, the direction
-//! toward the next distinct control point. The certifier dispatches on exact
-//! endpoint-stationarity and bounds `angle(ψ, Q̃′)` (linear vs linear: exact
-//! extrema of the quadratic cross and dot polynomials) instead of
-//! `angle(B′, Q̃′)`. Stationary pieces also emit the **chord midpoint** as
-//! their control rather than the averaged degree-reduction control: on the
-//! stationary spine `p3 → 3·c2`, so the averaged `q = (3·c2 − p3)/4` cancels
-//! catastrophically and its direction — the emitted initial tangent — becomes
-//! numerical noise, while the pieces themselves are asymptotically straight
-//! and the chord certifies. Mirrored for `c2 == p3`; a doubly-stationary
-//! cubic (`c1 == p0` and `c2 == p3`) has constant derivative direction
-//! `c2 − c1` and uses the same machinery with a constant ψ. Only a cubic with
-//! **no** direction anywhere — all four control points equal, `B′ ≡ 0` — is
-//! rejected as [`SubdivisionError::DegenerateInput`].
+//! so for `u > 0` the tangent direction is ψ's direction and the limit
+//! tangent at the stationary endpoint is `ψ(0)` — well-defined geometry, the
+//! direction toward the next distinct control point. [`stationary_sin_bound`]
+//! dispatches on exact endpoint-stationarity and bounds `angle(ψ, Q′)`
+//! (linear vs linear: exact extrema of the resulting quadratic cross and dot
+//! polynomials) instead of `angle(B′, Q′)`. Stationary pieces use only the
+//! **chord midpoint** as their sole candidate — the averaged formula is
+//! numerically catastrophic there (on the stationary spine `p3 → 3·c2`, so
+//! `q = (3·c2 − p3)/4` cancels to noise), and the tangent-line intersection is
+//! undefined (one of the two directions is zero). Mirrored for `c2 == p3`; a
+//! doubly-stationary cubic (`c1 == p0` and `c2 == p3`) has constant
+//! derivative direction `c2 − c1` and uses the same machinery with a constant
+//! ψ. Only a cubic with **no** direction anywhere — all four control points
+//! equal, `B′ ≡ 0` — is rejected as [`SubdivisionError::DegenerateInput`].
 //!
 //! There are no panics, assertions, or uncertified emissions anywhere in the
 //! subdivision path: every failure mode is a typed error.
@@ -103,17 +118,23 @@ use crate::path::Vec2;
 /// `f32` — stays within this angle of the source cubic across the piece.
 pub const CUBIC_SUBDIVISION_TOLERANCE_DEG: f32 = 1.0;
 
-/// Backstop on recursion depth; reaching it returns
-/// [`SubdivisionError::PrecisionUnderflow`] — it is **not** an emission path
-/// and does not panic. In `f64` the bound shrinks ~4× per level wherever the
-/// derivative direction is resolvable, so real inputs finish far below this
-/// cap. Observed on the Codex reproducers (measured by this module's
-/// regression tests): the round-1 near-cusp loop certifies every emitted
-/// piece by depth 7; the round-2 `f32`-collapsing cubic exits early with
-/// `PrecisionUnderflow` via the quantization-noise floor rather than
-/// grinding to any depth. The cap only backstops inputs that evade the noise
-/// floor, e.g. interior true cusps, and bounds the work done before the typed
-/// error is returned.
+/// Backstop on recursion depth. **Tightened invariant (Codex round-5):
+/// [`SubdivisionError::PrecisionUnderflow`] is returned iff no `f32` chain
+/// within this depth can honor the 1° bound** — this cap is the *only*
+/// trigger for that error (see module docs); there is no heuristic pre-check,
+/// so reaching it is not a panic and not a prediction, only a report that
+/// certification was tried at every level up to here and never succeeded.
+///
+/// In `f64` the bound shrinks ~4× per level wherever the derivative direction
+/// is resolvable, so real inputs finish far below this cap. Observed on the
+/// three Codex reproducers (measured by this module's regression tests): the
+/// round-1 near-cusp loop certifies every emitted piece by depth 6; the
+/// round-5 high-curvature cubic (resolved by the tangent-intersection
+/// candidate — see module docs) certifies by depth 7; the round-2
+/// `f32`-collapsing cubic exhausts recursion and returns
+/// `PrecisionUnderflow` — its pseudo-cusp is genuinely below `f32`
+/// resolution, and no amount of splitting or control-point choice fixes
+/// that. The cap bounds the work spent proving that.
 const MAX_SUBDIVISION_DEPTH: u32 = 48;
 
 /// Typed failure of [`subdivide_cubic`] / [`subdivide_pieces`].
@@ -272,28 +293,63 @@ fn flatten(
     t1: f64,
     out: &mut Vec<Piece>,
 ) -> Result<(), SubdivisionError> {
-    // Emission control: the averaged degree-reduction control for generic
-    // pieces. For endpoint-stationary pieces the averaged formula is
-    // numerically catastrophic — on the stationary spine `p3 → 3·c2`, so
-    // `q = (3·c2 − p3)/4` cancels to noise and its direction (the emitted
-    // initial tangent) becomes garbage. Those pieces are asymptotically
-    // straight (their tangent spread shrinks with the piece), so the chord
-    // midpoint is the correct control: constant chord direction, certified by
-    // the ψ bound once the piece's tangent spread is inside tolerance.
+    // Emission-control candidates (see module docs, "Control-point selection,
+    // not just depth"). Endpoint-stationary pieces get a single candidate,
+    // the chord midpoint, certified by [`stationary_sin_bound`] — the
+    // averaged degree-reduction formula is numerically catastrophic there
+    // (on the stationary spine `p3 → 3·c2`, `q = (3·c2 − p3)/4` cancels to
+    // noise), and [`general_sin_bound`]'s denominator floor collapses
+    // whenever the true derivative is genuinely zero at an endpoint (nothing
+    // on the `B′` side partially cancels the `Q̃′` hull term), so neither
+    // applies. Generic pieces get two candidates evaluated by
+    // [`general_sin_bound`]: the averaged formula, and — whenever the two
+    // tangent lines are well-defined and not near-parallel — their
+    // intersection, which exactly matches both endpoint tangent directions.
+    // The latter is what actually resolves Codex round-5's high-curvature
+    // reproducer, where the averaged formula's *approximate* endpoint-tangent
+    // match alone exceeds 1° and only gets worse under further subdivision
+    // (verified: its error strictly *increases*, 1.2° → 15°, over the next
+    // three levels — not a case depth alone can fix). The tightest
+    // certifying candidate wins.
     let start_stationary = sub(c1, p0).is_zero();
     let end_stationary = sub(p3, c2).is_zero();
-    let q = if start_stationary || end_stationary {
-        midpoint(p0, p3)
-    } else {
-        quadratic_control(p0, c1, c2, p3)
-    };
-    // The exact f32 quadratic production would emit for this piece: its start
-    // is the previous piece's rounded end (bit-identical to rounding p0, since
-    // both round the same shared f64 split point).
     let eq0 = p0.f32_rounded();
-    let eqc = q.f32_rounded();
     let eq1 = p3.f32_rounded();
-    if emitted_error_bound(p0, c1, c2, p3, eq0, eqc, eq1) <= tolerance_rad {
+    let bound_for = |q: DVec2| -> f64 {
+        let eqc = q.f32_rounded();
+        let te0 = scale(sub(eqc, eq0), 2.0);
+        let te1 = scale(sub(eq1, eqc), 2.0);
+        if start_stationary || end_stationary {
+            stationary_sin_bound(c1, p0, c2, p3, start_stationary, end_stationary, te0, te1)
+        } else {
+            let (d0, d1, d2) = hodograph(p0, c1, c2, p3);
+            general_sin_bound(d0, d1, d2, te0, te1)
+        }
+    };
+    let mut candidates = [None; 3];
+    let mut n = 0;
+    if !start_stationary && !end_stationary {
+        candidates[n] = Some(quadratic_control(p0, c1, c2, p3));
+        n += 1;
+        if let Some(tq) = tangent_intersection_control(p0, c1, c2, p3) {
+            candidates[n] = Some(tq);
+            n += 1;
+        }
+    }
+    candidates[n] = Some(midpoint(p0, p3));
+    n += 1;
+
+    let mut best: Option<(f64, DVec2)> = None;
+    for q in candidates.into_iter().take(n).flatten() {
+        let bound = bound_for(q);
+        if best.is_none_or(|(b, _)| bound < b) {
+            best = Some((bound, q));
+        }
+    }
+    #[allow(clippy::unwrap_used)]
+    let (bound, q) = best.unwrap(); // candidates always yields at least the chord midpoint
+
+    if bound <= tolerance_rad {
         out.push(Piece {
             control: q.to_vec2(),
             end: p3.to_vec2(),
@@ -302,24 +358,11 @@ fn flatten(
         });
         return Ok(());
     }
-    // Rounding-noise floor: if even the ideal averaged quadratic, compared
-    // against its own f32 rounding, already exceeds the tolerance, then f32
-    // cannot represent any quadratic this piece needs — and children are
-    // strictly worse (their speeds halve while rounding jitter is fixed by the
-    // coordinate magnitudes). Fail fast with a typed error instead of
-    // splitting toward the depth cap.
-    // Precision floor: if f32 coordinate quantization jitters this piece's
-    // tangent directions by more than the tolerance, no emitted quadratic —
-    // for this piece or any descendant, whose extents only shrink while
-    // coordinate ULPs stay fixed — can be certified. Fail fast with a typed
-    // error instead of splitting toward the depth cap. (This deliberately
-    // measures quantization against the piece's own extent, not the current
-    // quadratic's speed: a *geometrically* degenerate candidate — e.g. a
-    // retrograde averaged control on an uneven parameterisation — has tiny
-    // speed too, but splitting fixes geometry, so it must split, not bail.)
-    if f32_noise_floor_sin(p0, c1, c2, p3) > tolerance_rad.sin() {
-        return Err(SubdivisionError::PrecisionUnderflow);
-    }
+    // Tightened invariant (Codex round-5): PrecisionUnderflow is returned iff
+    // no f32 chain within the depth cap can honor the 1° bound, for any of
+    // the candidate controls above. There is no heuristic pre-check — this
+    // depth-cap check is the *only* trigger for the error, so reaching it
+    // cannot false-positive (see module docs and [`MAX_SUBDIVISION_DEPTH`]).
     if depth >= MAX_SUBDIVISION_DEPTH {
         return Err(SubdivisionError::PrecisionUnderflow);
     }
@@ -349,107 +392,192 @@ fn flatten(
     )
 }
 
+/// Bernstein control points of the cubic's derivative hodograph: `B′(t)` is a
+/// **quadratic** Bézier with these three control points, for *any* cubic —
+/// including endpoint-stationary ones, where `d0` or `d2` is simply `(0, 0)`
+/// rather than requiring special-case dispatch.
+fn hodograph(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> (DVec2, DVec2, DVec2) {
+    (
+        scale(sub(c1, p0), 3.0),
+        scale(sub(c2, c1), 3.0),
+        scale(sub(p3, c2), 3.0),
+    )
+}
+
 /// Certified upper bound (radians) on the tangent-direction error between the
-/// `f64` cubic and the **actual emitted `f32` quadratic** `(eq0, eqc, eq1)`
-/// over all `u ∈ [0, 1]`; `INFINITY` when no finite certification holds at
-/// this piece's scale (the recursion then subdivides or fails fast).
+/// true cubic hodograph `(d0, d1, d2)` (see [`hodograph`]) and an emitted
+/// quadratic's linear derivative `(1−u)·te0 + u·te1`; `INFINITY` when no
+/// finite certification holds (the recursion then tries another candidate,
+/// subdivides, or fails fast). One formula for *any* control-point choice —
+/// no dispatch on endpoint-stationarity, unlike an earlier revision.
 ///
-/// Dispatches on exact endpoint-stationarity (see module docs):
-///
-/// - Generic pieces (`c1 ≠ p0`, `c2 ≠ p3`) use the hodograph decomposition
-///   `B′ − Q̃′ = φ(u)·v + L(u)` where `v = 3(c2 − c1) + p0 − p3` (constant,
-///   `max|φ| = ½`) and `L = Q′ − Q̃′` is the *actual* linear rounding
-///   perturbation. Then `sin θ ≤ [½·max|v × Q̃′| + max|L × Q̃′|] /
-///   ((min|Q̃′| − ½|v| − max|L|)·min|Q̃′|)`, with each `max` over a linear or
-///   quadratic polynomial bounded by its Bernstein coefficient hull and each
-///   `min` a closed-form segment minimum. The denominator guard also forces
-///   `B′·Q̃′ > 0`, so `θ < 90°` and `asin` is valid.
-/// - Endpoint-stationary pieces factor the derivative, `B′(u) = u·ψ(u)` (or
-///   `(1−u)·ψ(u)`), and bound `angle(ψ, Q̃′)` for the linear ψ via
-///   `psi_error_bound` — the scalar factor cannot change direction.
-fn emitted_error_bound(
-    p0: DVec2,
-    c1: DVec2,
-    c2: DVec2,
-    p3: DVec2,
-    eq0: DVec2,
-    eqc: DVec2,
-    eq1: DVec2,
-) -> f64 {
-    let te0 = scale(sub(eqc, eq0), 2.0);
-    let te1 = scale(sub(eq1, eqc), 2.0);
+/// `cross(B′, Q̃′)` and `dot(B′, Q̃′)` are each the product of a quadratic and
+/// a linear Bézier function, hence an *exact* cubic polynomial in Bernstein
+/// form (product-of-Bernstein-forms coefficients). Their global extrema are
+/// found exactly via the cubic's (quadratic) derivative roots — not a loose
+/// coefficient-hull bound, which round 5's investigation showed is too weak
+/// to certify near a real high-curvature feature. `sin θ(t) ≤
+/// max|cross(t)| / (min|B′|·min|Q̃′|)`, with `min|B′| ≥ min|Q̃′| −
+/// max|B′ − Q̃′|` (a plain Bernstein coefficient-hull bound suffices for the
+/// *speed* floor, which only needs to stay positive, not be tight). The
+/// `dot` minimum must also stay positive — forcing `θ < 90°`, so `asin` is
+/// the correct branch.
+fn general_sin_bound(d0: DVec2, d1: DVec2, d2: DVec2, te0: DVec2, te1: DVec2) -> f64 {
     let min_emitted_speed = min_segment_norm(te0, te1);
     if min_emitted_speed == 0.0 {
         return f64::INFINITY;
     }
-    let start_stationary = sub(c1, p0).is_zero();
-    let end_stationary = sub(p3, c2).is_zero();
-    match (start_stationary, end_stationary) {
-        (false, false) => {
-            let v = DVec2::new(
-                3.0 * (c2.x - c1.x) + p0.x - p3.x,
-                3.0 * (c2.y - c1.y) + p0.y - p3.y,
-            );
-            let q = quadratic_control(p0, c1, c2, p3);
-            let e0 = scale(sub(q, p0), 2.0);
-            let e1 = scale(sub(p3, q), 2.0);
-            let l0 = sub(e0, te0);
-            let l1 = sub(e1, te1);
-            let l_max = norm(l0).max(norm(l1));
-            let min_cubic_speed = min_emitted_speed - 0.5 * norm(v) - l_max;
-            if min_cubic_speed <= 0.0 {
-                return f64::INFINITY;
-            }
-            let v_cross = 0.5 * cross(v, te0).abs().max(cross(v, te1).abs());
-            let l_cross = quadratic_bernstein_abs_max(
-                cross(l0, te0),
-                0.5 * (cross(l0, te1) + cross(l1, te0)),
-                cross(l1, te1),
-            );
-            let sin_bound = (v_cross + l_cross) / (min_cubic_speed * min_emitted_speed);
-            asin_or_infinity(sin_bound)
-        }
-        (true, false) => {
-            // B′(u) = u·ψ(u), ψ(u) = 6(1−u)(c2 − c1) + 3u(p3 − c2).
-            let psi0 = scale(sub(c2, c1), 6.0);
-            let psi1 = scale(sub(p3, c2), 3.0);
-            psi_error_bound(psi0, psi1, te0, te1, min_emitted_speed)
-        }
-        (false, true) => {
-            // B′(u) = (1−u)·ψ(u), ψ(u) = 3(1−u)(c1 − p0) + 6u(c2 − c1).
-            let psi0 = scale(sub(c1, p0), 3.0);
-            let psi1 = scale(sub(c2, c1), 6.0);
-            psi_error_bound(psi0, psi1, te0, te1, min_emitted_speed)
-        }
-        (true, true) => {
-            // B′(u) = 6(1−u)u·(c2 − c1): constant direction (a straight,
-            // doubly-stationary parameterisation). Zero direction means a
-            // point piece, uncertifiable.
-            let dir = sub(c2, c1);
-            if dir.is_zero() {
-                return f64::INFINITY;
-            }
-            psi_error_bound(dir, dir, te0, te1, min_emitted_speed)
-        }
+    // |B′(t) − Q̃′(t)|, Q̃′ degree-elevated to quadratic Bernstein form
+    // `(te0, (te0+te1)/2, te1)`: a valid (if not maximally tight) hull bound.
+    let mid_te = scale(DVec2::new(te0.x + te1.x, te0.y + te1.y), 0.5);
+    let g0 = sub(d0, te0);
+    let g1 = sub(d1, mid_te);
+    let g2 = sub(d2, te1);
+    let min_cubic_speed = min_emitted_speed - norm(g0).max(norm(g1)).max(norm(g2));
+    if min_cubic_speed <= 0.0 {
+        return f64::INFINITY;
     }
+    let dot_k = (
+        dot(d0, te0),
+        (2.0 * dot(d1, te0) + dot(d0, te1)) / 3.0,
+        (dot(d2, te0) + 2.0 * dot(d1, te1)) / 3.0,
+        dot(d2, te1),
+    );
+    if cubic_bernstein_extrema(dot_k.0, dot_k.1, dot_k.2, dot_k.3).0 <= 0.0 {
+        return f64::INFINITY;
+    }
+    let cross_k = (
+        cross(d0, te0),
+        (2.0 * cross(d1, te0) + cross(d0, te1)) / 3.0,
+        (cross(d2, te0) + 2.0 * cross(d1, te1)) / 3.0,
+        cross(d2, te1),
+    );
+    let cross_max = cubic_bernstein_abs_max(cross_k.0, cross_k.1, cross_k.2, cross_k.3);
+    asin_or_infinity(cross_max / (min_cubic_speed * min_emitted_speed))
 }
 
-/// Certified bound (radians) on `max_u angle(ψ(u), Q̃′(u))` for the linear
-/// direction carrier `ψ(u) = (1−u)·psi0 + u·psi1` against the emitted
-/// quadratic's linear derivative `(1−u)·te0 + u·te1`; `INFINITY` when the
-/// certification degenerates. `ψ × Q̃′` and `ψ·Q̃′` are quadratics in `u`; the
-/// cross maximum uses the Bernstein coefficient hull and the dot's hull
-/// positivity forces the angle below 90° so `asin` is valid.
+/// The quadratic control point whose tangent *lines* exactly match the
+/// cubic's entry and exit tangent directions: the intersection of the ray
+/// from `p0` along `c1 − p0` with the ray from `p3` along `c2 − p3`. `None`
+/// when either direction is zero (an endpoint-stationary piece — the caller
+/// never calls this then) or the two tangent lines are nearly parallel (the
+/// intersection point runs off to a distant, numerically unstable location
+/// that amplifies rather than reduces error; the caller falls back to the
+/// averaged or chord-midpoint candidate instead).
 ///
-/// A one-sided-zero ψ endpoint (e.g. `p0 == c1 == c2`: the derivative is
-/// `3u²·(p3 − c2)`, direction constant) collapses to a constant carrier.
-fn psi_error_bound(
-    psi0: DVec2,
-    psi1: DVec2,
-    te0: DVec2,
-    te1: DVec2,
-    min_emitted_speed: f64,
-) -> f64 {
+/// This is what resolves Codex round-5: the averaged degree-reduction
+/// control only *approximately* matches the endpoint tangents, and for a
+/// piece with strong local curvature that approximation error alone can
+/// exceed 1° well before `f32` rounding of the (tiny) piece becomes the
+/// limiting factor. Matching both endpoint tangents exactly (zero angular
+/// error at `u = 0` and `u = 1` by construction) leaves only the interior
+/// curvature mismatch to bound, which is generally far smaller.
+fn tangent_intersection_control(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> Option<DVec2> {
+    let d0 = sub(c1, p0);
+    let d1 = sub(c2, p3);
+    if d0.is_zero() || d1.is_zero() {
+        return None;
+    }
+    let det = cross(d1, d0);
+    if det.abs() <= 1e-9 * norm(d0) * norm(d1) {
+        return None;
+    }
+    let s = cross(d1, sub(p3, p0)) / det;
+    Some(DVec2::new(p0.x + s * d0.x, p0.y + s * d0.y))
+}
+
+/// Evaluate a scalar cubic in Bernstein form `(k0, k1, k2, k3)` at `u`.
+fn cubic_bernstein_eval(k0: f64, k1: f64, k2: f64, k3: f64, u: f64) -> f64 {
+    let mu = 1.0 - u;
+    mu * mu * mu * k0 + 3.0 * mu * mu * u * k1 + 3.0 * mu * u * u * k2 + u * u * u * k3
+}
+
+/// Exact global extrema `(min, max)` of a scalar cubic in Bernstein form over
+/// `u ∈ [0, 1]`. The derivative is `3×` a quadratic Bernstein polynomial with
+/// control points `(k1−k0, k2−k1, k3−k2)`; its roots — a plain quadratic
+/// formula — are the only possible *interior* extrema, checked alongside the
+/// two endpoints.
+fn cubic_bernstein_extrema(k0: f64, k1: f64, k2: f64, k3: f64) -> (f64, f64) {
+    let (mut lo, mut hi) = (k0.min(k3), k0.max(k3));
+    let mut consider = |u: f64| {
+        if u > 0.0 && u < 1.0 {
+            let v = cubic_bernstein_eval(k0, k1, k2, k3, u);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    };
+    let (a0, a1, a2) = (k1 - k0, k2 - k1, k3 - k2);
+    let a = a0 - 2.0 * a1 + a2;
+    let b = 2.0 * (a1 - a0);
+    let c = a0;
+    if a == 0.0 {
+        if b != 0.0 {
+            consider(-c / b);
+        }
+    } else {
+        let disc = b * b - 4.0 * a * c;
+        if disc >= 0.0 {
+            let sq = disc.sqrt();
+            consider((-b + sq) / (2.0 * a));
+            consider((-b - sq) / (2.0 * a));
+        }
+    }
+    (lo, hi)
+}
+
+/// Maximum of `|p(u)|` over `[0, 1]` (see [`cubic_bernstein_extrema`]).
+fn cubic_bernstein_abs_max(k0: f64, k1: f64, k2: f64, k3: f64) -> f64 {
+    let (lo, hi) = cubic_bernstein_extrema(k0, k1, k2, k3);
+    lo.abs().max(hi.abs())
+}
+
+/// Exact global extrema of the scalar quadratic in Bernstein form
+/// `p(u) = (1−u)²·k0 + 2u(1−u)·kmid + u²·k2`: the extreme values sit at the
+/// endpoints or the single interior vertex.
+fn quadratic_bernstein_extrema(k0: f64, kmid: f64, k2: f64) -> (f64, f64) {
+    let (mut lo, mut hi) = (k0.min(k2), k0.max(k2));
+    // p′(u) = 2·[(kmid − k0) + (k0 − 2·kmid + k2)·u]
+    let a = k0 - 2.0 * kmid + k2;
+    if a != 0.0 {
+        let u = (k0 - kmid) / a;
+        if u > 0.0 && u < 1.0 {
+            let mu = 1.0 - u;
+            let v = mu * mu * k0 + 2.0 * u * mu * kmid + u * u * k2;
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+    }
+    (lo, hi)
+}
+
+fn quadratic_bernstein_abs_max(k0: f64, kmid: f64, k2: f64) -> f64 {
+    let (lo, hi) = quadratic_bernstein_extrema(k0, kmid, k2);
+    lo.abs().max(hi.abs())
+}
+
+/// Certified bound (radians) on `max_u angle(ψ(u), Q̃′(u))` for a piece whose
+/// true derivative `B′(u)` factors as a **linear** direction carrier `ψ`
+/// times a vanishing scalar (an endpoint-stationary piece — see module
+/// docs): `ψ(u) = (1−u)·psi0 + u·psi1` against the emitted quadratic's linear
+/// derivative `(1−u)·te0 + u·te1`. `INFINITY` when certification degenerates.
+///
+/// This exists *in addition to* [`general_sin_bound`] because that generic
+/// formula's denominator floor, `min|Q̃′| − max|B′ − Q̃′|`, collapses whenever
+/// `B′` is genuinely zero at an endpoint (`d0` or `d2` `= (0, 0)`): the hull
+/// term there is as large as `Q̃′` itself, since there is nothing on the `B′`
+/// side to partially cancel it, so the bound can never certify — regardless
+/// of how well the piece actually converges. Dividing out the vanishing
+/// scalar factor first (leaving the well-behaved linear `ψ`) avoids that
+/// artifact entirely: `ψ × Q̃′` and `ψ · Q̃′` are quadratics in `u`, with exact
+/// extrema via [`quadratic_bernstein_extrema`], and the dot's positivity
+/// forces the angle below 90° so `asin` is valid.
+fn psi_error_bound(psi0: DVec2, psi1: DVec2, te0: DVec2, te1: DVec2) -> f64 {
+    let min_emitted_speed = min_segment_norm(te0, te1);
+    if min_emitted_speed == 0.0 {
+        return f64::INFINITY;
+    }
+    // A one-sided-zero ψ endpoint (e.g. p0 == c1 == c2: the derivative is
+    // 3u²·(p3 − c2), direction constant) collapses to a constant carrier.
     let (psi0, psi1) = match (psi0.is_zero(), psi1.is_zero()) {
         (true, true) => return f64::INFINITY,
         (true, false) => (psi1, psi1),
@@ -460,7 +588,7 @@ fn psi_error_bound(
     if min_psi == 0.0 {
         return f64::INFINITY;
     }
-    let dot_min = quadratic_bernstein_min(
+    let (dot_min, _) = quadratic_bernstein_extrema(
         dot(psi0, te0),
         0.5 * (dot(psi0, te1) + dot(psi1, te0)),
         dot(psi1, te1),
@@ -476,76 +604,45 @@ fn psi_error_bound(
     asin_or_infinity(cross_max / (min_psi * min_emitted_speed))
 }
 
-/// Estimated sine of the tangent-direction jitter that `f32` coordinate
-/// quantization imposes on this piece: one ULP of perpendicular-axis rounding
-/// against the piece's own hull extent. Used as the fail-fast precision floor
-/// — subdividing shrinks extents while coordinate ULPs stay fixed, so once
-/// quantization alone out-jitters the tolerance, no descendant's emitted
-/// quadratic can carry a certifiable direction. Deliberately independent of
-/// the current candidate quadratic's speed (a geometrically degenerate
-/// candidate must split, not bail; see the call site).
-fn f32_noise_floor_sin(p0: DVec2, c1: DVec2, c2: DVec2, p3: DVec2) -> f64 {
-    let xs = [p0.x, c1.x, c2.x, p3.x];
-    let ys = [p0.y, c1.y, c2.y, p3.y];
-    let spread = |v: &[f64; 4]| {
-        v.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-            - v.iter().cloned().fold(f64::INFINITY, f64::min)
-    };
-    let (ex, ey) = (spread(&xs), spread(&ys));
-    let den = ex * ex + ey * ey;
-    if den == 0.0 {
-        // A point piece: no direction at all.
-        return f64::INFINITY;
+/// Certified bound (radians) for an endpoint-stationary piece's chord-midpoint
+/// candidate (see module docs and [`psi_error_bound`]): factors out the
+/// vanishing derivative scalar at the stationary endpoint(s) and bounds the
+/// remaining linear direction carrier `ψ`.
+#[allow(clippy::too_many_arguments)]
+fn stationary_sin_bound(
+    c1: DVec2,
+    p0: DVec2,
+    c2: DVec2,
+    p3: DVec2,
+    start_stationary: bool,
+    end_stationary: bool,
+    te0: DVec2,
+    te1: DVec2,
+) -> f64 {
+    match (start_stationary, end_stationary) {
+        (true, false) => {
+            // B′(u) = u·ψ(u), ψ(u) = 6(1−u)(c2 − c1) + 3u(p3 − c2).
+            psi_error_bound(scale(sub(c2, c1), 6.0), scale(sub(p3, c2), 3.0), te0, te1)
+        }
+        (false, true) => {
+            // B′(u) = (1−u)·ψ(u), ψ(u) = 3(1−u)(c1 − p0) + 6u(c2 − c1).
+            psi_error_bound(scale(sub(c1, p0), 3.0), scale(sub(c2, c1), 6.0), te0, te1)
+        }
+        (true, true) => {
+            // B′(u) = 6(1−u)u·(c2 − c1): constant direction (a straight,
+            // doubly-stationary parameterisation). Zero direction means a
+            // point piece, uncertifiable.
+            let dir = sub(c2, c1);
+            if dir.is_zero() {
+                f64::INFINITY
+            } else {
+                psi_error_bound(dir, dir, te0, te1)
+            }
+        }
+        (false, false) => {
+            unreachable!("stationary_sin_bound requires at least one stationary endpoint")
+        }
     }
-    // Per-axis quantization scale: one f32 ULP at the coordinate magnitude
-    // (≈ |coord|·2⁻²³; exact-zero coordinates round exactly).
-    let mag = |v: &[f64; 4]| v.iter().fold(0.0_f64, |m, c| m.max(c.abs()));
-    let ux = mag(&xs) * (f64::from(f32::EPSILON) * 0.5);
-    let uy = mag(&ys) * (f64::from(f32::EPSILON) * 0.5);
-    // Tangent vectors live at the piece-extent scale (ex, ey); perpendicular
-    // quantization jitter of one axis against the other axis's extent gives
-    // the direction noise: sin θ ≈ |jitter × dir| / |dir|².
-    (ux * ey).max(uy * ex) / den
-}
-
-/// Exact extrema of the scalar quadratic in Bernstein form
-/// `p(u) = (1−u)²·k0 + 2u(1−u)·kmid + u²·k2` over `u ∈ [0, 1]`: the extreme
-/// values sit at the endpoints or the single interior vertex. Exact evaluation
-/// matters — the coefficient-hull bound is too loose here, because `kmid`
-/// often carries a cancellation the polynomial itself performs (e.g. the
-/// `ψ × Q̃′` cross of an endpoint-stationary piece, where the hull bound stops
-/// shrinking under subdivision but the true maximum keeps converging).
-fn quadratic_bernstein_eval(k0: f64, kmid: f64, k2: f64, u: f64) -> f64 {
-    let mu = 1.0 - u;
-    mu * mu * k0 + 2.0 * u * mu * kmid + u * u * k2
-}
-
-fn quadratic_bernstein_vertex(k0: f64, kmid: f64, k2: f64) -> Option<f64> {
-    // p′(u) = 2·[(kmid − k0) + (k0 − 2·kmid + k2)·u]
-    let a = k0 - 2.0 * kmid + k2;
-    if a == 0.0 {
-        return None;
-    }
-    let u = (k0 - kmid) / a;
-    (u > 0.0 && u < 1.0).then_some(u)
-}
-
-/// Maximum of `|p(u)|` over `[0, 1]` (see [`quadratic_bernstein_eval`]).
-fn quadratic_bernstein_abs_max(k0: f64, kmid: f64, k2: f64) -> f64 {
-    let mut m = k0.abs().max(k2.abs());
-    if let Some(u) = quadratic_bernstein_vertex(k0, kmid, k2) {
-        m = m.max(quadratic_bernstein_eval(k0, kmid, k2, u).abs());
-    }
-    m
-}
-
-/// Minimum of `p(u)` over `[0, 1]` (see [`quadratic_bernstein_eval`]).
-fn quadratic_bernstein_min(k0: f64, kmid: f64, k2: f64) -> f64 {
-    let mut m = k0.min(k2);
-    if let Some(u) = quadratic_bernstein_vertex(k0, kmid, k2) {
-        m = m.min(quadratic_bernstein_eval(k0, kmid, k2, u));
-    }
-    m
 }
 
 fn asin_or_infinity(sin_bound: f64) -> f64 {
@@ -852,6 +949,30 @@ mod tests {
         );
     }
 
+    /// Regression for the Codex round-5 finding: the (now-removed) noise-floor
+    /// pre-check heuristic over-rejected this ordinary, well-resolved cubic —
+    /// coordinates near 1000, an unremarkable scale — declaring
+    /// `PrecisionUnderflow` even though recursive dyadic subdivision produces
+    /// a certified 11-piece `f32` chain (worst error ~0.958°). Subdivision
+    /// must now succeed, and the emitted f32 chain must pass 1° under dense
+    /// sampling.
+    #[test]
+    fn codex_r5_normal_scale_cubic_certifies_not_underflow() {
+        let (p0, c1, c2, p3) = (
+            Vec2::new(999.65, 1000.0),
+            Vec2::new(999.4, 999.1),
+            Vec2::new(999.95, 999.65),
+            Vec2::new(999.25, 1000.55),
+        );
+        let worst = worst_emitted_chain_error(p0, c1, c2, p3, 200);
+        assert!(
+            worst <= 1.0_f64.to_radians() + 1e-3,
+            "worst angular error {} rad ({}°) exceeds 1°",
+            worst,
+            worst.to_degrees()
+        );
+    }
+
     /// Sibling of the round-4 case: end-stationary (`c2 == p3`). Same
     /// acceptance — no panic, no error, emitted f32 chain within 1°.
     #[test]
@@ -933,6 +1054,68 @@ mod tests {
                     worst,
                     worst.to_degrees()
                 );
+            }
+        }
+    }
+
+    /// Regression for the Codex round-5 completeness finding: at ordinary
+    /// scales (1e0 to 1e4, where the round-5 reproducer itself sits), no
+    /// well-scaled cubic should ever hit `PrecisionUnderflow` — that error is
+    /// reserved for genuine `f32`-resolution limits (round-2's pseudo-cusp),
+    /// not routine subdivision. 100 deterministic pseudo-random cubics swept
+    /// across four scales must all subdivide successfully with an emitted f32
+    /// chain inside the 1° bound.
+    #[test]
+    fn ordinary_scale_cubics_never_underflow() {
+        let mut state = 0x1379_u64;
+        let mut next_coord = move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            #[allow(clippy::cast_precision_loss)]
+            let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
+            (unit * 2.0 - 1.0) as f32
+        };
+        let mut bases = Vec::new();
+        for _ in 0..100 {
+            bases.push((
+                Vec2::new(next_coord(), next_coord()),
+                Vec2::new(next_coord(), next_coord()),
+                Vec2::new(next_coord(), next_coord()),
+                Vec2::new(next_coord(), next_coord()),
+            ));
+        }
+        let one_degree = 1.0_f64.to_radians();
+        for &(p0, c1, c2, p3) in &bases {
+            for &s in &[1.0_f32, 1e1, 1e2, 1e4] {
+                let sc = |p: Vec2| Vec2::new(p.x * s, p.y * s);
+                let (sp0, sc1, sc2, sp3) = (sc(p0), sc(c1), sc(c2), sc(p3));
+                match subdivide_pieces(sp0, sc1, sc2, sp3) {
+                    Ok(_) => {
+                        let worst = worst_emitted_chain_error(sp0, sc1, sc2, sp3, 40);
+                        assert!(
+                            worst <= one_degree + 1e-3,
+                            "cubic {:?} scale {} worst angular error {} rad ({}°) exceeds 1°",
+                            (p0, c1, c2, p3),
+                            s,
+                            worst,
+                            worst.to_degrees()
+                        );
+                    }
+                    Err(SubdivisionError::DegenerateInput) => {
+                        // Astronomically unlikely with this generator, but not
+                        // a violation of this test's claim (no direction to
+                        // certify in the first place).
+                    }
+                    Err(e @ SubdivisionError::PrecisionUnderflow) => {
+                        panic!(
+                            "ordinary-scale cubic {:?} at scale {} spuriously hit {:?}",
+                            (p0, c1, c2, p3),
+                            s,
+                            e
+                        );
+                    }
+                }
             }
         }
     }
