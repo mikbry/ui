@@ -251,6 +251,23 @@ jobs:
     # Path-gated (#151, Win 2): the two Lavapipe GPU lanes (~10-15 min each) are
     # the largest Linux runtime consumers and have no bearing on a docs-only
     # change, so they skip when `changes` reports no code paths touched.
+    #
+    # Vulkan Validation Layers (VVL, #153). PR #149 shipped with 29 green CI
+    # checks and immediately panicked on macOS Metal at first UI draw — this
+    # job's Lavapipe adapter negotiated a wgpu bind-group/layout mismatch
+    # without complaint because the loader had no validation layer manifest
+    # installed, only the bare Lavapipe ICD. `wgpu` requests
+    # `VK_LAYER_KHRONOS_validation` by default on debug builds (the profile
+    # `cargo test` uses) via `InstanceFlags::VALIDATION`, but a missing layer
+    # manifest makes that request a silent no-op — the instance is created
+    # without it and no diagnostic is raised. Installing
+    # `vulkan-validation-layers` supplies the manifest so that existing
+    # request actually resolves; the env vars below are redundant reinforcement
+    # for older/newer loader versions that key off them instead of (or in
+    # addition to) the debug-build default. The "confirm active" step below is
+    # the actual gate: if the layer manifest ever goes missing again (e.g. a
+    # future Ubuntu image swap), this job fails loudly on the log-grep instead
+    # of quietly losing VVL coverage again.
     name: gpu-offscreen
     needs: changes
     if: needs.changes.outputs.code != 'false'
@@ -258,10 +275,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Mesa/Lavapipe Vulkan ICD
+      - name: Install Mesa/Lavapipe Vulkan ICD + Vulkan Validation Layers (#153)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validation-layers
           # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so
           # the adapter is deterministically Vulkan + CPU regardless of runner
           # GPU. The exact filename varies by Mesa version, so discover it
@@ -278,6 +295,60 @@ jobs:
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           # Diagnostic: confirm the loader sees the Lavapipe adapter.
           VK_ICD_FILENAMES="$icd" vulkaninfo --summary || true
+      - name: Enable Vulkan validation layers + confirm active (#153)
+        run: |
+          set -euo pipefail
+          layer_dir="/usr/share/vulkan/explicit_layer.d"
+          echo "Explicit layer manifests in $layer_dir:"
+          ls -la "$layer_dir" || true
+          if [ ! -d "$layer_dir" ] || [ -z "$(ls -A "$layer_dir" 2>/dev/null)" ]; then
+            echo "::error::$layer_dir is missing or empty after installing vulkan-validation-layers — VVL cannot activate (#153)"
+            exit 1
+          fi
+          # Both `VK_INSTANCE_LAYERS` (classic loader knob) and
+          # `VK_LOADER_LAYERS_ENABLE` (newer glob-based loader knob) are set so
+          # the layer activates regardless of which the runner's loader
+          # version honors; harmless if only one is recognized.
+          {
+            echo "VK_LAYER_PATH=$layer_dir"
+            echo "VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation"
+            echo "VK_LOADER_LAYERS_ENABLE=*validation*"
+          } >> "$GITHUB_ENV"
+          # `VK_LOADER_DEBUG=layer` makes the Vulkan loader trace layer
+          # discovery/insertion to stderr so we can grep for confirmation the
+          # layer actually activated, not just that we asked for it. This is
+          # the load-bearing check (not `|| true`) — if the layer manifest is
+          # ever missing again, this step fails the job instead of letting the
+          # gap reopen silently.
+          #
+          # Per the Vulkan spec, `vkCreateInstance` MUST return
+          # `VK_ERROR_LAYER_NOT_PRESENT` if a loader-env-requested layer can't
+          # be found, so a missing manifest should already make `vulkaninfo`
+          # itself fail non-zero — checked explicitly below rather than via
+          # `set -e` so the diagnostic is clear either way. On top of that,
+          # the trace is checked for both an explicit failure phrase (so a
+          # loader version that logs-and-continues instead of hard-failing
+          # can't slip past a bare substring match on the layer's own name —
+          # that name legitimately appears in "not found" messages too) and
+          # an affirmative insertion/loading phrase.
+          set +e
+          out="$(VK_LAYER_PATH="$layer_dir" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VK_LOADER_LAYERS_ENABLE='*validation*' VK_LOADER_DEBUG=layer vulkaninfo --summary 2>&1)"
+          status=$?
+          set -e
+          echo "$out"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::vulkaninfo exited $status with VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation set — the loader could not activate the layer (missing manifest?) (#153)"
+            exit 1
+          fi
+          if printf '%s' "$out" | grep -Eiq 'not (found|present)|unable to (find|activate)|cannot activate|layer_not_present'; then
+            echo "::error::Vulkan loader trace reports the validation layer could not be found/activated (#153)"
+            exit 1
+          fi
+          if ! printf '%s' "$out" | grep -Eiq '(insert|load(ing)?)[^\n]*(instance )?layer[^\n]*khronos_validation|khronos_validation[^\n]*(insert|load)'; then
+            echo "::error::No affirmative Vulkan loader trace showing VK_LAYER_KHRONOS_validation was inserted/loaded — validation layers are not confirmed active (#153). gpu-offscreen would silently lose VVL coverage."
+            exit 1
+          fi
+          echo "Confirmed: VK_LAYER_KHRONOS_validation is active for gpu-offscreen (vulkaninfo instance)."
       - uses: actions/cache@v4
         with:
           path: |
@@ -288,11 +359,25 @@ jobs:
           key: ${{ runner.os }}-cargo-gpu-offscreen-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-gpu-offscreen-
-      - run: cargo test -p mkui-wgpu --features gpu-tests --locked
+      # `RUST_LOG=wgpu_hal=debug,wgpu_core=info` + `--nocapture` (#153): the
+      # "confirm active" step above only proves `vulkaninfo`'s own instance
+      # sees the layer, not that *this* process's wgpu instance requested it.
+      # wgpu-hal logs its enabled Vulkan instance layers at debug level on
+      # instance creation; `--nocapture` forces that (and the harness's own
+      # `eprintln!` adapter diagnostics) into the job log even on a passing
+      # run, so acceptance criterion #3 ("confirm via wgpu's init log") is
+      # actually checkable by grepping this step's CI output afterward.
+      - name: Run gpu-tests (#106) with wgpu-hal instance-layer logging
+        env:
+          RUST_LOG: wgpu_hal=debug,wgpu_core=info
+        run: cargo test -p mkui-wgpu --features gpu-tests --locked -- --nocapture
       # Slug lane GPU acceptance tests (#66) — hand-authored curve/band records
       # rendered through the same Vulkan/Lavapipe contract. Needs both the #106
       # harness (`gpu-tests`) and the adapter (`slug`).
-      - run: cargo test -p mkui-wgpu --features "gpu-tests,slug" --locked
+      - name: Run gpu-tests,slug (#66) with wgpu-hal instance-layer logging
+        env:
+          RUST_LOG: wgpu_hal=debug,wgpu_core=info
+        run: cargo test -p mkui-wgpu --features "gpu-tests,slug" --locked -- --nocapture
 
   feature-slug:
     # Package-aware rows for the #66 Slug lane (extends the #105 matrix): the
