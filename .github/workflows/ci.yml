@@ -278,7 +278,20 @@ jobs:
       - name: Install Mesa/Lavapipe Vulkan ICD + Vulkan Validation Layers (#153)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools vulkan-validation-layers
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers vulkan-tools
+          # Vulkan validation layers package name varies across Ubuntu:
+          #   * 22.04 jammy — `vulkan-validationlayers` (Debian one-word style)
+          #   * 24.04 noble — same one-word `vulkan-validationlayers`
+          #   * older releases — hyphenated `vulkan-validation-layers`
+          # Try the modern name first, fall back to the legacy hyphenated name,
+          # fail loud if neither is present (silent skip would defeat the whole
+          # point of #153).
+          if ! sudo apt-get install -y --no-install-recommends vulkan-validationlayers; then
+            if ! sudo apt-get install -y --no-install-recommends vulkan-validation-layers; then
+              echo "::error::Neither vulkan-validationlayers nor vulkan-validation-layers is available in this apt sources — cannot enable VVL (#153)"
+              exit 1
+            fi
+          fi
           # Pin the Vulkan loader to Mesa's Lavapipe (llvmpipe) software ICD so
           # the adapter is deterministically Vulkan + CPU regardless of runner
           # GPU. The exact filename varies by Mesa version, so discover it
