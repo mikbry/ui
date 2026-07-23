@@ -18,6 +18,26 @@ breaking changes can land on minor bumps).
   change.
 
 ### Tooling
+- **Vulkan Validation Layers on the Lavapipe `gpu-offscreen` job (#153).**
+  PR #149 (gamma-correct alpha blending) shipped with 29 green CI checks and
+  immediately panicked on macOS Metal at first UI draw; it was reverted at
+  `f8da740`. Root cause: the `gpu-offscreen` job's Lavapipe adapter had no
+  Vulkan validation layer manifest installed, so a `wgpu` bind-group/layout
+  mismatch that Metal rejected at runtime was negotiated without complaint in
+  CI. `.github/workflows/ci.yml` now installs `vulkan-validation-layers`
+  alongside the Mesa/Lavapipe ICD and adds a load-bearing (non-`|| true`)
+  log-grep step that fails the job if `VK_LAYER_KHRONOS_validation` is not
+  confirmed active in the Vulkan loader trace, so this gap cannot silently
+  reopen. `crates/mkui-wgpu/src/render/vvl_regression.rs` adds a companion
+  regression test (`gpu-tests` feature, Lavapipe-only) that binds an
+  undersized uniform buffer and asserts `wgpu` raises a validation error —
+  documented as testing `wgpu-core`'s own always-on validation rather than
+  VVL specifically (VVL enforces a different, Vulkan-driver-specific class of
+  check that this CPU-side test cannot exercise); the CI log-grep step is the
+  actual VVL-active sentinel. **Known limitation:** neither mechanism
+  reproduces Metal-only validation behavior — this closes the "CI ran a real
+  Vulkan pipeline with no validation enforcement at all" gap, not every class
+  of backend-specific bug #149 could have hit.
 - **CI cost reduction — fail-fast + path-gated code jobs + `[skip ci]`
   discipline (#151).** GitHub Actions billing hit ~$14 over three days of the
   Sprint 7 tail; at Sprint 8 pace an unchanged pipeline projected to $50–100.
