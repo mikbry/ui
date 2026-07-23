@@ -49,6 +49,23 @@ review feedback, include this instruction verbatim:
 Never `[skip ci]` a push you intend to merge from — a merge must always be
 gated by a green run of the full matrix against the exact merged state.
 
+## Vulkan Validation Layers on `gpu-offscreen` (#153)
+
+The `gpu-offscreen` job installs `vulkan-validation-layers` alongside the
+Mesa/Lavapipe ICD and confirms `VK_LAYER_KHRONOS_validation` is actually
+active via a log-grep step (not `|| true` — a missing layer manifest fails
+the job). This closes a real gap: PR #149 shipped with 29 green CI checks and
+immediately panicked on macOS Metal at first draw, because the Lavapipe job
+had no validation layer manifest installed and negotiated the bad
+bind-group/layout state without complaint.
+
+**Do not strip this** thinking it's unused or redundant with `wgpu-core`'s own
+validation — Metal, DX12, and other backends can reject state that Lavapipe's
+software rasterizer accepts silently; VVL is the closest CI proxy to that
+class of backend-specific enforcement. If the "confirm active" step ever
+starts failing on a fresh Ubuntu runner image, fix the package/env names —
+don't delete the step.
+
 ### Anti-patterns (do not do these to "save CI")
 
 - **Don't** downgrade macOS runners to `macOS-standard` (2× the 3-core cost).

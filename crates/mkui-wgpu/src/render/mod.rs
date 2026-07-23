@@ -104,6 +104,13 @@ mod slug_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod sfnt_slug_gpu;
 
+/// Validation-enforcement regression guard (#153). A deliberate bind-group
+/// buffer-size mismatch run through #106's harness — the CI gap-fix that
+/// followed the #149 revert (`f8da740`). See the module docs for exactly what
+/// this does and does not prove.
+#[cfg(all(test, feature = "gpu-tests"))]
+mod vvl_regression;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
