@@ -111,6 +111,14 @@ mod sfnt_slug_gpu;
 #[cfg(all(test, feature = "gpu-tests"))]
 mod vvl_regression;
 
+/// Linear-space blending GPU acceptance tests (#135). Render the real UI
+/// pipeline into the linear intermediate format on #106's Lavapipe harness and
+/// read back raw bytes to prove authored colors are linearized and alpha
+/// blending composites in linear light. Gated on `gpu-tests` only (no font /
+/// Slug dependency).
+#[cfg(all(test, feature = "gpu-tests"))]
+mod linear_blend_gpu;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
@@ -127,6 +135,17 @@ mod vvl_regression;
 /// `msaa_color_view` attachment) is retained but dormant so the follow-up
 /// can re-enable it with correct sRGB orchestration — see #95.
 const MSAA_SAMPLE_COUNT_PREF: u32 = 1;
+
+/// Linear-space intermediate color format. Every lane (UI triangles, bitmap
+/// text, Slug curves) renders into a texture of this format, so alpha blending
+/// composites in physically-correct linear light; a final [present pass](present.wgsl)
+/// encodes it to the (usually sRGB) surface. `Rgba8Unorm` is a plain linear
+/// UNORM — no hardware sRGB encode on write — and matches the offscreen
+/// harness `offscreen::TARGET_FORMAT` so windowed and headless paths blend
+/// identically. See ADR 0006 §"Color space + blending". MSAA (when #134
+/// re-enables it) resolves into this same linear target; the sRGB encode stays
+/// isolated in the present pass.
+const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Outcome of a single `Renderer::render` call. Mirrors the upstream
 /// reference's contract so the event-loop shell knows when to reconfigure
@@ -160,10 +179,30 @@ pub struct Renderer {
     /// don't support 4× MSAA on the chosen swapchain color format.
     sample_count: u32,
     ui_pipeline: wgpu::RenderPipeline,
+    /// Linear-space intermediate color target ([`INTERMEDIATE_FORMAT`]) every
+    /// lane composites into. Recreated on resize. The present pass samples it
+    /// and encodes to the surface.
+    intermediate_view: wgpu::TextureView,
+    /// Full-screen pass that reads [`Self::intermediate_view`] and writes the
+    /// surface, applying the linear→sRGB encode when the surface is UNORM.
+    present_pipeline: wgpu::RenderPipeline,
+    /// Layout for the present bind group (intermediate texture + sampler +
+    /// encode-flag uniform). Held so the bind group can be rebuilt on resize.
+    present_bind_group_layout: wgpu::BindGroupLayout,
+    /// Sampler for the 1:1 intermediate→surface blit. Nearest/clamp — the blit
+    /// is size-matched so no filtering is required.
+    present_sampler: wgpu::Sampler,
+    /// Uniform carrying the present pass's `encode_srgb` flag (`1` when the
+    /// surface is UNORM and the shader must apply the OETF; `0` when the sRGB
+    /// surface encodes on write). Fixed for the surface's lifetime.
+    present_flags_buffer: wgpu::Buffer,
+    /// Present bind group binding the current [`Self::intermediate_view`].
+    /// Rebuilt whenever the intermediate view is recreated (resize).
+    present_bind_group: wgpu::BindGroup,
     /// Multisampled color attachment the UI pass renders into when
-    /// `sample_count > 1`. Resolves into the swapchain texture at end-of-
-    /// pass. `None` on the 1× fallback, where the UI pass writes the
-    /// swapchain view directly.
+    /// `sample_count > 1`. Resolves into the **linear intermediate** target at
+    /// end-of-pass. `None` on the 1× fallback, where the UI pass writes the
+    /// intermediate view directly.
     msaa_color_view: Option<wgpu::TextureView>,
     /// Native Slug glyph adapter (#66), present only when the `slug` feature is
     /// enabled. Built once against the swapchain format; invoked inside the UI
@@ -243,14 +282,32 @@ impl Renderer {
         #[cfg(target_os = "macos")]
         enable_presents_with_transaction(&surface);
 
-        let color_flags = adapter.get_texture_format_features(format).flags;
+        // The MSAA probe runs against the linear intermediate format the UI
+        // pass actually renders into, not the swapchain format.
+        let color_flags = adapter
+            .get_texture_format_features(INTERMEDIATE_FORMAT)
+            .flags;
         let sample_count = pick_sample_count(color_flags, MSAA_SAMPLE_COUNT_PREF);
 
-        let ui_pipeline = build_ui_pipeline(&device, format, sample_count);
-        let msaa_color_view = create_msaa_color_view(&device, width, height, format, sample_count);
+        // UI + Slug lanes target the linear intermediate; the surface format is
+        // only seen by the present pass.
+        let ui_pipeline = build_ui_pipeline(&device, INTERMEDIATE_FORMAT, sample_count);
+        let intermediate_view = create_intermediate_view(&device, width, height);
+        let msaa_color_view = create_msaa_color_view(&device, width, height, sample_count);
+
+        let (present_pipeline, present_bind_group_layout) = build_present_pipeline(&device, format);
+        let present_sampler = create_present_sampler(&device);
+        let present_flags_buffer = create_present_flags_buffer(&device, format.is_srgb());
+        let present_bind_group = create_present_bind_group(
+            &device,
+            &present_bind_group_layout,
+            &intermediate_view,
+            &present_sampler,
+            &present_flags_buffer,
+        );
 
         #[cfg(feature = "slug")]
-        let slug_adapter = SlugAdapter::new(&device, format);
+        let slug_adapter = SlugAdapter::new(&device, INTERMEDIATE_FORMAT);
 
         Ok(Self {
             _window: window,
@@ -260,6 +317,12 @@ impl Renderer {
             config,
             sample_count,
             ui_pipeline,
+            intermediate_view,
+            present_pipeline,
+            present_bind_group_layout,
+            present_sampler,
+            present_flags_buffer,
+            present_bind_group,
             msaa_color_view,
             #[cfg(feature = "slug")]
             slug_adapter,
@@ -287,12 +350,17 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.msaa_color_view = create_msaa_color_view(
+        self.intermediate_view = create_intermediate_view(&self.device, width, height);
+        self.msaa_color_view =
+            create_msaa_color_view(&self.device, width, height, self.sample_count);
+        // The present bind group references the intermediate view by handle, so
+        // it must be rebuilt whenever that view is recreated.
+        self.present_bind_group = create_present_bind_group(
             &self.device,
-            width,
-            height,
-            self.config.format,
-            self.sample_count,
+            &self.present_bind_group_layout,
+            &self.intermediate_view,
+            &self.present_sampler,
+            &self.present_flags_buffer,
         );
     }
 
@@ -317,8 +385,11 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let target_is_srgb = self.config.format.is_srgb();
-        let clear = clear_color(target_is_srgb);
+        // The UI pass now clears + composites into the linear intermediate, so
+        // the authored backdrop is linearized unconditionally (the target is
+        // always linear, never the sRGB surface). The present pass handles the
+        // sRGB encode.
+        let clear = clear_color();
 
         let mut encoder = self
             .device
@@ -345,12 +416,7 @@ impl Renderer {
         // buffer, or `None` when it yields no geometry.
         let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
             let triangles = tessellate_primitives(&scene.primitives[range], text_system);
-            let vertices = gui_vertices(
-                &triangles,
-                scene.viewport.width,
-                scene.viewport.height,
-                target_is_srgb,
-            );
+            let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
             if vertices.is_empty() {
                 return None;
             }
@@ -405,18 +471,24 @@ impl Renderer {
         }
 
         {
+            // UI/bitmap/Slug lanes composite into the linear intermediate. With
+            // MSAA active the multisampled attachment resolves into the linear
+            // intermediate (a correct linear→linear average); with MSAA off the
+            // pass writes the intermediate view directly. The sRGB encode is the
+            // separate present pass below — never here — so there is no
+            // double-encode (the Sprint 6 v0.9.1 bug, closed by construction).
             let color_attachment = match self.msaa_color_view.as_ref() {
                 Some(msaa) => wgpu::RenderPassColorAttachment {
                     view: msaa,
                     depth_slice: None,
-                    resolve_target: Some(&view),
+                    resolve_target: Some(&self.intermediate_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 },
                 None => wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.intermediate_view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -455,6 +527,34 @@ impl Renderer {
             }
         }
 
+        // Present pass: encode the linear intermediate to the surface. A single
+        // full-screen triangle samples the intermediate and (when the surface
+        // is UNORM) applies the linear→sRGB OETF; an sRGB surface encodes on
+        // write instead. The triangle covers every pixel, so the clear is only
+        // to keep the freshly-acquired surface texture defined for validation.
+        // See `present.wgsl` + ADR 0006 §"Color space + blending".
+        {
+            let mut present = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("mkui-wgpu Present Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            present.set_pipeline(&self.present_pipeline);
+            present.set_bind_group(0, &self.present_bind_group, &[]);
+            present.draw(0..3, 0..1);
+        }
+
         self.queue.submit(Some(encoder.finish()));
         drop(view);
         frame.present();
@@ -475,12 +575,27 @@ impl Renderer {
 /// flow through with no further renderer change. Glyphs are cloned (an
 /// `Arc<SlugGlyph>` clone is cheap) so the returned owned `Vec` can back a GPU
 /// upload outliving the borrowed scene.
+///
+/// The fill color is **linearized here**, at the render boundary, exactly as
+/// [`gui_vertices`] linearizes triangle colors — the Slug lane composites into
+/// the linear intermediate, so its authored sRGB-perceptual color must become
+/// linear before the coverage shader multiplies it by alpha. Before Sprint 8
+/// this lane skipped linearization (it drew straight into an sRGB surface),
+/// which composited Slug text in a different space than the UI lane. The
+/// size-independent blob (curves/bands) is untouched.
 #[cfg(feature = "slug")]
 fn scene_slug_glyphs(primitives: &[crate::Primitive]) -> Vec<PlacedSlugGlyph> {
     primitives
         .iter()
         .filter_map(|p| match p {
-            crate::Primitive::SlugGlyph(glyph) => Some(glyph.clone()),
+            crate::Primitive::SlugGlyph(glyph) => {
+                use crate::types::srgb_to_linear;
+                let [r, g, b, a] = glyph.color;
+                Some(PlacedSlugGlyph {
+                    color: [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), a],
+                    ..glyph.clone()
+                })
+            }
             _ => None,
         })
         .collect()
@@ -627,11 +742,31 @@ fn build_ui_pipeline(
     })
 }
 
+/// Create the linear-space intermediate color target (`INTERMEDIATE_FORMAT`)
+/// every lane composites into. `RENDER_ATTACHMENT` so it can be drawn into and
+/// `TEXTURE_BINDING` so the present pass can sample it.
+fn create_intermediate_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mkui-wgpu Linear Intermediate"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: INTERMEDIATE_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 fn create_msaa_color_view(
     device: &wgpu::Device,
     width: u32,
     height: u32,
-    format: wgpu::TextureFormat,
     sample_count: u32,
 ) -> Option<wgpu::TextureView> {
     if sample_count <= 1 {
@@ -647,11 +782,155 @@ fn create_msaa_color_view(
         mip_level_count: 1,
         sample_count,
         dimension: wgpu::TextureDimension::D2,
-        format,
+        // The multisampled attachment resolves into the linear intermediate, so
+        // it carries the same linear format.
+        format: INTERMEDIATE_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
     Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+}
+
+/// Build the present pipeline (`present.wgsl`) that encodes the linear
+/// intermediate onto the surface, returning it with its bind-group layout
+/// (intermediate texture + sampler + `encode_srgb` uniform). The pass is always
+/// single-sampled — MSAA lives in the intermediate, already resolved by the
+/// time the present pass runs.
+fn build_present_pipeline(
+    device: &wgpu::Device,
+    surface_format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("mkui-wgpu Present Shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("present.wgsl").into()),
+    });
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mkui-wgpu Present Bind Group Layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("mkui-wgpu Present Pipeline Layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let targets = [Some(wgpu::ColorTargetState {
+        format: surface_format,
+        // Opaque overwrite — the present pass fully replaces the surface.
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    })];
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("mkui-wgpu Present Pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_present"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        },
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_present"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, bind_group_layout)
+}
+
+fn create_present_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("mkui-wgpu Present Sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        // 1:1 size-matched blit — nearest is exact and needs no filtering.
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
+/// The present pass encode flag as a 16-byte uniform (`encode_srgb: u32` +
+/// three `u32` pad fields, matching `present.wgsl`'s `PresentFlags`). `1` when
+/// the surface is a plain UNORM format and the shader must apply the sRGB
+/// OETF; `0` when the surface is sRGB and encodes on write. Split out from
+/// [`create_present_flags_buffer`] so `present_flags_uniform_size_matches_wgsl_layout`
+/// can check its byte length without a `wgpu::Device`.
+fn present_flags_bytes(surface_is_srgb: bool) -> [u32; 4] {
+    let encode_srgb: u32 = if surface_is_srgb { 0 } else { 1 };
+    [encode_srgb, 0, 0, 0]
+}
+
+/// Fixed for the surface's lifetime. See [`present_flags_bytes`] for the
+/// uniform's layout contract.
+fn create_present_flags_buffer(device: &wgpu::Device, surface_is_srgb: bool) -> wgpu::Buffer {
+    let data = present_flags_bytes(surface_is_srgb);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("mkui-wgpu Present Flags"),
+        contents: bytemuck::cast_slice(&data),
+        usage: wgpu::BufferUsages::UNIFORM,
+    })
+}
+
+fn create_present_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    intermediate_view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    flags_buffer: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mkui-wgpu Present Bind Group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(intermediate_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: flags_buffer.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 #[repr(C)]
@@ -674,28 +953,19 @@ impl Vertex {
     }
 }
 
-/// Map `Scene`'s pixel-space triangles into NDC, linearizing the per-vertex
-/// authored sRGB color when the swapchain expects linear values.
-fn gui_vertices(
-    triangles: &[GuiTriangle],
-    width: f32,
-    height: f32,
-    target_is_srgb: bool,
-) -> Vec<Vertex> {
+/// Map `Scene`'s pixel-space triangles into NDC, linearizing each authored
+/// sRGB-perceptual color to the linear space the intermediate framebuffer
+/// composites in. Linearization is now unconditional — the render target is
+/// always the linear intermediate ([`INTERMEDIATE_FORMAT`]), never the sRGB
+/// surface — so there is no longer a target-format branch. See
+/// [`Color::to_linear_rgba`](crate::types::Color::to_linear_rgba).
+fn gui_vertices(triangles: &[GuiTriangle], width: f32, height: f32) -> Vec<Vertex> {
     let width = width.max(1.0);
     let height = height.max(1.0);
     triangles
         .iter()
         .flat_map(|triangle| {
-            let color = authored_rgba_to_target(
-                [
-                    triangle.color.r,
-                    triangle.color.g,
-                    triangle.color.b,
-                    triangle.color.a,
-                ],
-                target_is_srgb,
-            );
+            let color = triangle.color.to_linear_rgba();
             triangle.points.into_iter().map(move |point| Vertex {
                 position: [
                     (point.x / width) * 2.0 - 1.0,
@@ -708,34 +978,16 @@ fn gui_vertices(
         .collect()
 }
 
-fn clear_color(target_is_srgb: bool) -> wgpu::Color {
-    let [r, g, b, a] = authored_rgba_to_target([0.09, 0.08, 0.07, 1.0], target_is_srgb);
+/// The authored backdrop color, linearized for the linear intermediate. Kept
+/// as an `sRGB` literal (a designer-picked dark warm gray) and converted once
+/// here — the present pass re-encodes it to the surface.
+fn clear_color() -> wgpu::Color {
+    let [r, g, b, a] = crate::types::Color::from_srgb(0.09, 0.08, 0.07).to_linear_rgba();
     wgpu::Color {
         r: r as f64,
         g: g as f64,
         b: b as f64,
         a: a as f64,
-    }
-}
-
-fn authored_rgba_to_target(color: [f32; 4], target_is_srgb: bool) -> [f32; 4] {
-    if !target_is_srgb {
-        return color;
-    }
-    [
-        srgb_to_linear(color[0]),
-        srgb_to_linear(color[1]),
-        srgb_to_linear(color[2]),
-        color[3],
-    ]
-}
-
-fn srgb_to_linear(component: f32) -> f32 {
-    let component = component.clamp(0.0, 1.0);
-    if component <= 0.04045 {
-        component / 12.92
-    } else {
-        ((component + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -760,10 +1012,9 @@ fn render_input_counts(
     text_system: &dyn TextSystem,
     width: f32,
     height: f32,
-    target_is_srgb: bool,
 ) -> RenderInputCounts {
     let triangles = crate::tessellate_scene_with_text(scene, text_system);
-    let vertices = gui_vertices(&triangles, width, height, target_is_srgb);
+    let vertices = gui_vertices(&triangles, width, height);
     RenderInputCounts {
         primitives: scene.primitives.len(),
         triangles: triangles.len(),
@@ -854,7 +1105,7 @@ mod tests {
             corner_radii: crate::CornerRadii::all(0.0),
             stroke: None,
         }));
-        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0, true);
+        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0);
         assert_eq!(counts.primitives, 1);
         assert_eq!(counts.triangles, 2, "one quad → two triangles");
         assert_eq!(counts.vertices, 6, "two triangles → six vertices");
@@ -863,7 +1114,7 @@ mod tests {
     #[test]
     fn render_input_counts_empty_scene_is_zero() {
         let scene = Scene::new(crate::Size::new(800.0, 600.0));
-        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0, true);
+        let counts = render_input_counts(&scene, &BitmapTextSystem::new(), 800.0, 600.0);
         assert_eq!(
             counts,
             RenderInputCounts {
@@ -909,7 +1160,7 @@ mod tests {
             ],
             color: crate::Color::rgba(1.0, 0.0, 0.0, 1.0),
         };
-        let vertices = gui_vertices(&[triangle], 100.0, 100.0, false);
+        let vertices = gui_vertices(&[triangle], 100.0, 100.0);
         assert_eq!(vertices.len(), 3);
         // (0, 0) → (-1, 1, 0); (100, 0) → (1, 1, 0); (0, 100) → (-1, -1, 0).
         assert_eq!(vertices[0].position, [-1.0, 1.0, 0.0]);
@@ -933,7 +1184,7 @@ mod tests {
             ],
             color: crate::Color::rgba(1.0, 1.0, 1.0, 1.0),
         };
-        let vertices = gui_vertices(&[triangle], 800.0, 600.0, false);
+        let vertices = gui_vertices(&[triangle], 800.0, 600.0);
         // x=200 in a 800-wide logical viewport → (200/800)*2 - 1 = -0.5,
         // independent of the physical surface size.
         assert!((vertices[0].position[0] - (-0.5)).abs() < f32::EPSILON);
@@ -952,7 +1203,7 @@ mod tests {
             ],
             color: crate::Color::rgba(0.5, 0.5, 0.5, 1.0),
         };
-        let vertices = gui_vertices(&[triangle], 0.0, 0.0, false);
+        let vertices = gui_vertices(&[triangle], 0.0, 0.0);
         for v in vertices {
             assert!(v.position[0].is_finite());
             assert!(v.position[1].is_finite());
@@ -962,6 +1213,7 @@ mod tests {
     #[test]
     fn srgb_to_linear_matches_reference_for_known_components() {
         // 0 and 1 are fixed points; 0.5 should be ~0.214 in linear space.
+        use crate::types::srgb_to_linear;
         assert!((srgb_to_linear(0.0)).abs() < f32::EPSILON);
         assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-6);
         let mid = srgb_to_linear(0.5);
@@ -969,9 +1221,105 @@ mod tests {
     }
 
     #[test]
-    fn authored_rgba_passthrough_when_target_is_linear() {
-        let color = [0.4, 0.6, 0.8, 0.5];
-        assert_eq!(authored_rgba_to_target(color, false), color);
+    fn gui_vertices_linearizes_authored_color_but_keeps_alpha() {
+        // The intermediate framebuffer is linear, so `gui_vertices` must
+        // linearize the authored sRGB color unconditionally (the old
+        // target-format branch is gone). A 50%-alpha mid-gray discriminates:
+        // sRGB-space blending (the pre-Sprint-8 bug) would leave 0.5 in the
+        // color channels; correct linearization yields ~0.214, alpha stays 0.5.
+        let triangle = GuiTriangle {
+            points: [
+                crate::Point::new(0.0, 0.0),
+                crate::Point::new(1.0, 0.0),
+                crate::Point::new(0.0, 1.0),
+            ],
+            color: crate::Color::from_srgb_a(0.5, 0.5, 0.5, 0.5),
+        };
+        let vertices = gui_vertices(&[triangle], 1.0, 1.0);
+        for v in &vertices {
+            assert!((v.color[0] - 0.21404114).abs() < 1e-5);
+            assert!((v.color[1] - 0.21404114).abs() < 1e-5);
+            assert!((v.color[2] - 0.21404114).abs() < 1e-5);
+            assert_eq!(v.color[3], 0.5, "alpha is a linear coverage weight");
+        }
+    }
+
+    #[test]
+    fn clear_color_is_linearized_backdrop() {
+        // The backdrop literal is authored in sRGB and linearized for the
+        // linear intermediate; the linear red channel must be below the
+        // authored 0.09 (sRGB compresses the dark end).
+        let clear = clear_color();
+        let expected = crate::types::srgb_to_linear(0.09) as f64;
+        assert!((clear.r - expected).abs() < 1e-6);
+        assert!(clear.r < 0.09, "linear value sits below the sRGB literal");
+        assert_eq!(clear.a, 1.0);
+    }
+
+    #[test]
+    fn present_wgsl_parses_and_validates() {
+        // Static naga validation catches a present-shader typo in the default
+        // `test` job rather than only on the windowed path (which no offscreen
+        // GPU test exercises, since the harness has no surface).
+        use wgpu::naga;
+        let module = naga::front::wgsl::parse_str(include_str!("present.wgsl"))
+            .expect("present WGSL must parse");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        );
+        validator
+            .validate(&module)
+            .expect("present WGSL must pass naga validation");
+    }
+
+    #[test]
+    fn present_flags_uniform_size_matches_wgsl_layout() {
+        // Regression guard for the reintroduced-#149 bind-group-0/binding-2
+        // panic on macOS Metal: "the buffer bound at binding index 2 is bound
+        // with size 16 where the shader expects 32". `present.wgsl`'s
+        // `PresentFlags` originally padded with a `vec3<u32>` field, which
+        // WGSL's host-shareable layout rules align to 16 bytes — pushing the
+        // whole struct to 32 bytes — while `present_flags_bytes` only ever
+        // wrote a flat 16-byte `[u32; 4]`. Neither side caught it: naga
+        // parses and validates the WGSL fine (it's legal WGSL), and the old
+        // Lavapipe CI job had no Vulkan Validation Layers to reject the
+        // mismatched bind group (that gap is now closed by #153/#154's
+        // `vvl_regression` test + CI log-grep).
+        //
+        // This test closes the same gap statically, without a `wgpu::Device`:
+        // it computes `PresentFlags`'s size via naga's own layout algorithm —
+        // the same rules `wgpu-core` enforces at bind-group-creation/draw
+        // time — and checks it against the actual bytes
+        // `present_flags_bytes`/`create_present_flags_buffer` upload.
+        use wgpu::naga;
+        let module = naga::front::wgsl::parse_str(include_str!("present.wgsl"))
+            .expect("present WGSL must parse");
+
+        let flags_handle = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("PresentFlags"))
+            .map(|(handle, _)| handle)
+            .expect("present.wgsl must declare a `PresentFlags` struct");
+
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("present.wgsl's types must have a valid host-shareable layout");
+        let wgsl_size = layouter[flags_handle].size as usize;
+
+        let cpu_size = std::mem::size_of_val(&present_flags_bytes(true));
+
+        assert_eq!(
+            cpu_size, wgsl_size,
+            "present.wgsl's `PresentFlags` struct is {wgsl_size} bytes under WGSL's \
+             host-shareable layout rules, but `present_flags_bytes` uploads {cpu_size} \
+             bytes — wgpu will reject (or, without validation, misread) the binding-2 \
+             uniform. Keep the CPU buffer and the WGSL struct's byte size in lock-step; \
+             watch for `vec3`/`vec2` padding fields, which align to 16 bytes and can \
+             silently grow the struct past a same-looking flat array on the CPU side."
+        );
     }
 
     #[test]
