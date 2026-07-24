@@ -15,8 +15,21 @@
 //!
 //! - [`path`] — a backend-neutral [`path::VectorPath`] of move/line/quadratic/
 //!   cubic/close commands plus fill, transform, and bounds. General icons,
-//!   strokes, and analytic primitives are *representable*; only the glyph lane
-//!   is implemented end-to-end in Sprint 7.
+//!   strokes, and analytic primitives are *representable*; the glyph lane
+//!   (Sprint 7) and the general Bézier lane (Sprint 8 §3.1 Wave 1) are both
+//!   implemented end-to-end.
+//! - [`stroke`] — the backend-neutral [`stroke::Stroke`] descriptor
+//!   ([`stroke::LineCap`], [`stroke::LineJoin`], [`stroke::DashPattern`]) held
+//!   alongside a [`path::VectorPath`]. A value-type descriptor only; stroke
+//!   expansion is a Sprint 9+ concern.
+//! - [`bezier`] — cubic→quadratic subdivision at a hard-coded
+//!   [`bezier::CUBIC_SUBDIVISION_TOLERANCE_DEG`] tolerance, so the general
+//!   encoder can lower arbitrary cubics for Slug (quadratic-only).
+//! - [`encode`] — the deterministic [`encode::encode_vector_path`] encoder for
+//!   *arbitrary* paths (cubics subdivided, bounds computed, NaN/Inf rejected)
+//!   plus its content-derived [`encode::VectorPathKey`] and
+//!   [`encode::VectorPathBlobCache`]. Emits the same [`slug::SlugGlyph`] record
+//!   contract as the glyph lane.
 //! - [`outline`] — the faithful 1:1 conversion of `mkui-text`'s resolved
 //!   [`GlyphOutline`] into a [`path::VectorPath`]
 //!   ([`outline::glyph_outline_to_path`]). Conversion never reapplies
@@ -56,16 +69,22 @@
 //! all in font units y-up — are the versioned contract. #66 may serialize and
 //! GPU-pack them but may not reimplement or reinterpret the band algorithm.
 //!
+pub mod bezier;
+pub mod encode;
 pub mod outline;
 pub mod path;
 pub mod slug;
+pub mod stroke;
 
+pub use bezier::{subdivide_cubic, SubdivisionError, CUBIC_SUBDIVISION_TOLERANCE_DEG};
+pub use encode::{encode_vector_path, VectorPathBlobCache, VectorPathEncodeError, VectorPathKey};
 pub use outline::glyph_outline_to_path;
 pub use path::{Affine2, Bounds, FillRule, PathCommand, Vec2, VectorPath};
 pub use slug::{
     encode_slug_glyph, BandRange, GlyphBounds, SlugBlobCache, SlugConfig, SlugCurve,
     SlugEncodeError, SlugGlyph, SlugGlyphKey,
 };
+pub use stroke::{DashPattern, LineCap, LineJoin, Stroke};
 
 // Re-export the `mkui-text`-owned identity + outline contract this crate keys
 // on and consumes, so downstream consumers need not also name `mkui-text` for

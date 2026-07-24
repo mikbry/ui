@@ -146,23 +146,23 @@ pub struct SlugCurve {
 }
 
 impl SlugCurve {
-    fn line(p0: Vec2, p2: Vec2) -> Self {
+    pub(crate) fn line(p0: Vec2, p2: Vec2) -> Self {
         // Duplicated-endpoint sentinel (control == terminal endpoint): the Slug
         // shader distinguishes a line from a real quadratic by `p1 == p2`.
         Self { p0, p1: p2, p2 }
     }
 
-    fn quad(p0: Vec2, p1: Vec2, p2: Vec2) -> Self {
+    pub(crate) fn quad(p0: Vec2, p1: Vec2, p2: Vec2) -> Self {
         Self { p0, p1, p2 }
     }
 
-    fn y_extent(&self) -> (f32, f32) {
+    pub(crate) fn y_extent(&self) -> (f32, f32) {
         let lo = self.p0.y.min(self.p1.y).min(self.p2.y);
         let hi = self.p0.y.max(self.p1.y).max(self.p2.y);
         (lo, hi)
     }
 
-    fn x_extent(&self) -> (f32, f32) {
+    pub(crate) fn x_extent(&self) -> (f32, f32) {
         let lo = self.p0.x.min(self.p1.x).min(self.p2.x);
         let hi = self.p0.x.max(self.p1.x).max(self.p2.x);
         (lo, hi)
@@ -171,13 +171,13 @@ impl SlugCurve {
     /// True maximum x-coordinate of the curve over `t ∈ [0, 1]` (the larger
     /// endpoint plus the interior critical point if one lies inside the span).
     /// This is the horizontal-band sort key the Slug contract requires.
-    fn curve_extrema_max_x(&self) -> f32 {
+    pub(crate) fn curve_extrema_max_x(&self) -> f32 {
         quadratic_extremum_max(self.p0.x, self.p1.x, self.p2.x)
     }
 
     /// True maximum y-coordinate of the curve over `t ∈ [0, 1]` — the
     /// vertical-band sort key the Slug contract requires.
-    fn curve_extrema_max_y(&self) -> f32 {
+    pub(crate) fn curve_extrema_max_y(&self) -> f32 {
         quadratic_extremum_max(self.p0.y, self.p1.y, self.p2.y)
     }
 }
@@ -394,7 +394,7 @@ const AXIS_PARALLEL_EPSILON: f32 = 1e-6;
 /// cross-axis curve extremum (max-x for horizontal rows, max-y for vertical
 /// columns) — with ascending curve index breaking ties, per the Slug
 /// scanline-rasterization invariant.
-fn build_bands(
+pub(crate) fn build_bands(
     curves: &[SlugCurve],
     lo: f32,
     hi: f32,
