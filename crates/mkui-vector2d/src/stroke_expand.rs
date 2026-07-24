@@ -185,10 +185,21 @@ fn flatten_contours(path: &VectorPath) -> Vec<Contour> {
                 to,
             } => {
                 seed(&mut cur, pen);
-                let mut seg_start = pen;
-                for (control, end) in subdivide_cubic(pen, control1, control2, to) {
-                    flatten_quad(&mut cur, seg_start, control, end);
-                    seg_start = end;
+                match subdivide_cubic(pen, control1, control2, to) {
+                    Ok(chain) => {
+                        let mut seg_start = pen;
+                        for (control, end) in chain {
+                            flatten_quad(&mut cur, seg_start, control, end);
+                            seg_start = end;
+                        }
+                    }
+                    Err(_) => {
+                        // Numerically-degenerate cubic (see #148 R5
+                        // `SubdivisionError::{PrecisionUnderflow, DegenerateInput}`):
+                        // fall back to the chord so the contour stays continuous
+                        // and downstream stroke expansion still produces geometry.
+                        push_point(&mut cur, to);
+                    }
                 }
                 pen = to;
             }
