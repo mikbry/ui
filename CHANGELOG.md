@@ -16,6 +16,39 @@ breaking changes can land on minor bumps).
   `mkui_core`), compile under `cargo test --doc -p mkui`, and cross-reference
   the relevant `mkui-core` component types. Documentation-only; no public API
   change.
+- **Gamma-correct alpha blending in linear color space (#135).** The wgpu
+  backend now renders every lane (UI triangles, bitmap text, Slug curves) into
+  a **linear-space intermediate framebuffer** (`Rgba8Unorm`) and encodes
+  linear→sRGB once, in a final full-screen present pass, at the surface
+  boundary. Alpha blending therefore composites in physically-correct linear
+  light. Previously the UI lane pre-linearized its vertex colors but the Slug
+  outline-text lane did not linearize its glyph color at all, so anti-aliased
+  edges composited in sRGB-encoded space and darkened — visible as the
+  "bitmap-enhanced" look on `examples/text --features slug`. `Color` is now
+  documented as an sRGB-perceptual value converted to linear exactly once at the
+  render boundary (`Color::to_linear_rgba`); `Color::from_srgb` /
+  `from_srgb_a` are added as intent-signalling constructors. A Lavapipe GPU
+  acceptance test reads back raw bytes proving an authored sRGB `0.5` gray
+  linearizes to byte ~55 (not the byte ~128 of the old pipeline). The Sprint 6
+  v0.9.1 MSAA-resolve-into-sRGB double-encode is closed by construction — the
+  intermediate is linear, so no sRGB texture sits in the compositing path. No
+  new dependencies, no MSRV change. See ADR 0006 §"Color space + blending".
+  **Reintroduced after revert `f8da740`:** the original PR #149 shipped with
+  29 green CI checks and immediately panicked on macOS Metal at first UI draw
+  (`bind group index 0, the buffer bound at binding index 2 is bound with
+  size 16 where the shader expects 32`) — `present.wgsl`'s `PresentFlags`
+  uniform padded `encode_srgb: u32` with a `vec3<u32>` field, which WGSL's
+  host-shareable layout rules align to 16 bytes and round the whole struct up
+  to 32 bytes, while the CPU side (`create_present_flags_buffer`) only ever
+  uploaded a flat 16-byte `[u32; 4]`. Fixed by replacing the `vec3<u32>` pad
+  with three scalar `u32` fields, keeping the struct a true 16 bytes on both
+  sides (`crates/mkui-wgpu/src/render/present.wgsl`). A new
+  `present_flags_uniform_size_matches_wgsl_layout` test
+  (`crates/mkui-wgpu/src/render/mod.rs`) computes `PresentFlags`'s size via
+  naga's own layout algorithm and asserts it matches the CPU buffer, without
+  needing a GPU. CI's Vulkan Validation Layers enforcement (#153/#154) is the
+  safety net going forward: the `gpu-offscreen` job now fails outright if a
+  bind-group/buffer-size mismatch like this one reaches Lavapipe undetected.
 
 ### Tooling
 - **Vulkan Validation Layers on the Lavapipe `gpu-offscreen` job (#153).**
