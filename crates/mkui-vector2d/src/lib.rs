@@ -20,8 +20,11 @@
 //!   implemented end-to-end.
 //! - [`stroke`] — the backend-neutral [`stroke::Stroke`] descriptor
 //!   ([`stroke::LineCap`], [`stroke::LineJoin`], [`stroke::DashPattern`]) held
-//!   alongside a [`path::VectorPath`]. A value-type descriptor only; stroke
-//!   expansion is a Sprint 9+ concern.
+//!   alongside a [`path::VectorPath`].
+//! - [`stroke_expand`] — CPU stroke expansion
+//!   ([`stroke_expand::stroke_to_fill`]): a centreline path + [`stroke::Stroke`]
+//!   lowered to a fillable [`path::VectorPath`] (caps, joins, dashing) the Slug
+//!   coverage encoder can rasterize (Sprint 8 §3.1 Wave 1, #138).
 //! - [`bezier`] — cubic→quadratic subdivision at a hard-coded
 //!   [`bezier::CUBIC_SUBDIVISION_TOLERANCE_DEG`] tolerance, so the general
 //!   encoder can lower arbitrary cubics for Slug (quadratic-only).
@@ -75,6 +78,7 @@ pub mod outline;
 pub mod path;
 pub mod slug;
 pub mod stroke;
+pub mod stroke_expand;
 
 pub use bezier::{subdivide_cubic, SubdivisionError, CUBIC_SUBDIVISION_TOLERANCE_DEG};
 pub use encode::{encode_vector_path, VectorPathBlobCache, VectorPathEncodeError, VectorPathKey};
@@ -85,6 +89,7 @@ pub use slug::{
     SlugEncodeError, SlugGlyph, SlugGlyphKey,
 };
 pub use stroke::{DashPattern, LineCap, LineJoin, Stroke};
+pub use stroke_expand::stroke_to_fill;
 
 // Re-export the `mkui-text`-owned identity + outline contract this crate keys
 // on and consumes, so downstream consumers need not also name `mkui-text` for

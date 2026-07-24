@@ -14,7 +14,7 @@ breaking changes can land on minor bumps).
   - **`Stroke` descriptor** (`stroke` module) — a value-type stroke descriptor
     (`width_px`, `LineCap` {Butt, Round, Square}, `LineJoin` {Miter, Round,
     Bevel}, optional `DashPattern`) carried alongside a `VectorPath`. Descriptor
-    only; stroke *expansion* is deferred to a later sprint.
+    only; stroke *expansion* lands in #138 (`stroke_expand::stroke_to_fill`).
   - **General Bézier encoder** (`encode::encode_vector_path`) — emits the same
     Slug-compatible curve/band records as the glyph lane for any `VectorPath`.
     Cubics are lowered to quadratics by the new `bezier` module using a
@@ -28,6 +28,26 @@ breaking changes can land on minor bumps).
     threads, enabling per-frame caching and reuse without font identity.
   - No public API break to the existing `SlugGlyph`/`encode_slug_glyph` path;
     zero new dependencies; MSRV unchanged.
+- **`mkui-vector2d-wgpu` renders `VectorPath` + `Stroke` — Sprint 8 substrate
+  Wave 1 (#138).** The native WGPU adapter now draws arbitrary vector geometry
+  through the *unchanged* Slug coverage pipeline — the WGSL shader is untouched
+  because it is already a general quadratic-curve rasterizer; only CPU
+  prepare-time work is added:
+  - **`PlacedVectorPath` fill lane** — an arbitrary `VectorPath` placed on
+    screen (origin + uniform scale + colour) is encoded at
+    `SlugAdapter::prepare_paths` time via `encode_vector_path` (cubics
+    subdivided) and packed into the identical curve/band/glyph buffers as a
+    glyph blob.
+  - **`PlacedStroke` stroke lane** — a stroked centreline is expanded to a
+    fillable non-zero outline by the new `mkui-vector2d`
+    `stroke_expand::stroke_to_fill` (Butt/Round/Square caps, Miter/Round/Bevel
+    joins with an SVG-default miter limit, and CPU-side dash-pattern splitting),
+    then encoded like any other fill. Overlapping convex pieces union
+    seam-free under the pipeline's analytic winding coverage.
+  - The existing `PlacedSlugGlyph` glyph lane, `pack`, and `SlugAdapter::prepare`
+    are byte-identical; both new lanes share `prepare_packed` so every lane hits
+    the same buffer/bind-group/draw path. Zero dependency on `mkui-wgpu`; no new
+    dependencies beyond `mkui-vector2d` + `wgpu` + `bytemuck`.
 
 ### Changed
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`

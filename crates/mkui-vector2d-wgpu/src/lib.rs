@@ -26,8 +26,12 @@
 //! ## What it owns
 //!
 //! - [`SlugAdapter`] — the render pipeline, bind-group layout, and WGSL.
-//! - [`PlacedSlugGlyph`] — a blob plus its on-screen placement (pen origin,
-//!   pixels-per-font-unit scale, fill colour).
+//! - [`PlacedSlugGlyph`] — a pre-encoded glyph blob plus its on-screen placement
+//!   (pen origin, pixels-per-font-unit scale, fill colour).
+//! - [`PlacedVectorPath`] / [`PlacedStroke`] — an arbitrary `mkui-vector2d`
+//!   [`VectorPath`] fill, or a [`Stroke`]d centreline, placed on screen and
+//!   encoded to the *same* coverage records at [`SlugAdapter::prepare_paths`]
+//!   time (Sprint 8 §3.1 Wave 1, #138).
 //! - [`PreparedSlug`] — the per-frame GPU buffers + bind group, ready to draw.
 //!
 //! ## Pipeline
@@ -39,13 +43,29 @@
 //! recomputed). Output is straight-alpha and composited with standard alpha
 //! blending so a Slug draw is load/store compatible with the UI/bitmap lanes in
 //! one render pass.
+//!
+//! ## VectorPath + Stroke reuse the glyph pipeline unchanged
+//!
+//! The WGSL shader is a *general* quadratic-curve coverage rasterizer, so
+//! rendering an arbitrary [`VectorPath`] or a [`Stroke`] needs **no shader
+//! change** — only extra CPU prepare-time work. A fill is encoded with
+//! `mkui-vector2d`'s `encode_vector_path` (cubics subdivided); a stroke is first
+//! lowered to a fillable outline with `stroke_to_fill` and then encoded the same
+//! way. Both produce a [`SlugGlyph`] that flows through the identical
+//! pack/upload/draw path as a glyph blob, so the glyph lane is byte-identical
+//! and the two new lanes share every downstream GPU record.
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-pub use mkui_vector2d::{BandRange, GlyphBounds, SlugCurve, SlugGlyph};
+pub use mkui_vector2d::{
+    BandRange, Bounds, DashPattern, FillRule, GlyphBounds, LineCap, LineJoin, PathCommand,
+    SlugCurve, SlugGlyph, Stroke, Vec2, VectorPath,
+};
+
+use mkui_vector2d::{encode_vector_path, stroke_to_fill, SlugConfig};
 
 /// Pixels of dilation added to every edge of a glyph's screen quad so the
 /// anti-aliasing footprint at the ink boundary is not clipped by the quad.
@@ -68,6 +88,82 @@ pub struct PlacedSlugGlyph {
     pub scale_px_per_unit: f32,
     /// Straight-alpha RGBA fill colour in `[0, 1]`.
     pub color: [f32; 4],
+}
+
+/// An arbitrary [`VectorPath`] fill placed on screen.
+///
+/// Unlike [`PlacedSlugGlyph`], the geometry is carried un-encoded: the path is
+/// lowered to the shared coverage records at [`SlugAdapter::prepare_paths`] time
+/// (cubics subdivided, non-zero winding). The placement matches the glyph lane —
+/// an `origin_px` where the path's own `(0, 0)` lands and a uniform
+/// `scale_px_per_unit` — so a path scales with zoom exactly like a glyph. The
+/// path stays in its own units, y-up; the adapter performs the y-flip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedVectorPath {
+    /// The backend-neutral fill geometry (its `fill` is treated as non-zero).
+    pub path: VectorPath,
+    /// Screen-pixel position (y-down) of the path's origin `(0, 0)`.
+    pub origin_px: [f32; 2],
+    /// Pixels per path unit (placement scale).
+    pub scale_px_per_unit: f32,
+    /// Straight-alpha RGBA fill colour in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+/// A [`Stroke`]d centreline [`VectorPath`] placed on screen.
+///
+/// The stroke is expanded to a fillable outline on the CPU (`stroke_to_fill`:
+/// caps, joins, dashing) and then encoded like any other fill. [`Stroke::width_px`]
+/// and the dash lengths are consumed in the path's own coordinate units and
+/// scaled to screen pixels by `scale_px_per_unit` alongside the geometry, so a
+/// stroke's width tracks zoom like its fill.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedStroke {
+    /// The centreline geometry to stroke.
+    pub path: VectorPath,
+    /// How to paint the centreline (width, caps, joins, dash).
+    pub stroke: Stroke,
+    /// Screen-pixel position (y-down) of the path's origin `(0, 0)`.
+    pub origin_px: [f32; 2],
+    /// Pixels per path unit (placement scale).
+    pub scale_px_per_unit: f32,
+    /// Straight-alpha RGBA stroke colour in `[0, 1]`.
+    pub color: [f32; 4],
+}
+
+/// Band counts for encoding arbitrary paths/strokes. Glyphs carry a caller-tuned
+/// [`SlugConfig`]; a general path has no such context, so the adapter fixes a
+/// balanced default (finer than the 2×2 glyph golden, coarse enough to keep the
+/// band tables small). Band count never changes coverage correctness — only the
+/// per-pixel curve-list length — so a fixed default is safe (a caller-supplied
+/// config is a future refinement, not a Sprint 8 requirement).
+fn default_path_config() -> SlugConfig {
+    SlugConfig::new(8, 8, 1)
+}
+
+/// Encode a placed fill into a drawable [`PlacedSlugGlyph`], or `None` when the
+/// path carries no drawable geometry (empty or non-finite) so it is skipped.
+fn encode_fill(placed: &PlacedVectorPath) -> Option<PlacedSlugGlyph> {
+    let glyph = encode_vector_path(&placed.path, &default_path_config()).ok()?;
+    Some(PlacedSlugGlyph {
+        blob: Arc::new(glyph),
+        origin_px: placed.origin_px,
+        scale_px_per_unit: placed.scale_px_per_unit,
+        color: placed.color,
+    })
+}
+
+/// Expand a placed stroke to a fill outline and encode it, or `None` when the
+/// stroke paints nothing (non-positive width, empty, or fully degenerate).
+fn encode_stroke(placed: &PlacedStroke) -> Option<PlacedSlugGlyph> {
+    let outline = stroke_to_fill(&placed.path, &placed.stroke);
+    let glyph = encode_vector_path(&outline, &default_path_config()).ok()?;
+    Some(PlacedSlugGlyph {
+        blob: Arc::new(glyph),
+        origin_px: placed.origin_px,
+        scale_px_per_unit: placed.scale_px_per_unit,
+        color: placed.color,
+    })
 }
 
 /// GPU curve record matching the WGSL `Curve` struct (std430): three `vec2`s,
@@ -269,7 +365,43 @@ impl SlugAdapter {
         viewport_px: [f32; 2],
         glyphs: &[PlacedSlugGlyph],
     ) -> Option<PreparedSlug> {
-        let packed = pack(glyphs);
+        self.prepare_packed(device, queue, viewport_px, pack(glyphs))
+    }
+
+    /// Encode and prepare arbitrary [`VectorPath`] fills and [`PlacedStroke`]s
+    /// for `viewport_px`, reusing the exact glyph coverage pipeline. Each fill is
+    /// lowered via `encode_vector_path` and each stroke via `stroke_to_fill` +
+    /// `encode_vector_path` into the shared [`SlugGlyph`] records, then packed and
+    /// uploaded identically to a glyph frame. Items that paint nothing (empty,
+    /// non-finite, or a non-positive stroke width) are skipped; returns `None`
+    /// when nothing is drawable. Borrows device + queue only.
+    pub fn prepare_paths(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        viewport_px: [f32; 2],
+        fills: &[PlacedVectorPath],
+        strokes: &[PlacedStroke],
+    ) -> Option<PreparedSlug> {
+        let placed: Vec<PlacedSlugGlyph> = fills
+            .iter()
+            .filter_map(encode_fill)
+            .chain(strokes.iter().filter_map(encode_stroke))
+            .collect();
+        self.prepare_packed(device, queue, viewport_px, pack(&placed))
+    }
+
+    /// Upload already-packed records into a [`PreparedSlug`]. Shared by
+    /// [`prepare`](Self::prepare) and [`prepare_paths`](Self::prepare_paths) so
+    /// every lane hits the same buffer/bind-group path. Returns `None` when the
+    /// pack is empty.
+    fn prepare_packed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        viewport_px: [f32; 2],
+        packed: PackedSlug,
+    ) -> Option<PreparedSlug> {
         if packed.glyphs.is_empty() {
             return None;
         }
@@ -565,5 +697,148 @@ mod tests {
         validator
             .validate(&module)
             .expect("Slug WGSL must pass naga validation");
+    }
+
+    // ---- VectorPath + Stroke lanes (#138) -----------------------------------
+
+    use mkui_vector2d::Stroke;
+
+    fn fill_triangle() -> PlacedVectorPath {
+        PlacedVectorPath {
+            path: VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(100.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(0.0, 100.0)),
+                    PathCommand::Close,
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            origin_px: [10.0, 200.0],
+            scale_px_per_unit: 0.5,
+            color: [1.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn fill_encodes_and_packs_like_a_glyph() {
+        let placed = encode_fill(&fill_triangle()).expect("triangle fill encodes");
+        let packed = pack(&[placed]);
+        assert_eq!(packed.glyphs.len(), 1, "one instance for one fill");
+        // A triangle flattens to three straight edges (all line sentinels).
+        assert_eq!(packed.curves.len(), 3);
+        for c in &packed.curves {
+            assert_eq!(
+                c.p1, c.p2,
+                "a straight edge uses the duplicated-endpoint sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn cubic_fill_is_accepted_where_the_glyph_lane_would_reject_it() {
+        // The glyph encoder rejects cubics; the VectorPath lane subdivides them.
+        let cubic = PlacedVectorPath {
+            path: VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::CubicTo {
+                        control1: Vec2::new(0.0, 100.0),
+                        control2: Vec2::new(100.0, 100.0),
+                        to: Vec2::new(100.0, 0.0),
+                    },
+                    PathCommand::Close,
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            ..fill_triangle()
+        };
+        let placed = encode_fill(&cubic).expect("cubic fill encodes via subdivision");
+        assert!(!placed.blob.curves.is_empty());
+    }
+
+    #[test]
+    fn empty_and_non_finite_fills_are_skipped() {
+        let empty = PlacedVectorPath {
+            path: VectorPath::new(
+                vec![PathCommand::MoveTo(Vec2::ZERO), PathCommand::Close],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            ..fill_triangle()
+        };
+        assert!(encode_fill(&empty).is_none(), "an empty path draws nothing");
+
+        let nan = PlacedVectorPath {
+            path: VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::ZERO),
+                    PathCommand::LineTo(Vec2::new(f32::NAN, 1.0)),
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            ..fill_triangle()
+        };
+        assert!(encode_fill(&nan).is_none(), "a non-finite path is rejected");
+    }
+
+    #[test]
+    fn stroke_lane_encodes_a_line_into_coverage_records() {
+        let stroke = PlacedStroke {
+            path: VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(50.0, 0.0)),
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            stroke: Stroke::new(4.0),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+            color: [0.0, 0.0, 1.0, 1.0],
+        };
+        let placed = encode_stroke(&stroke).expect("stroked line encodes");
+        let packed = pack(&[placed]);
+        assert_eq!(packed.glyphs.len(), 1);
+        // A butt-capped line strokes to a rectangle → four straight edges.
+        assert!(!packed.curves.is_empty());
+        assert!(!packed.bands.is_empty());
+    }
+
+    #[test]
+    fn zero_width_stroke_is_skipped() {
+        let stroke = PlacedStroke {
+            path: VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(50.0, 0.0)),
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            stroke: Stroke::new(0.0),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+            color: [0.0, 0.0, 1.0, 1.0],
+        };
+        assert!(
+            encode_stroke(&stroke).is_none(),
+            "a zero-width stroke paints nothing"
+        );
+    }
+
+    #[test]
+    fn fill_and_stroke_placements_carry_their_screen_transform() {
+        // Encoding preserves the placement verbatim (origin/scale/colour) so a
+        // path lane projects through the same GPU quad math as a glyph.
+        let f = fill_triangle();
+        let placed = encode_fill(&f).unwrap();
+        assert_eq!(placed.origin_px, f.origin_px);
+        assert_eq!(placed.scale_px_per_unit, f.scale_px_per_unit);
+        assert_eq!(placed.color, f.color);
     }
 }
