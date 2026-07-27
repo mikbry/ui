@@ -1,0 +1,14 @@
+[package]
+name = "mkui-slug-reference-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1.0.98"
+bytemuck = { version = "1.23.1", features = ["derive"] }
+png = "0.17.16"
+pollster = "0.4.0"
+wgpu = "26.0.1"
