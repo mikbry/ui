@@ -1,15 +1,26 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-28T01:00:00Z
-**Current phase:** 1
-**Phase status:** dame-review
+**Last updated:** 2026-07-28T02:00:00Z
+**Current phase:** 2
+**Phase status:** in-progress
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
 - Opened: 2026-07-28
 - Codex verdicts: REQUEST_CHANGES (round 1, sha 345dbb6); APPROVE (round 2, sha af4d21f)
-- Dame verdicts: pending (dispatching now)
-- Merged: pending
+- Dame verdicts: BLESS (round 1, sha d99d1d7) — dame-review dispatched via
+  CHARTER's fallback shape (`miky agent assign --brief-file dame-rubric.md`)
+  returned an explicit "Verdict: **APPROVE**" (mapped to BLESS per
+  `verdict_mapping`); the substrate's own auto-classification header
+  mis-tagged it "comment" (no literal `VERDICT:`-line match), a marker-regex
+  artifact, not a substantive finding — the review body is unambiguous and
+  corroborated by real CI: all 30 checks green, including `gpu-offscreen`
+  (Lavapipe) and `feature-slug`. Cross-phase invariants independently
+  re-verified before merge: zero commits on `reference-harness/` since
+  `9f76af3`, zero commits on `{CHARTER,dame-rubric,codex-8-step-plan}.md`
+  since `b338bd9`, full diff scoped to `crates/mkui-vector2d-wgpu/`,
+  `crates/mkui-wgpu/`, `CHANGELOG.md`, and this file.
+- Merged: 2026-07-28T12:04:36Z (squash sha `7cb352c4b683f559a8123852599ce68b54369509`)
 - Notes: Implemented Codex 8-step-plan steps 1-3 (vertical band upload, dual-ray
   weighted coverage with `0x2e74` root eligibility, `fwidth`-derived AA width)
   in `crates/mkui-vector2d-wgpu`. Self-verified against the ratified
@@ -33,7 +44,7 @@
 
 ## Phase 2
 - PR: pending
-- Status: not started
+- Status: in-progress (steps 4+5 — bounded dilation + band overlap epsilon)
 
 ## Phase 3
 - PR: pending
