@@ -42,13 +42,19 @@ breaking changes can land on minor bumps).
     small to have any effect.
   - Verified against the ratified `reference-harness/` adapter under the same
     pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
-    (Δ ≤ 1/255, SSIM = 1.000000), plus a thin-gap scan on the curve-heavy
-    `o`/`g` fixtures at 1×/1.5×/2× DPI requiring zero hits — a texel only
-    counts as a "gap" when it sits at zero alpha between two texels at
-    essentially full coverage (`>= 250/255`), distinguishing a genuine
-    band-boundary discontinuity from ordinary antialiasing (verified against
-    the ratified `g` fixture, whose smoothest zero-alpha texel sits between
-    neighbours at 206 and 248 — a normal gradient, not a hole).
+    (Δ ≤ 1/255, SSIM = 1.000000).
+  - **Thin-gap regression test currently `#[ignore]`d — see
+    `docs/chevalier/mkui-slug-rewrite/BLOCKED.md`.** dame-rubric.md's Phase 2
+    "no thin-gap regressions" criterion, applied at its literal ≥50%
+    bordering-alpha threshold, is jointly unsatisfiable with the same
+    section's Δ ≤ 4/255 reference-comparison criterion: the ratified `g`
+    fixture (2× DPI) itself produces a zero-alpha texel at (157,156) bordered
+    by 206/248 alpha — a literal hit under the rubric's own threshold — and
+    mkui reproduces that texel byte-for-byte from the reference. No
+    implementation that matches the oracle can pass both criteria as
+    literally written. Blocked pending operator rubric amendment; not
+    resolved by loosening the detection threshold (tried and rejected by
+    Codex review as redefining a frozen criterion).
   - Two new CPU-level tests exercise the real encoder end to end (not a
     pre-encoded fixture): `band_overlap_epsilon_normalizes_to_units_per_em`
     proves a curve straddling a band boundary by `0.0005` em joins the band

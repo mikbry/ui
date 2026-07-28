@@ -319,18 +319,22 @@ fn phase1_matches_reference_adapter_within_rubric_thresholds() {
     );
 }
 
-/// A zero-alpha texel bordered on either axis by texels at essentially full
-/// coverage — the signature of a floating-point band-boundary gap punching a
-/// hole through *solid* ink (dame-rubric.md § Phase 2 "No thin-gap
-/// regressions": "Zero such pixels required"). `NEAR_SOLID_ALPHA` is
-/// deliberately much stricter than a "50% coverage" reading: analytic AA
-/// legitimately ramps smoothly across several intermediate alpha values at a
-/// glyph edge or a tapering stroke (verified empirically on the ratified `g`
-/// fixture at 2x — a zero-alpha texel there sits between neighbours at 206
-/// and 248/255, a normal gradient, not a hole), so only a texel sandwiched
-/// between two *already near-fully-opaque* neighbours counts: a real
-/// discontinuity bug, not a smooth falloff.
-const NEAR_SOLID_ALPHA: u8 = 250;
+/// A zero-alpha texel bordered on either axis by texels at ≥50% alpha — the
+/// literal thin-gap signature specified by dame-rubric.md § Phase 2 "No
+/// thin-gap regressions": "Pixel-scan for zero-alpha pixels bordered by ≥50%
+/// alpha on both sides (thin-gap signature). Zero such pixels required."
+///
+/// This threshold is intentionally the rubric's literal value, not a tuned
+/// one. An earlier revision raised it to 250 to dodge a known false positive
+/// at the ratified `g` fixture (2x DPI, texel (157,156): neighbours 206/248,
+/// ordinary AA, not a defect) — Codex round 3 correctly rejected that as
+/// redefining a frozen criterion rather than satisfying it. See
+/// `docs/chevalier/mkui-slug-rewrite/BLOCKED.md` for the underlying
+/// oracle-ambiguity finding: the ratified reference adapter's own output
+/// trips this literal heuristic at that exact texel (Δ=0 vs. mkui, per the
+/// Phase 1 parity comparison), so no implementation that reproduces the
+/// oracle can pass this check at 128 without an explicit rubric amendment.
+const HALF_ALPHA: u8 = 128;
 
 fn thin_gap_coordinates(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
     let width = width as usize;
@@ -344,12 +348,12 @@ fn thin_gap_coordinates(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32
             }
             let horiz_gap = x > 0
                 && x + 1 < width
-                && alpha(x - 1, y) >= NEAR_SOLID_ALPHA
-                && alpha(x + 1, y) >= NEAR_SOLID_ALPHA;
+                && alpha(x - 1, y) >= HALF_ALPHA
+                && alpha(x + 1, y) >= HALF_ALPHA;
             let vert_gap = y > 0
                 && y + 1 < height
-                && alpha(x, y - 1) >= NEAR_SOLID_ALPHA
-                && alpha(x, y + 1) >= NEAR_SOLID_ALPHA;
+                && alpha(x, y - 1) >= HALF_ALPHA
+                && alpha(x, y + 1) >= HALF_ALPHA;
             if horiz_gap || vert_gap {
                 hits.push((x as u32, y as u32));
             }
@@ -359,15 +363,23 @@ fn thin_gap_coordinates(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32
 }
 
 #[test]
+#[ignore = "BLOCKED: dame-rubric.md's literal ≥50% thin-gap threshold conflicts \
+with the Phase 2 Δ-comparison criterion at the ratified `g_2x` fixture, texel \
+(157,156) — the reference adapter's own output trips this check at Δ=0 from \
+mkui. This is a rubric-level oracle ambiguity (CHARTER block condition #2), \
+not a test or implementation defect. See \
+docs/chevalier/mkui-slug-rewrite/BLOCKED.md. Do not re-enable by loosening \
+HALF_ALPHA or adding a golden-relative carve-out — both were tried and \
+rejected by Codex review as illegitimate redefinitions of the frozen \
+criterion; only an operator rubric amendment resolves this."]
 fn phase2_no_thin_gap_regressions_on_curve_heavy_glyphs() {
     // dame-rubric.md § Phase 2: `o` and `g` are the curve-heavy, band-epsilon-
     // sensitive fixtures — their bowls cross many band boundaries at
     // near-tangent angles, exactly where a floating-point gap would open a
     // one-pixel hole through solid ink. The rubric requires zero such texels,
-    // full stop — checked directly against mkui's own render, not relative to
-    // the reference golden (see `NEAR_SOLID_ALPHA`'s doc comment for why the
-    // detection threshold, not an exception for matching the reference, is
-    // what keeps this from flagging ordinary antialiasing).
+    // checked directly against mkui's own render at the literal `HALF_ALPHA`
+    // threshold. Currently `#[ignore]`d — see the attribute above and
+    // BLOCKED.md.
     let mut failures = Vec::new();
     for name in ["o", "g"] {
         let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
