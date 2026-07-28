@@ -1,6 +1,6 @@
 # CHARTER — mkui Slug rendering completion (chevalier + dame du lac)
 
-**Version:** v1.2 (2026-07-28) — draft awaiting operator ratification. Supersedes v1.1 pre-Codex-review draft at `strategy/goals/mkui-slug-rewrite/CHARTER.md`.
+**Version:** v1.2.1 (2026-07-28, amendment 1) — awaits operator ratification. Amends v1.2 (§ Blocked signal path corrected from `strategy/goals/...` to `docs/chevalier/...`). Supersedes v1.1 pre-Codex-review draft at `strategy/goals/mkui-slug-rewrite/CHARTER.md`.
 **Filed under:** `mikbry/miky#587` chevalier epic — SECOND mission (empirical Sprint 18 data point)
 **Started:** _pending launch approval — mission dispatch touchpoint 1 = operator merge of this PR_
 **Sprint:** 18 Lane 2 (dispatch); COMPLETION expected Sprint 19-20
@@ -169,7 +169,7 @@ Chevalier posts `COMPLETION.md` mapping each criterion to git SHA + test/dame ou
 
 ## Blocked signal — only true hard blocks
 
-Chevalier posts `BLOCKED.md` at `strategy/goals/mkui-slug-rewrite/BLOCKED.md` and pauses only if:
+Chevalier posts `BLOCKED.md` at `docs/chevalier/mkui-slug-rewrite/BLOCKED.md` and pauses only if:
 
 1. **Needs credentials** — external doc access, API token, private repo (unlikely for this scope but preserved for symmetry with Marabot CHARTER)
 2. **Oracle ambiguity** — JCGT paper + reference shader + rubric all diverge on a specific pixel behavior (dame REFORGE variant `blocked_reason: oracle_ambiguity`)
@@ -341,7 +341,8 @@ Plus the pre-ratified adapter:
 
 - **v1.0-draft** (2026-07-27, mkui orchestrator) — initial draft per `HANDOFF-TO-MKUI-2026-07-27.md`. Location: `strategy/goals/mkui-slug-rewrite/`. Awaits Codex review.
 - **v1.1-draft** (2026-07-27, mkui orchestrator, same-day per operator decision) — added Phase 0 (chevalier-authored harness). Location: `strategy/goals/mkui-slug-rewrite/`. Awaits Codex review.
-- **v1.2-draft** (2026-07-28, mkui orchestrator, post Codex R1 review + adapter merge) — see § v1.2 changes below. Location: `docs/chevalier/mkui-slug-rewrite/` (mkui repo). Awaits operator ratification (Point 1).
+- **v1.2** (2026-07-28, mkui orchestrator, post Codex R1 review + adapter merge) — see § v1.2 changes below. Location: `docs/chevalier/mkui-slug-rewrite/` (mkui repo). Ratified 2026-07-28 via PR #159 merge SHA `b338bd9`.
+- **v1.2.1** (2026-07-28, mkui orchestrator, amendment 1 per chevalier Phase 2 BLOCKED.md) — fixed stale § Blocked signal path (`strategy/goals/...` → `docs/chevalier/...`); rubric v1.2.1 adds byte-identical-to-reference exception to Phase 2 "No thin-gap regressions" criterion. Awaits operator ratification via amendment PR merge.
 
 ## v1.2 changes
 

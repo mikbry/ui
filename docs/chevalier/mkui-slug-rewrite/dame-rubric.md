@@ -1,6 +1,6 @@
 # Dame du lac rubric — mkui Slug rendering
 
-**Version:** v1.2 (2026-07-28) — awaits operator ratification. Supersedes v1.0/v1.1 drafts at `strategy/goals/mkui-slug-rewrite/dame-rubric.md`.
+**Version:** v1.2.1 (2026-07-28, amendment 1) — awaits operator ratification. Amends v1.2 (Phase 2 § "No thin-gap regressions" now excludes texels byte-identical to reference; per Phase 2 chevalier BLOCKED.md `oracle_ambiguity`). Supersedes v1.0/v1.1 drafts at `strategy/goals/mkui-slug-rewrite/dame-rubric.md`.
 **Referenced by:** [`CHARTER.md`](CHARTER.md) § `verification_oracle.dame_invocation`
 **Immutable during mission** — see CHARTER § Immutability + § Amendment protocol.
 
@@ -107,7 +107,7 @@ BLESS if ALL of the following pass:
 - [ ] **(N) Band overlap epsilon = 1/1024 em**: the overlap constant, when normalized to em space using `units_per_em`, equals `1.0 / 1024.0` within ε=1e-7. If expressed in font design units, dame validates via unit conversion. Reference: adapter's `PROVENANCE.md` § Fixture provenance ("upstream README's `1/1024` em overlap").
 - [ ] **(S) Bands normalized to em space OR `units_per_em` provided**: grep for `units_per_em` in the CPU-side code path.
 - [ ] **(N) Adapter-comparison per-channel Δ ≤ 4/255**: rerun Phase 1's per-glyph-per-DPI comparison AFTER Phase 2 changes. All 24 comparisons must still pass with tightened threshold — Phase 2 shouldn't loosen Phase 1's fidelity.
-- [ ] **(N) No thin-gap regressions**: dame renders `o` and `g` glyphs (curve-heavy) at 3 DPIs. Pixel-scan for zero-alpha pixels bordered by ≥50% alpha on both sides (thin-gap signature). Zero such pixels required. REFORGE cites specific coordinates.
+- [ ] **(N) No thin-gap regressions** (amended v1.2.1 per Phase 2 `oracle_ambiguity` block, 2026-07-28): dame renders `o` and `g` glyphs (curve-heavy) at 3 DPIs. Pixel-scan for zero-alpha pixels bordered by ≥50% alpha on both sides (thin-gap signature). Zero such pixels required, **EXCLUDING** texels that are byte-identical to the ratified reference-harness golden at the same coordinate. Rationale for the exception: the ratified reference oracle itself produces this pattern at tight curve intersections (empirically at `g_2x` texel (157, 156), neighbours 206/248 in the ratified adapter's own output) — this is ordinary analytic antialiasing, not a defect. Per Codex R1 P0 #1 + Finding L: a "regression" is definitionally a divergence from the ratified oracle, not an inherent property of the oracle's own output. Any thin-gap texel that byte-matches the reference is by construction NOT a regression. REFORGE cites specific coordinates + confirms the mkui-vs-reference delta at each cited coordinate (a REAL regression has both the thin-gap signature AND Δ > 0 vs reference).
 - [ ] **(T) `cargo test -p mkui-vector2d` passes**.
 - [ ] **(T) `cargo test -p mkui-vector2d-wgpu` passes**.
 - [ ] **(N) Phase 1 SSIM criteria still hold**: re-run Phase 1's SSIM ≥ 0.995 measurement on all 24 comparisons. Regression → REFORGE.
@@ -262,7 +262,8 @@ Chevalier CANNOT amend the rubric. If chevalier disagrees with a dame verdict, c
 
 - **v1.0-draft** (2026-07-27, mkui orchestrator) — initial draft per handoff at `strategy/goals/mkui-slug-rewrite/HANDOFF-TO-MKUI-2026-07-27.md`. Location: `strategy/goals/mkui-slug-rewrite/`.
 - **v1.1-draft** (2026-07-27, mkui orchestrator, same-day revision) — added Phase 0 (chevalier-authored harness). Location: `strategy/goals/mkui-slug-rewrite/`.
-- **v1.2** (2026-07-28, mkui orchestrator, post Codex R1 review + adapter merge) — this document. Location: `docs/chevalier/mkui-slug-rewrite/` (mkui repo). Awaits operator ratification.
+- **v1.2** (2026-07-28, mkui orchestrator, post Codex R1 review + adapter merge) — this document at ratification-SHA `b338bd9`. Location: `docs/chevalier/mkui-slug-rewrite/` (mkui repo).
+- **v1.2.1** (2026-07-28, mkui orchestrator, amendment 1 per chevalier Phase 2 BLOCKED.md `oracle_ambiguity`) — added byte-identical-to-reference exception clause to § Phase 2 (N) "No thin-gap regressions" criterion. Also fixed stale CHARTER § Blocked signal path (`strategy/goals/...` → `docs/chevalier/...`). Awaits operator ratification via merge of amendment PR.
 
 ### v1.2 changes vs v1.1
 
