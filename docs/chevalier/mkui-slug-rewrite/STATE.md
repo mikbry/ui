@@ -43,7 +43,7 @@
   `gpu-tests,slug` under Lavapipe: 147/147) all pass. Dispatching dame next.
 
 ## Phase 2
-- PR: pending (opening now)
+- PR: #161 (https://github.com/mikbry/ui/pull/161)
 - Opened: 2026-07-28
 - Codex verdicts: pending (dispatching now)
 - Dame verdicts: pending
