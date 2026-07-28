@@ -8,6 +8,40 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Slug rendering completion, Phase 1 — dual-ray coverage + `fwidth` AA
+  (mkui-slug-rewrite mission, `mikbry/ui#157` steps 1-3).** `crates/mkui-vector2d-wgpu`'s
+  Slug coverage pipeline now implements the full published algorithm instead
+  of a horizontal-only prototype:
+  - **Vertical band + curve-index upload.** `SlugAdapter`'s CPU packer now
+    uploads each glyph's `vertical_bands`/`vertical_curve_indices` (already
+    produced by #65's encoder) into the shared GPU `bands`/`indices` buffers
+    right after the horizontal ones, with new per-glyph `vband_base` /
+    `vband_count` / `vindex_base` offsets (`GpuGlyph` grows 64 → 96 bytes).
+  - **Dual-ray weighted coverage in `slug.wgsl`.** The fragment shader now
+    casts one horizontal ray *and* one vertical ray per sample, each through
+    the band selected by a clamped index derived from the glyph's own
+    font-unit bounds (matching the Slug reference's `band_transform` lookup,
+    not a containment scan — so AA coverage stays correct in the dilation
+    margin just outside the exact bounds). Root validity is decided by the
+    `0x2e74` sign-bit lookup (`calc_root_code`) rather than a `t in [0, 1)`
+    range test, and the two axis coverages are combined via the published
+    weighted formula (`calc_coverage`) — replacing the old single-ray,
+    direct-root-clamp implementation.
+  - **`fwidth`-derived AA width.** The shader's anti-aliasing width is now
+    `1 / fwidth(font_pos)` (screen-derivative pixels-per-em), replacing the
+    logical-pixel `scale_px_per_unit` that produced asymmetric horizontal vs.
+    vertical edge weights. `scale_px_per_unit` remains the vertex-stage
+    placement scale (unchanged use).
+  - **Debug coverage entry point.** `fs_slug_debug_coverage` exposes the
+    pre-clamp combined coverage plus per-axis accumulations for an unclamped
+    intermediate capture; not used by the production pipeline.
+  - Verified against the ratified `docs/chevalier/mkui-slug-rewrite/reference-harness/`
+    adapter: all 24 glyph×DPI comparisons (8 glyphs × 1×/1.5×/2× DPI) render
+    within max per-channel Δ ≤ 1/255 and 0 differing pixels under Lavapipe
+    (rubric thresholds: Δ ≤ 4/255, ≤ 10 differing pixels).
+  - No change to `mkui-vector2d`'s public API, the linear-color present-pass
+    contract (#155), or the render-pass architecture; `QUAD_DILATION_PX`
+    unchanged (Phase 2 scope).
 - **`mkui-vector2d` extended beyond glyph outlines — Sprint 8 substrate Wave 1
   (#137).** The backend-neutral path crate now encodes *arbitrary* 2D vector
   geometry, not only resolved glyph outlines:

@@ -104,6 +104,12 @@ mod slug_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod sfnt_slug_gpu;
 
+/// Reference-adapter parity self-check for #157 Phase 1 — diffs mkui's Slug
+/// output against the ratified `reference-harness/` goldens. Same dual gate
+/// as [`slug_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod slug_reference_parity;
+
 /// Validation-enforcement regression guard (#153). A deliberate bind-group
 /// buffer-size mismatch run through #106's harness — the CI gap-fix that
 /// followed the #149 revert (`f8da740`). See the module docs for exactly what

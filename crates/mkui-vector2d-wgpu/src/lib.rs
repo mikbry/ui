@@ -187,9 +187,15 @@ pub(crate) struct GpuBand {
     curve_count: u32,
 }
 
-/// GPU per-glyph instance matching the WGSL `Glyph` struct (std430), 64 bytes.
+/// GPU per-glyph instance matching the WGSL `Glyph` struct (std430), 96 bytes.
 /// Field order is chosen so the `vec4` colour leads and every member is
 /// naturally aligned — `repr(C)` then matches std430 with no manual padding.
+/// The trailing vertical-band trio + font-unit bounds (#157 Phase 1) let the
+/// fragment shader select both the horizontal (row) and vertical (column)
+/// band for a sample the same way the reference adapter's `band_transform`
+/// does: a clamped index derived from the glyph's own font-unit bounds, not a
+/// containment scan — so AA coverage stays correct in the dilation margin
+/// just outside the exact glyph bounds.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuGlyph {
@@ -202,6 +208,12 @@ pub(crate) struct GpuGlyph {
     band_base: u32,
     band_count: u32,
     index_base: u32,
+    bounds_min: [f32; 2],
+    bounds_max: [f32; 2],
+    vband_base: u32,
+    vband_count: u32,
+    vindex_base: u32,
+    _pad: u32,
 }
 
 /// GPU viewport uniform matching the WGSL `Viewport` struct, 16 bytes.
@@ -256,6 +268,23 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph]) -> PackedSlug {
             .indices
             .extend_from_slice(&blob.horizontal_curve_indices);
 
+        // Vertical bands + their curve-index stream follow immediately after
+        // the horizontal ones in the same shared buffers (#157 Phase 1): one
+        // extra base offset per glyph, no new GPU bindings.
+        let vband_base = packed.bands.len() as u32;
+        let vindex_base = packed.indices.len() as u32;
+        for band in &blob.vertical_bands {
+            packed.bands.push(GpuBand {
+                lower: band.lower,
+                upper: band.upper,
+                first_curve: band.first_curve,
+                curve_count: band.curve_count,
+            });
+        }
+        packed
+            .indices
+            .extend_from_slice(&blob.vertical_curve_indices);
+
         // Dilated screen quad. Font units are y-up; screen is y-down, so the
         // glyph's y_max maps to the smaller (top) screen y.
         let [ox, oy] = placed.origin_px;
@@ -274,6 +303,12 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph]) -> PackedSlug {
             band_base,
             band_count: blob.horizontal_bands.len() as u32,
             index_base,
+            bounds_min: [blob.bounds.x_min, blob.bounds.y_min],
+            bounds_max: [blob.bounds.x_max, blob.bounds.y_max],
+            vband_base,
+            vband_count: blob.vertical_bands.len() as u32,
+            vindex_base,
+            _pad: 0,
         });
     }
     packed
@@ -609,12 +644,31 @@ mod tests {
             assert_eq!(gpu.p1, [src.p1.x, src.p1.y]);
             assert_eq!(gpu.p2, [src.p2.x, src.p2.y]);
         }
-        assert_eq!(packed.indices, blob.horizontal_curve_indices);
-        assert_eq!(packed.bands.len(), blob.horizontal_bands.len());
+        // Horizontal bands/indices land first, vertical immediately after —
+        // both streams copied 1:1 from the neutral blob (#157 Phase 1).
+        let h_index_count = blob.horizontal_curve_indices.len();
+        assert_eq!(
+            packed.indices[..h_index_count],
+            blob.horizontal_curve_indices
+        );
+        assert_eq!(packed.indices[h_index_count..], blob.vertical_curve_indices);
+        assert_eq!(
+            packed.bands.len(),
+            blob.horizontal_bands.len() + blob.vertical_bands.len()
+        );
         assert_eq!(
             packed.glyphs[0].band_count,
             blob.horizontal_bands.len() as u32
         );
+        assert_eq!(
+            packed.glyphs[0].vband_base,
+            blob.horizontal_bands.len() as u32
+        );
+        assert_eq!(
+            packed.glyphs[0].vband_count,
+            blob.vertical_bands.len() as u32
+        );
+        assert_eq!(packed.glyphs[0].vindex_base, h_index_count as u32);
     }
 
     #[test]
@@ -672,7 +726,7 @@ mod tests {
         // Lock the layout the WGSL std430 structs assume.
         assert_eq!(std::mem::size_of::<GpuCurve>(), 24);
         assert_eq!(std::mem::size_of::<GpuBand>(), 16);
-        assert_eq!(std::mem::size_of::<GpuGlyph>(), 64);
+        assert_eq!(std::mem::size_of::<GpuGlyph>(), 96);
         assert_eq!(std::mem::size_of::<GpuViewport>(), 16);
     }
 

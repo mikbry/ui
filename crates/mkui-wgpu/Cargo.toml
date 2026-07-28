@@ -59,3 +59,11 @@ pollster = { workspace = true }
 # normal dependency enabled by the `slug` feature (above), which already covers
 # every `slug`-gated test (the #66 hand-authored-record acceptance tests and
 # #67's font-backed ones).
+
+[dev-dependencies]
+# PNG decoding for the `gpu-tests,slug` reference-parity self-check (#157
+# Phase 1): reads the ratified reference-harness's committed known-good
+# goldens for a byte-level comparison. Same pin as
+# `docs/chevalier/mkui-slug-rewrite/reference-harness/Cargo.toml` so both
+# sides decode identically.
+png = "0.17.16"
