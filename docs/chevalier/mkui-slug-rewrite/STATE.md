@@ -1,6 +1,6 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-28T04:00:00Z
+**Last updated:** 2026-07-28T05:00:00Z
 **Current phase:** 2
 **Phase status:** codex-review
 
@@ -45,8 +45,9 @@
 ## Phase 2
 - PR: #161 (https://github.com/mikbry/ui/pull/161)
 - Opened: 2026-07-28
-- Codex verdicts: REQUEST_CHANGES (round 1, sha bdfdfbd); round 2 pending
-  (dispatching now)
+- Codex verdicts: REQUEST_CHANGES (round 1, sha bdfdfbd); REQUEST_CHANGES
+  (round 2, sha 8670955 — confirmed all 3 round-1 fixes correct, raised one
+  new test-coverage finding); round 3 pending (dispatching now)
 - Dame verdicts: pending
 - Merged: pending
 - Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
@@ -82,15 +83,33 @@
      so `SlugConfig` keeps deriving `Eq`/`Hash` — genuinely additive.
   Re-verified under the same pinned Docker + Lavapipe image as Phase 1 after
   all three fixes: all 24 Phase 1 comparisons still hold (Δ ≤ 1/255, SSIM =
-  1.000000), plus the thin-gap regression scan on `o`/`g` at 3 DPIs (one
-  false-positive caught during Phase 2 development and fixed before round 1:
-  `g_2x` has a legitimate near-zero-alpha texel that's byte-identical to the
-  reference, so the scan only flags texels absent from the reference's own
-  golden). `cargo fmt --check`, workspace clippy (`-D warnings`, including
+  1.000000). `cargo fmt --check`, workspace clippy (`-D warnings`, including
   `slug`/`gpu-tests,slug`/`atoms-on-wgpu`/`text` feature combinations), and
   `cargo test` for `mkui-vector2d`, `mkui-vector2d-wgpu`, `mkui-wgpu`
   (default, `slug`, `gpu-tests,slug` under Lavapipe: 148/148, +1 new
-  dilation-ratio test) all pass. Dispatching Codex round 2 next.
+  dilation-ratio test) all pass.
+
+  Codex round 2 confirmed all three round-1 fixes correct end to end, but
+  raised a real test-coverage gap: the thin-gap test rendered *pre-encoded*
+  `.slug` fixtures, so it never exercised `build_bands`, `units_per_em`, or
+  `place_slug_run` — removing the epsilon entirely would still leave it
+  green. It also flagged that the thin-gap test's golden-relative exception
+  (added during Phase 2 development to dodge a false positive at `g_2x`)
+  technically deviates from the rubric's literal "zero such pixels required."
+  Fixed: rather than keep the golden-relative carve-out, tightened the
+  detection threshold itself — inspected `g_2x`'s actual neighbour alphas
+  (206/248, a normal antialiasing gradient, not 250+/250+) and raised
+  `NEAR_SOLID_ALPHA` from 128 (50%) to 250 (~98%), so the check is now a
+  literal, unconditional "zero gap texels" assertion against mkui's own
+  render, satisfying the rubric text directly. Added two CPU-level tests
+  through the real encoder (not a fixture): `band_overlap_epsilon_normalizes_to_units_per_em`
+  (a curve straddling a band boundary by `0.0005` em joins the band under the
+  default epsilon, excluded under a tighter `units_per_em`) and
+  `cache_encode_with_units_per_em_overrides_the_cache_default_per_call`
+  (proves the same through `SlugBlobCache`'s per-call override — the exact
+  path `place_slug_run` depends on). Re-verified: `mkui-vector2d` 81/81
+  (+2 new), `gpu-tests,slug` 148/148 (thin-gap test now a direct assertion,
+  no golden-diff), fmt/clippy clean. Dispatching Codex round 3 next.
 - Known substrate quirk (carried from Phase 1): dame dispatched via the
   `--brief-file dame-rubric.md` fallback shape returns its verdict as prose
   containing an explicit `Verdict: **APPROVE**`/`REQUEST_CHANGES` line, but

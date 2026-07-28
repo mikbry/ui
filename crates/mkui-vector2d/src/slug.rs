@@ -633,6 +633,92 @@ mod tests {
         }
     }
 
+    /// True iff `curve_index` is listed within horizontal band `band_index`'s
+    /// own slice of the index stream (not just anywhere in the flat stream —
+    /// a curve deep inside an adjacent band's un-widened range would also
+    /// appear there regardless of the epsilon under test).
+    fn horizontal_band_contains(glyph: &SlugGlyph, band_index: usize, curve_index: u32) -> bool {
+        let band = glyph.horizontal_bands[band_index];
+        let start = band.first_curve as usize;
+        let end = start + band.curve_count as usize;
+        glyph.horizontal_curve_indices[start..end].contains(&curve_index)
+    }
+
+    /// A single non-axis-parallel line whose y-extent (`50.0005..50.0015`)
+    /// sits just above the lower/upper band boundary at `y = 50` (bounds
+    /// `[0, 100]`, 2 horizontal bands). Exact (unwidened) overlap excludes it
+    /// from the lower `[0, 50]` band; a wide-enough epsilon pulls it back in.
+    fn boundary_straddling_path() -> VectorPath {
+        VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(10.0, 50.0005)),
+                PathCommand::LineTo(Vec2::new(20.0, 50.0015)),
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0)),
+        )
+    }
+
+    #[test]
+    fn band_overlap_epsilon_normalizes_to_units_per_em() {
+        // #157 Phase 2 step 5: this exercises `build_bands`'s widened overlap
+        // test through the real encoder — not a pre-encoded fixture — so
+        // shrinking the epsilon back to zero (or a units_per_em too small to
+        // matter) would fail this test, unlike a GPU test that only replays
+        // already-encoded band tables.
+        let path = boundary_straddling_path();
+
+        // Default units_per_em = 1.0 -> epsilon = 1/1024 ~= 0.000977, wide
+        // enough that the curve's 0.0005 offset past the boundary still
+        // pulls it into the lower [0, 50] band.
+        let wide = encode_slug_glyph(&path, &SlugConfig::new(2, 1, 1)).unwrap();
+        assert!(
+            horizontal_band_contains(&wide, 0, 0),
+            "units_per_em=1.0's epsilon (1/1024) must pull the near-boundary \
+             curve into the lower band"
+        );
+
+        // A tighter units_per_em (as if a font's design units were a fraction
+        // of an em) shrinks the epsilon below the curve's 0.0005 offset,
+        // excluding it from the lower band again.
+        let narrow_config = SlugConfig::new(2, 1, 1).with_units_per_em(0.1);
+        let narrow = encode_slug_glyph(&path, &narrow_config).unwrap();
+        assert!(
+            !horizontal_band_contains(&narrow, 0, 0),
+            "a tighter units_per_em must shrink the epsilon back below the \
+             boundary offset"
+        );
+    }
+
+    #[test]
+    fn cache_encode_with_units_per_em_overrides_the_cache_default_per_call() {
+        // Proves the exact plumbing `mkui-wgpu`'s `slug_text::place_slug_run`
+        // relies on: a shared cache (one fixed `SlugConfig`, default
+        // units_per_em = 1.0) still applies a *different*, real font's
+        // units-per-em when the caller passes one per glyph. `SlugGlyphKey`'s
+        // `font_id` already disambiguates the two calls below, so this cannot
+        // alias the two fonts' blobs together — only the derived epsilon
+        // (and thus band membership) differs.
+        let path = boundary_straddling_path();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(2, 1, 1));
+
+        let wide = cache
+            .encode_with_units_per_em(golden_key(font_id()), &path, 1.0)
+            .unwrap();
+        assert!(horizontal_band_contains(&wide, 0, 0));
+
+        let narrow = cache
+            .encode_with_units_per_em(golden_key(font_id()), &path, 0.1)
+            .unwrap();
+        assert!(!horizontal_band_contains(&narrow, 0, 0));
+
+        // Plain `encode` (what `mkui-text`'s space-glyph / non-SFNT callers
+        // use) falls back to the cache's own units_per_em (1.0 here) — same
+        // outcome as `wide`.
+        let via_plain_encode = cache.encode(golden_key(font_id()), &path).unwrap();
+        assert!(horizontal_band_contains(&via_plain_encode, 0, 0));
+    }
+
     #[test]
     fn golden_quadratic_outline_records() {
         let glyph = encode_slug_glyph(&golden_path(), &golden_config()).unwrap();

@@ -42,11 +42,20 @@ breaking changes can land on minor bumps).
     small to have any effect.
   - Verified against the ratified `reference-harness/` adapter under the same
     pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
-    (Δ ≤ 1/255, SSIM = 1.000000), plus a new thin-gap regression scan on the
-    curve-heavy `o`/`g` fixtures at 1×/1.5×/2× DPI (a thin-gap texel only
-    counts as a regression when the ratified reference doesn't have the same
-    texel — its analytic coverage can legitimately produce an isolated
-    near-zero-alpha texel at a tight curve intersection).
+    (Δ ≤ 1/255, SSIM = 1.000000), plus a thin-gap scan on the curve-heavy
+    `o`/`g` fixtures at 1×/1.5×/2× DPI requiring zero hits — a texel only
+    counts as a "gap" when it sits at zero alpha between two texels at
+    essentially full coverage (`>= 250/255`), distinguishing a genuine
+    band-boundary discontinuity from ordinary antialiasing (verified against
+    the ratified `g` fixture, whose smoothest zero-alpha texel sits between
+    neighbours at 206 and 248 — a normal gradient, not a hole).
+  - Two new CPU-level tests exercise the real encoder end to end (not a
+    pre-encoded fixture): `band_overlap_epsilon_normalizes_to_units_per_em`
+    proves a curve straddling a band boundary by `0.0005` em joins the band
+    under the default epsilon and is excluded under a tighter `units_per_em`;
+    `cache_encode_with_units_per_em_overrides_the_cache_default_per_call`
+    proves the same through `SlugBlobCache`'s per-call override — the exact
+    path `place_slug_run` depends on.
   - No change to `encode_slug_glyph`'s or `subdivide_cubic`'s signatures, the
     linear-color present-pass contract (#155), or the render-pass
     architecture.
