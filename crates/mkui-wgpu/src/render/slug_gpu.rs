@@ -52,10 +52,15 @@ fn harness() -> OffscreenRenderer {
 /// A hand-authored filled square glyph, font units y-up, bounds (0,0)-(100,100).
 ///
 /// The four edges are stored as line records (duplicated-endpoint sentinel).
-/// The two horizontal edges are axis-parallel to a horizontal scan ray, so they
-/// are excluded from the single horizontal band; the band lists only the two
-/// vertical edges, which is exactly what the encoder would emit. A horizontal
-/// ray cast through any interior row crosses both vertical edges → coverage 1.
+/// The two horizontal edges (bottom, top) are axis-parallel to a horizontal
+/// scan ray, so they are excluded from the horizontal band; it lists only the
+/// two vertical edges, exactly what the encoder would emit. Symmetrically,
+/// the two vertical edges (right, left) are axis-parallel to a vertical scan
+/// ray and excluded from the vertical band, which lists the two horizontal
+/// edges (#157 Phase 1: both bands are real inputs to the dual-ray shader,
+/// so a hand-authored fixture must supply both, matching what
+/// `encode_slug_glyph` would produce for this shape). A ray cast through any
+/// interior sample crosses both of its axis's bounding edges → coverage 1.
 fn square_glyph() -> Arc<SlugGlyph> {
     let line = |p0: Vec2, p2: Vec2| SlugCurve { p0, p1: p2, p2 };
     Arc::new(SlugGlyph {
@@ -72,7 +77,8 @@ fn square_glyph() -> Arc<SlugGlyph> {
             line(Vec2::new(100.0, 100.0), Vec2::new(0.0, 100.0)), // 2: top (horizontal)
             line(Vec2::new(0.0, 100.0), Vec2::new(0.0, 0.0)), // 3: left (vertical)
         ],
-        // One full-height band listing the two vertical edges only.
+        // One full-height row listing the two vertical edges, descending max-x
+        // (both endpoints at x=100 and x=0 respectively — curve 1 first).
         horizontal_bands: vec![BandRange {
             lower: 0.0,
             upper: 100.0,
@@ -80,9 +86,15 @@ fn square_glyph() -> Arc<SlugGlyph> {
             curve_count: 2,
         }],
         horizontal_curve_indices: vec![1, 3],
-        // Vertical bands are unused by the single-horizontal-ray shader.
-        vertical_bands: Vec::new(),
-        vertical_curve_indices: Vec::new(),
+        // One full-width column listing the two horizontal edges, descending
+        // max-y (curve 2 at y=100 before curve 0 at y=0).
+        vertical_bands: vec![BandRange {
+            lower: 0.0,
+            upper: 100.0,
+            first_curve: 0,
+            curve_count: 2,
+        }],
+        vertical_curve_indices: vec![2, 0],
     })
 }
 

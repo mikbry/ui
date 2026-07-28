@@ -1,0 +1,233 @@
+//! Reference-adapter parity self-check for #157 Phase 1.
+//!
+//! Renders mkui's `SlugAdapter` output for the eight ratified glyph fixtures
+//! at three DPIs and diffs against the ratified reference adapter's committed
+//! known-good goldens (`docs/chevalier/mkui-slug-rewrite/reference-harness/`,
+//! read-only — this module never writes there). This is the chevalier's own
+//! pre-dispatch numeric gate mirroring dame-rubric.md § Phase 1 (N) criteria;
+//! it is not itself the ratified adapter and does not replace dame's own
+//! Lavapipe-side regeneration.
+//!
+//! mkui's production pipeline emits straight-alpha (`color.rgb`,
+//! `color.a * coverage`) and blends it with standard alpha blending. Drawn
+//! once, with an opaque-white fill, over a transparent-black clear, that
+//! blend arithmetic reduces to `(coverage, coverage, coverage, coverage)` —
+//! exactly the reference adapter's premultiplied `color * coverage` output —
+//! so the two are byte-comparable with no separate premultiply step and no
+//! change to the production blend state.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use mkui_vector2d::{BandRange, GlyphBounds, SlugCurve, SlugGlyph, Vec2};
+use mkui_vector2d_wgpu::{PlacedSlugGlyph, SlugAdapter};
+
+use super::offscreen::{OffscreenRenderer, BYTES_PER_PIXEL};
+
+const GLYPH_NAMES: [&str; 8] = ["H", "A", "V", "M", "g", "o", "plus", "pipe"];
+const DPI_CASES: [(f32, &str); 3] = [(1.0, "1x"), (1.5, "1.5x"), (2.0, "2x")];
+
+// Reference-harness camera constants (reference-harness/src/main.rs).
+const BASE_EM_PIXELS: f32 = 96.0;
+const BASE_CANVAS_PIXELS: f32 = 128.0;
+const BASE_PADDING_PIXELS: f32 = 16.0;
+
+// dame-rubric.md § Threshold calibration — Phase 1 BLESS thresholds.
+const MAX_CHANNEL_DELTA: u8 = 4;
+const MAX_DIFFERING_PIXELS: usize = 10;
+
+fn harness_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/chevalier/mkui-slug-rewrite/reference-harness")
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
+    let end = *cursor + 4;
+    let value = u32::from_le_bytes(bytes[*cursor..end].try_into().unwrap());
+    *cursor = end;
+    value
+}
+
+fn read_f32(bytes: &[u8], cursor: &mut usize) -> f32 {
+    f32::from_bits(read_u32(bytes, cursor))
+}
+
+fn read_band_table(bytes: &[u8], cursor: &mut usize) -> (Vec<BandRange>, Vec<u32>) {
+    let band_count = read_u32(bytes, cursor) as usize;
+    let mut bands = Vec::with_capacity(band_count);
+    for _ in 0..band_count {
+        bands.push(BandRange {
+            lower: read_f32(bytes, cursor),
+            upper: read_f32(bytes, cursor),
+            first_curve: read_u32(bytes, cursor),
+            curve_count: read_u32(bytes, cursor),
+        });
+    }
+    let index_count = read_u32(bytes, cursor) as usize;
+    let mut indices = Vec::with_capacity(index_count);
+    for _ in 0..index_count {
+        indices.push(read_u32(bytes, cursor));
+    }
+    (bands, indices)
+}
+
+/// Parse a `.slug` fixture: the public `SlugGlyph::to_le_bytes` layout
+/// (revision, bounds, curves, horizontal table, vertical table). Deliberately
+/// test-local rather than a `from_le_bytes` addition to `mkui-vector2d`'s
+/// public API, which is frozen for this mission.
+fn read_glyph(path: &Path) -> SlugGlyph {
+    let bytes = fs::read(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let mut cursor = 0usize;
+    let revision = read_u32(&bytes, &mut cursor);
+    let bounds = GlyphBounds {
+        x_min: read_f32(&bytes, &mut cursor),
+        y_min: read_f32(&bytes, &mut cursor),
+        x_max: read_f32(&bytes, &mut cursor),
+        y_max: read_f32(&bytes, &mut cursor),
+    };
+    let curve_count = read_u32(&bytes, &mut cursor) as usize;
+    let mut curves = Vec::with_capacity(curve_count);
+    for _ in 0..curve_count {
+        let p0 = Vec2::new(read_f32(&bytes, &mut cursor), read_f32(&bytes, &mut cursor));
+        let p1 = Vec2::new(read_f32(&bytes, &mut cursor), read_f32(&bytes, &mut cursor));
+        let p2 = Vec2::new(read_f32(&bytes, &mut cursor), read_f32(&bytes, &mut cursor));
+        curves.push(SlugCurve { p0, p1, p2 });
+    }
+    let (horizontal_bands, horizontal_curve_indices) = read_band_table(&bytes, &mut cursor);
+    let (vertical_bands, vertical_curve_indices) = read_band_table(&bytes, &mut cursor);
+    assert_eq!(cursor, bytes.len(), "trailing bytes in {}", path.display());
+    SlugGlyph {
+        revision,
+        bounds,
+        curves,
+        horizontal_bands,
+        horizontal_curve_indices,
+        vertical_bands,
+        vertical_curve_indices,
+    }
+}
+
+fn read_known_good_png(name: &str, dpi_label: &str) -> (u32, u32, Vec<u8>) {
+    let path = harness_dir()
+        .join("goldens/known-good")
+        .join(format!("{name}_{dpi_label}.png"));
+    let file = fs::File::open(&path).unwrap_or_else(|e| panic!("opening {}: {e}", path.display()));
+    let decoder = png::Decoder::new(file);
+    let mut reader = decoder.read_info().expect("reading PNG header");
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer).expect("decoding PNG frame");
+    buffer.truncate(info.buffer_size());
+    (info.width, info.height, buffer)
+}
+
+/// Render `glyph` at `dpi` with mkui's `SlugAdapter`, using the exact camera
+/// the reference adapter uses (reference-harness/src/main.rs `render_async`):
+/// a `round(128*dpi)` square canvas, `em_pixels = 96*dpi` as the placement
+/// scale, and the glyph's font-unit origin landing at
+/// `(padding, canvas - padding)` with `padding = 16*dpi`. Matching this
+/// exactly is what makes a byte-level comparison against the reference PNGs
+/// meaningful.
+fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
+    let canvas = (BASE_CANVAS_PIXELS * dpi).round() as u32;
+    let em_pixels = BASE_EM_PIXELS * dpi;
+    let padding = BASE_PADDING_PIXELS * dpi;
+
+    let renderer = OffscreenRenderer::new(canvas, canvas)
+        .expect("offscreen adapter/device must be available on the CI Vulkan/Lavapipe runner");
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let placed = PlacedSlugGlyph {
+        blob: Arc::new(glyph.clone()),
+        origin_px: [padding, canvas as f32 - padding],
+        scale_px_per_unit: em_pixels,
+        color: [1.0, 1.0, 1.0, 1.0],
+    };
+    let prepared = adapter.prepare(
+        renderer.device(),
+        renderer.queue(),
+        [canvas as f32, canvas as f32],
+        &[placed],
+    );
+    let mut encoder = renderer
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("slug reference parity encoder"),
+        });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("slug reference parity pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: renderer.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let Some(prepared) = prepared.as_ref() {
+            adapter.draw(&mut pass, prepared);
+        }
+    }
+    renderer.queue().submit(Some(encoder.finish()));
+    let pixels = renderer.read_rgba().expect("readback must succeed");
+    (canvas, pixels)
+}
+
+/// Rubric-shaped diff: max per-channel delta across every texel, plus the
+/// count of texels whose max-channel delta exceeds `MAX_CHANNEL_DELTA`.
+fn diff(a: &[u8], b: &[u8]) -> (u8, usize) {
+    let mut max_delta = 0u8;
+    let mut differing = 0usize;
+    for (pa, pb) in a
+        .chunks_exact(BYTES_PER_PIXEL as usize)
+        .zip(b.chunks_exact(BYTES_PER_PIXEL as usize))
+    {
+        let delta = pa
+            .iter()
+            .zip(pb)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0);
+        max_delta = max_delta.max(delta);
+        if delta > MAX_CHANNEL_DELTA {
+            differing += 1;
+        }
+    }
+    (max_delta, differing)
+}
+
+#[test]
+fn phase1_matches_reference_adapter_within_rubric_thresholds() {
+    let mut failures = Vec::new();
+    for name in GLYPH_NAMES {
+        let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
+        for (dpi, label) in DPI_CASES {
+            let (canvas, rendered) = render_mkui(&glyph, dpi);
+            let (golden_w, golden_h, golden) = read_known_good_png(name, label);
+            assert_eq!(
+                (canvas, canvas),
+                (golden_w, golden_h),
+                "{name}_{label}: canvas size must match the reference adapter's"
+            );
+            let (max_delta, differing) = diff(&rendered, &golden);
+            eprintln!("{name}_{label}: max_channel_delta={max_delta} differing_pixels={differing}");
+            if max_delta > MAX_CHANNEL_DELTA || differing > MAX_DIFFERING_PIXELS {
+                failures.push(format!(
+                    "{name}_{label}: max_channel_delta={max_delta} (limit {MAX_CHANNEL_DELTA}), \
+                     differing_pixels={differing} (limit {MAX_DIFFERING_PIXELS})"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Phase 1 rubric comparisons failed:\n{}",
+        failures.join("\n")
+    );
+}

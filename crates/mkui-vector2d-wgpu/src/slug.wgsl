@@ -1,17 +1,19 @@
-// Slug glyph coverage pipeline (#66).
+// Slug glyph coverage pipeline (#66, #157 Phase 1).
 //
 // One dilated quad is drawn per glyph instance. The fragment shader maps each
 // covered pixel back into the glyph's font-unit space (y-up), selects the
-// horizontal band the sample row falls in, and accumulates anti-aliased
-// coverage by casting a single horizontal ray through that band's quadratic
-// curve records. This honours the #65 / mkui-vector2d band contract: band
+// horizontal band the sample row falls in *and* the vertical band the sample
+// column falls in, and accumulates anti-aliased coverage by casting one
+// horizontal ray and one vertical ray through those bands' quadratic curve
+// records. This honours the #65 / mkui-vector2d band contract: band
 // membership and ordering are consumed as produced, never recomputed.
 //
-// The coverage kernel reproduces the analytic single-ray accumulation used by
-// public-domain GPU vector-text renderers (the Slug contract by Eric Lengyel,
-// and Will Dobbie's vector-texture note): for each curve the two y-crossings of
-// the ray contribute signed, pixel-footprint-clamped coverage. It copies no
-// upstream source.
+// The dual-ray weighted-coverage combination (root eligibility via the
+// `0x2e74` code, the two solved-poly helpers, and the weighted H/V
+// combination in `calc_coverage`) is a from-scratch WGSL implementation of
+// the published Slug algorithm (Lengyel, JCGT 6:2), independently structured
+// to mkui's own storage-buffer curve/band records rather than the upstream
+// texture layout. It copies no upstream source.
 
 struct Viewport {
     // Logical-pixel viewport the quads are projected against. `_pad` keeps the
@@ -39,18 +41,32 @@ struct Band {
 
 // Per-glyph instance: the dilated screen quad, the font→screen placement, the
 // fill colour, and the offsets that locate this glyph's slices inside the
-// shared curve / band / index buffers.
+// shared curve / band / index buffers. `band_base`/`band_count`/`index_base`
+// address the horizontal (row) bands; `vband_base`/`vband_count`/`vindex_base`
+// address the vertical (column) bands appended right after them in the same
+// `bands`/`indices` buffers. `bounds_min`/`bounds_max` are the glyph's own
+// font-unit ink bounds (not the dilated quad) — the band-selection index is
+// computed from these, matching the Slug reference's clamped
+// `band_transform` lookup rather than a containment scan, so AA coverage
+// stays correct for samples in the dilation margin just outside the bounds.
 struct Glyph {
     color: vec4<f32>,
     quad_min: vec2<f32>,
     quad_max: vec2<f32>,
     origin_px: vec2<f32>,
-    // params.x = pixels per font unit (placement scale + AA inverse-diameter).
+    // params.x = pixels per font unit (placement scale; no longer the AA
+    // width — see `fs_slug`'s `fwidth`-derived `pixels_per_em`).
     params: vec2<f32>,
     curve_base: u32,
     band_base: u32,
     band_count: u32,
     index_base: u32,
+    bounds_min: vec2<f32>,
+    bounds_max: vec2<f32>,
+    vband_base: u32,
+    vband_count: u32,
+    vindex_base: u32,
+    _pad: u32,
 };
 
 @group(0) @binding(0) var<uniform> viewport: Viewport;
@@ -91,96 +107,196 @@ fn vs_slug(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     return out;
 }
 
-// Signed coverage contribution of one curve for a horizontal ray at `sample`,
-// cast in +x. `inv_diam` is pixels-per-font-unit so the crossing position is
-// clamped to a one-pixel anti-aliasing footprint.
-fn eval_coverage(sample: vec2<f32>, inv_diam: f32, c: Curve) -> f32 {
-    let p0 = c.p0 - sample;
-    let p1 = c.p1 - sample;
-    let p2 = c.p2 - sample;
-    // Convex-hull early out: if every control point is on one side of the ray
-    // the curve cannot cross it.
-    if (p0.y > 0.0 && p1.y > 0.0 && p2.y > 0.0) {
-        return 0.0;
+// Root-eligibility code for a quadratic's three y-relative (or x-relative)
+// control-point values `(y1, y2, y3)` — which of the curve's two roots
+// actually cross the ray and with what sign, encoded via the sign bits of the
+// three values folded into a 3-bit lookup into the constant `0x2e74`. This is
+// the standard robust replacement for a `t in [0, 1)` range test: it decides
+// root validity from the endpoints' signs rather than the (numerically
+// fragile, near a tangent root) solved `t` itself. Bit 0 of the returned code
+// means "first root contributes"; bit 1 (tested via `code > 1u`) means
+// "second root contributes".
+fn calc_root_code(y1: f32, y2: f32, y3: f32) -> u32 {
+    let i1 = bitcast<u32>(y1) >> 31u;
+    let i2 = bitcast<u32>(y2) >> 30u;
+    let i3 = bitcast<u32>(y3) >> 29u;
+    var shift = (i2 & 2u) | (i1 & ~2u);
+    shift = (i3 & 4u) | (shift & ~4u);
+    return (0x2e74u >> shift) & 0x0101u;
+}
+
+// Solve the quadratic `a.y * t^2 - 2*b.y * t + rel0.y = 0` for its two roots
+// and evaluate the curve's x-coordinate at each, for a horizontal ray (the
+// curve's control points are `rel0`/`rel1`/`rel2`, already relative to the
+// sample). Falls back to the linear crossing when the curve is near-flat in
+// y (`|a.y|` below the threshold), matching the quadratic and linear cases at
+// their boundary.
+fn solve_horiz_poly(rel0: vec2<f32>, rel1: vec2<f32>, rel2: vec2<f32>) -> vec2<f32> {
+    let a = rel0 - rel1 * 2.0 + rel2;
+    let b = rel0 - rel1;
+    let ra = 1.0 / a.y;
+    let rb = 0.5 / b.y;
+    let d = sqrt(max(b.y * b.y - a.y * rel0.y, 0.0));
+    var t1 = (b.y - d) * ra;
+    var t2 = (b.y + d) * ra;
+    if (abs(a.y) < 1.0 / 65536.0) {
+        t1 = rel0.y * rb;
+        t2 = t1;
     }
-    if (p0.y < 0.0 && p1.y < 0.0 && p2.y < 0.0) {
-        return 0.0;
+    return vec2<f32>(
+        (a.x * t1 - b.x * 2.0) * t1 + rel0.x,
+        (a.x * t2 - b.x * 2.0) * t2 + rel0.x,
+    );
+}
+
+// Axis-transposed counterpart of `solve_horiz_poly` for a vertical ray: solves
+// in x and evaluates y.
+fn solve_vert_poly(rel0: vec2<f32>, rel1: vec2<f32>, rel2: vec2<f32>) -> vec2<f32> {
+    let a = rel0 - rel1 * 2.0 + rel2;
+    let b = rel0 - rel1;
+    let ra = 1.0 / a.x;
+    let rb = 0.5 / b.x;
+    let d = sqrt(max(b.x * b.x - a.x * rel0.x, 0.0));
+    var t1 = (b.x - d) * ra;
+    var t2 = (b.x + d) * ra;
+    if (abs(a.x) < 1.0 / 65536.0) {
+        t1 = rel0.x * rb;
+        t2 = t1;
     }
-    let a = p0 - 2.0 * p1 + p2;
-    let b = p0 - p1;
-    let cc = p0;
-    var t0 = -1.0;
-    var t1 = -1.0;
-    if (abs(a.y) >= 1e-5) {
-        let rad = b.y * b.y - a.y * cc.y;
-        if (rad < 0.0) {
-            return 0.0;
+    return vec2<f32>(
+        (a.y * t1 - b.y * 2.0) * t1 + rel0.y,
+        (a.y * t2 - b.y * 2.0) * t2 + rel0.y,
+    );
+}
+
+// Weighted combination of the two axis coverages (JCGT §4.2): the two rays'
+// coverage is blended by a per-axis weight (the crossing's closeness to the
+// sample, `1 - 2*|distance|` clamped) so the axis whose ray crosses closer to
+// the true edge dominates; `min(|xcov|, |ycov|)` is a coverage floor so a
+// sample deep inside the ink (both rays saturated near 1) is never darkened
+// by weighting noise. Callers clamp the result to `[0, 1]`; this returns the
+// pre-clamp value so a debug capture can inspect it unclamped.
+fn calc_coverage(xcov: f32, ycov: f32, xwgt: f32, ywgt: f32) -> f32 {
+    return max(
+        abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
+        min(abs(xcov), abs(ycov)),
+    );
+}
+
+// Per-axis accumulated coverage plus the combined pre-clamp value.
+struct Coverage {
+    xcov: f32,
+    ycov: f32,
+    value: f32,
+};
+
+// Cast one horizontal ray and one vertical ray through `g`'s band tables at
+// `sample` (font units, y-up) and return the combined, pre-clamp coverage.
+// The band for each axis is the clamped index derived from the glyph's own
+// font-unit bounds (matching the Slug reference's `band_transform`), not a
+// containment scan, so a sample in the dilation margin just outside the exact
+// bounds still finds the outermost band and its curves. Within a band, curves
+// are ordered (by #65's CPU encoder) by descending cross-axis extremum, so
+// the `pixels_per_em`-scaled early-out `break` is valid once a curve's
+// nearest extent is more than half a pixel past the sample.
+fn slug_coverage(g: Glyph, sample: vec2<f32>) -> Coverage {
+    let ems_per_pixel = max(fwidth(sample), vec2<f32>(1e-6));
+    let pixels_per_em = vec2<f32>(1.0) / ems_per_pixel;
+
+    var xcov = 0.0;
+    var xwgt = 0.0;
+    let h_span = max(g.bounds_max.y - g.bounds_min.y, 1e-6);
+    let h_count = max(g.band_count, 1u);
+    let h_idx = u32(clamp(floor((sample.y - g.bounds_min.y) / h_span * f32(h_count)), 0.0, f32(h_count) - 1.0));
+    let hband = bands[g.band_base + h_idx];
+    var hi = 0u;
+    loop {
+        if (hi >= hband.curve_count) {
+            break;
         }
-        let s = sqrt(rad);
-        t0 = (b.y - s) / a.y;
-        t1 = (b.y + s) / a.y;
-    } else {
-        // Near-linear in y: a single crossing. Order the slots by travel
-        // direction so the winding sign stays consistent with the quadratic
-        // branch (entering root positive, exiting root negative).
-        let denom = p0.y - p2.y;
-        if (abs(denom) < 1e-9) {
-            return 0.0;
+        let ci = indices[g.index_base + hband.first_curve + hi];
+        let c = curves[g.curve_base + ci];
+        let rel0 = c.p0 - sample;
+        let rel1 = c.p1 - sample;
+        let rel2 = c.p2 - sample;
+        if (max(max(rel0.x, rel1.x), rel2.x) * pixels_per_em.x < -0.5) {
+            break;
         }
-        let t = p0.y / denom;
-        if (p0.y < p2.y) {
-            t1 = t;
-        } else {
-            t0 = t;
+        let code = calc_root_code(rel0.y, rel1.y, rel2.y);
+        if (code != 0u) {
+            let r = solve_horiz_poly(rel0, rel1, rel2) * pixels_per_em.x;
+            if ((code & 1u) != 0u) {
+                xcov = xcov + clamp(r.x + 0.5, 0.0, 1.0);
+                xwgt = max(xwgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
+            }
+            if (code > 1u) {
+                xcov = xcov - clamp(r.y + 0.5, 0.0, 1.0);
+                xwgt = max(xwgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
+            }
         }
+        hi = hi + 1u;
     }
-    var alpha = 0.0;
-    if (t0 >= 0.0 && t0 < 1.0) {
-        let x = (a.x * t0 - 2.0 * b.x) * t0 + cc.x;
-        alpha = alpha + clamp(x * inv_diam + 0.5, 0.0, 1.0);
+
+    var ycov = 0.0;
+    var ywgt = 0.0;
+    let v_span = max(g.bounds_max.x - g.bounds_min.x, 1e-6);
+    let v_count = max(g.vband_count, 1u);
+    let v_idx = u32(clamp(floor((sample.x - g.bounds_min.x) / v_span * f32(v_count)), 0.0, f32(v_count) - 1.0));
+    let vband = bands[g.vband_base + v_idx];
+    var vi = 0u;
+    loop {
+        if (vi >= vband.curve_count) {
+            break;
+        }
+        let ci = indices[g.vindex_base + vband.first_curve + vi];
+        let c = curves[g.curve_base + ci];
+        let rel0 = c.p0 - sample;
+        let rel1 = c.p1 - sample;
+        let rel2 = c.p2 - sample;
+        if (max(max(rel0.y, rel1.y), rel2.y) * pixels_per_em.y < -0.5) {
+            break;
+        }
+        let code = calc_root_code(rel0.x, rel1.x, rel2.x);
+        if (code != 0u) {
+            let r = solve_vert_poly(rel0, rel1, rel2) * pixels_per_em.y;
+            if ((code & 1u) != 0u) {
+                ycov = ycov - clamp(r.x + 0.5, 0.0, 1.0);
+                ywgt = max(ywgt, clamp(1.0 - abs(r.x) * 2.0, 0.0, 1.0));
+            }
+            if (code > 1u) {
+                ycov = ycov + clamp(r.y + 0.5, 0.0, 1.0);
+                ywgt = max(ywgt, clamp(1.0 - abs(r.y) * 2.0, 0.0, 1.0));
+            }
+        }
+        vi = vi + 1u;
     }
-    if (t1 >= 0.0 && t1 < 1.0) {
-        let x = (a.x * t1 - 2.0 * b.x) * t1 + cc.x;
-        alpha = alpha - clamp(x * inv_diam + 0.5, 0.0, 1.0);
-    }
-    return alpha;
+
+    var result: Coverage;
+    result.xcov = xcov;
+    result.ycov = ycov;
+    result.value = calc_coverage(xcov, ycov, xwgt, ywgt);
+    return result;
 }
 
 @fragment
 fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     let g = glyphs[in.glyph_index];
-    let sample = in.font_pos;
-    let inv_diam = max(g.params.x, 1e-6);
-
-    var coverage = 0.0;
-    // Linear scan for the band whose y-range contains the sample row. Band
-    // counts are small and the scan avoids any edge-case rounding in a
-    // floor-division index.
-    var bi = 0u;
-    loop {
-        if (bi >= g.band_count) {
-            break;
-        }
-        let band = bands[g.band_base + bi];
-        if (sample.y >= band.lower && sample.y <= band.upper) {
-            var k = 0u;
-            loop {
-                if (k >= band.curve_count) {
-                    break;
-                }
-                let ci = indices[g.index_base + band.first_curve + k];
-                let curve = curves[g.curve_base + ci];
-                coverage = coverage + eval_coverage(sample, inv_diam, curve);
-                k = k + 1u;
-            }
-            break;
-        }
-        bi = bi + 1u;
-    }
-
-    let a = clamp(abs(coverage), 0.0, 1.0);
+    let cov = slug_coverage(g, in.font_pos);
+    let a = clamp(cov.value, 0.0, 1.0);
     if (a <= 0.0) {
         discard;
     }
     return vec4<f32>(g.color.rgb, g.color.a * a);
+}
+
+// Debug entry point exposing the pre-clamp coverage (dame-rubric § Phase 1
+// "coverage bounded in pre-clamp float buffer" criterion): `x` is the
+// combined value before the `[0, 1]` clamp in `fs_slug`, `y`/`z` are the raw
+// per-axis accumulations. Bind to an unclamped float target
+// (e.g. `Rgba32Float`) to inspect — never sampled by the production pipeline.
+@fragment
+fn fs_slug_debug_coverage(in: VsOut) -> @location(0) vec4<f32> {
+    let g = glyphs[in.glyph_index];
+    let cov = slug_coverage(g, in.font_pos);
+    return vec4<f32>(cov.value, cov.xcov, cov.ycov, 1.0);
 }
