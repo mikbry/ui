@@ -174,16 +174,22 @@ fn solve_vert_poly(rel0: vec2<f32>, rel1: vec2<f32>, rel2: vec2<f32>) -> vec2<f3
 // sample, `1 - 2*|distance|` clamped) so the axis whose ray crosses closer to
 // the true edge dominates; `min(|xcov|, |ycov|)` is a coverage floor so a
 // sample deep inside the ink (both rays saturated near 1) is never darkened
-// by weighting noise. Callers clamp the result to `[0, 1]`; this returns the
-// pre-clamp value so a debug capture can inspect it unclamped.
+// by weighting noise. The weighted value is a raw non-zero-winding
+// accumulation — two same-winding overlapping contours (e.g. the ratified
+// `plus` fixture's two crossing bars) legitimately reach magnitude > 1 at
+// their intersection — so the final `[0, 1]` clamp is applied here, matching
+// the reference adapter's `calc_coverage` (which clamps internally, not at
+// its call site): the accumulator, not the final alpha, is what is allowed to
+// exceed the unit range.
 fn calc_coverage(xcov: f32, ycov: f32, xwgt: f32, ywgt: f32) -> f32 {
-    return max(
+    let coverage = max(
         abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
         min(abs(xcov), abs(ycov)),
     );
+    return clamp(coverage, 0.0, 1.0);
 }
 
-// Per-axis accumulated coverage plus the combined pre-clamp value.
+// Per-axis accumulated coverage plus the combined, already-clamped value.
 struct Coverage {
     xcov: f32,
     ycov: f32,
@@ -191,8 +197,8 @@ struct Coverage {
 };
 
 // Cast one horizontal ray and one vertical ray through `g`'s band tables at
-// `sample` (font units, y-up) and return the combined, pre-clamp coverage.
-// The band for each axis is the clamped index derived from the glyph's own
+// `sample` (font units, y-up) and return the combined coverage. The band for
+// each axis is the clamped index derived from the glyph's own
 // font-unit bounds (matching the Slug reference's `band_transform`), not a
 // containment scan, so a sample in the dilation margin just outside the exact
 // bounds still finds the outermost band and its curves. Within a band, curves
@@ -282,17 +288,20 @@ fn slug_coverage(g: Glyph, sample: vec2<f32>) -> Coverage {
 fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     let g = glyphs[in.glyph_index];
     let cov = slug_coverage(g, in.font_pos);
-    let a = clamp(cov.value, 0.0, 1.0);
-    if (a <= 0.0) {
+    if (cov.value <= 0.0) {
         discard;
     }
-    return vec4<f32>(g.color.rgb, g.color.a * a);
+    return vec4<f32>(g.color.rgb, g.color.a * cov.value);
 }
 
-// Debug entry point exposing the pre-clamp coverage (dame-rubric § Phase 1
-// "coverage bounded in pre-clamp float buffer" criterion): `x` is the
-// combined value before the `[0, 1]` clamp in `fs_slug`, `y`/`z` are the raw
-// per-axis accumulations. Bind to an unclamped float target
+// Debug entry point exposing the coverage the fragment shader computes just
+// before it scales the fill colour's alpha (dame-rubric § Phase 1 "coverage
+// bounded in pre-clamp float buffer" criterion): `x` is `calc_coverage`'s
+// already-`[0, 1]`-clamped combined value (matching the reference adapter's
+// own internally-clamped `calc_coverage`), `y`/`z` are the raw, genuinely
+// unbounded per-axis winding accumulations — these can legitimately exceed
+// `[-1, 1]` at a same-winding self-overlap (see `calc_coverage`'s doc comment)
+// and are exposed here for that reason. Bind to a float target
 // (e.g. `Rgba32Float`) to inspect — never sampled by the production pipeline.
 @fragment
 fn fs_slug_debug_coverage(in: VsOut) -> @location(0) vec4<f32> {

@@ -36,6 +36,7 @@ const BASE_PADDING_PIXELS: f32 = 16.0;
 // dame-rubric.md § Threshold calibration — Phase 1 BLESS thresholds.
 const MAX_CHANNEL_DELTA: u8 = 4;
 const MAX_DIFFERING_PIXELS: usize = 10;
+const MIN_SSIM: f64 = 0.995;
 
 fn harness_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -180,7 +181,13 @@ fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
 }
 
 /// Rubric-shaped diff: max per-channel delta across every texel, plus the
-/// count of texels whose max-channel delta exceeds `MAX_CHANNEL_DELTA`.
+/// count of texels that differ *at all* (any channel off by at least one
+/// byte). These are the rubric's two independent (N) criteria — a pixel with
+/// delta 1 still counts toward the differing-pixel budget even though it
+/// never approaches the separate `MAX_CHANNEL_DELTA` magnitude bound; folding
+/// the two together would make the pixel-count criterion vacuous (whenever
+/// the magnitude check passes, a `delta > MAX_CHANNEL_DELTA` count is
+/// necessarily zero).
 fn diff(a: &[u8], b: &[u8]) -> (u8, usize) {
     let mut max_delta = 0u8;
     let mut differing = 0usize;
@@ -195,11 +202,85 @@ fn diff(a: &[u8], b: &[u8]) -> (u8, usize) {
             .max()
             .unwrap_or(0);
         max_delta = max_delta.max(delta);
-        if delta > MAX_CHANNEL_DELTA {
+        if delta > 0 {
             differing += 1;
         }
     }
     (max_delta, differing)
+}
+
+/// Windowed SSIM (8×8 non-overlapping blocks; every rubric canvas size —
+/// 128/192/256 — divides evenly, so no partial-block handling is needed) on
+/// the R channel. Both the reference adapter and mkui emit premultiplied
+/// white-on-transparent coverage for these fixtures (`color = [1,1,1,1]`), so
+/// `R == G == B == A` and the R channel alone carries the full signal.
+fn ssim_r(a: &[u8], b: &[u8], width: u32, height: u32) -> f64 {
+    const WINDOW: usize = 8;
+    const K1: f64 = 0.01;
+    const K2: f64 = 0.03;
+    const DYNAMIC_RANGE: f64 = 255.0;
+    let c1 = (K1 * DYNAMIC_RANGE).powi(2);
+    let c2 = (K2 * DYNAMIC_RANGE).powi(2);
+
+    let width = width as usize;
+    let height = height as usize;
+    let ra: Vec<f64> = a
+        .chunks_exact(BYTES_PER_PIXEL as usize)
+        .map(|p| p[0] as f64)
+        .collect();
+    let rb: Vec<f64> = b
+        .chunks_exact(BYTES_PER_PIXEL as usize)
+        .map(|p| p[0] as f64)
+        .collect();
+
+    let mut total = 0.0;
+    let mut windows = 0.0;
+    let mut y = 0;
+    while y < height {
+        let mut x = 0;
+        while x < width {
+            let win_h = WINDOW.min(height - y);
+            let win_w = WINDOW.min(width - x);
+            let n = (win_h * win_w) as f64;
+
+            let mut sum_a = 0.0;
+            let mut sum_b = 0.0;
+            for dy in 0..win_h {
+                for dx in 0..win_w {
+                    let idx = (y + dy) * width + (x + dx);
+                    sum_a += ra[idx];
+                    sum_b += rb[idx];
+                }
+            }
+            let mean_a = sum_a / n;
+            let mean_b = sum_b / n;
+
+            let mut var_a = 0.0;
+            let mut var_b = 0.0;
+            let mut covar = 0.0;
+            for dy in 0..win_h {
+                for dx in 0..win_w {
+                    let idx = (y + dy) * width + (x + dx);
+                    let da = ra[idx] - mean_a;
+                    let db = rb[idx] - mean_b;
+                    var_a += da * da;
+                    var_b += db * db;
+                    covar += da * db;
+                }
+            }
+            var_a /= n;
+            var_b /= n;
+            covar /= n;
+
+            let ssim = ((2.0 * mean_a * mean_b + c1) * (2.0 * covar + c2))
+                / ((mean_a * mean_a + mean_b * mean_b + c1) * (var_a + var_b + c2));
+            total += ssim;
+            windows += 1.0;
+            x += WINDOW;
+        }
+        y += WINDOW;
+    }
+    total / windows
 }
 
 #[test]
@@ -216,11 +297,16 @@ fn phase1_matches_reference_adapter_within_rubric_thresholds() {
                 "{name}_{label}: canvas size must match the reference adapter's"
             );
             let (max_delta, differing) = diff(&rendered, &golden);
-            eprintln!("{name}_{label}: max_channel_delta={max_delta} differing_pixels={differing}");
-            if max_delta > MAX_CHANNEL_DELTA || differing > MAX_DIFFERING_PIXELS {
+            let ssim = ssim_r(&rendered, &golden, canvas, canvas);
+            eprintln!(
+                "{name}_{label}: max_channel_delta={max_delta} differing_pixels={differing} ssim={ssim:.6}"
+            );
+            if max_delta > MAX_CHANNEL_DELTA || differing > MAX_DIFFERING_PIXELS || ssim < MIN_SSIM
+            {
                 failures.push(format!(
                     "{name}_{label}: max_channel_delta={max_delta} (limit {MAX_CHANNEL_DELTA}), \
-                     differing_pixels={differing} (limit {MAX_DIFFERING_PIXELS})"
+                     differing_pixels={differing} (limit {MAX_DIFFERING_PIXELS}), \
+                     ssim={ssim:.6} (floor {MIN_SSIM})"
                 ));
             }
         }
