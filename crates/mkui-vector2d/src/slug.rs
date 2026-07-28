@@ -61,12 +61,15 @@ use mkui_text::{Affine2Fixed, FontId, LayoutRun, VariationSettings};
 /// Immutable encoder configuration. Held by the owning [`SlugBlobCache`]; it is
 /// **not** part of [`SlugGlyphKey`] so two caches with different configs form
 /// separate namespaces and cannot alias each other's blobs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SlugConfig {
     horizontal_bands: u16,
     vertical_bands: u16,
     revision: u32,
-    units_per_em: f32,
+    /// `units_per_em`'s bit pattern (`f32::to_bits`), so the config keeps
+    /// deriving `Eq`/`Hash` (`f32` implements neither) — no downstream
+    /// map/set usage of `SlugConfig` loses those impls.
+    units_per_em_bits: u32,
 }
 
 impl SlugConfig {
@@ -81,7 +84,7 @@ impl SlugConfig {
             horizontal_bands: horizontal_bands.max(1),
             vertical_bands: vertical_bands.max(1),
             revision,
-            units_per_em: 1.0,
+            units_per_em_bits: 1.0_f32.to_bits(),
         }
     }
 
@@ -89,7 +92,7 @@ impl SlugConfig {
     /// geometry). Clamped to a small positive floor so the derived band
     /// overlap epsilon is never zero or negative.
     pub fn with_units_per_em(mut self, units_per_em: f32) -> Self {
-        self.units_per_em = units_per_em.max(f32::EPSILON);
+        self.units_per_em_bits = units_per_em.max(f32::EPSILON).to_bits();
         self
     }
 
@@ -109,7 +112,7 @@ impl SlugConfig {
 
     /// The em scale band overlap is normalized against. Defaults to `1.0`.
     pub fn units_per_em(self) -> f32 {
-        self.units_per_em
+        f32::from_bits(self.units_per_em_bits)
     }
 }
 
@@ -520,17 +523,36 @@ impl SlugBlobCache {
     /// stored blob is reused and the hit counter increments. On a miss the blob
     /// is encoded once, stored, and the miss counter increments. On an encode
     /// error nothing is stored (the cache is never poisoned) and no counter
-    /// moves.
+    /// moves. Uses the cache's own `units_per_em` (default `1.0`) for the band
+    /// overlap epsilon; callers encoding real font outlines should use
+    /// [`Self::encode_with_units_per_em`] instead.
     pub fn encode(
         &mut self,
         key: SlugGlyphKey,
         path: &VectorPath,
     ) -> Result<Arc<SlugGlyph>, SlugEncodeError> {
+        self.encode_with_units_per_em(key, path, self.config.units_per_em())
+    }
+
+    /// Encode `path` under `key` as [`Self::encode`] does, but normalize the
+    /// band overlap epsilon (#157 Phase 2 step 5) against `units_per_em`
+    /// instead of the cache's own config for this call only. Lets one cache
+    /// serve glyphs from fonts with different units-per-em: `key` (via
+    /// [`SlugGlyphKey::font_id`]) already disambiguates by font identity, so
+    /// per-call `units_per_em` cannot alias two fonts' blobs together — only
+    /// the derived epsilon differs, never correctness.
+    pub fn encode_with_units_per_em(
+        &mut self,
+        key: SlugGlyphKey,
+        path: &VectorPath,
+        units_per_em: f32,
+    ) -> Result<Arc<SlugGlyph>, SlugEncodeError> {
         if let Some(blob) = self.blobs.get(&key) {
             self.hits += 1;
             return Ok(Arc::clone(blob));
         }
-        let glyph = encode_slug_glyph(path, &self.config)?;
+        let config = self.config.with_units_per_em(units_per_em);
+        let glyph = encode_slug_glyph(path, &config)?;
         let blob = Arc::new(glyph);
         self.blobs.insert(key, Arc::clone(&blob));
         self.misses += 1;

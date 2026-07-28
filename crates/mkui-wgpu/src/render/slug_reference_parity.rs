@@ -147,6 +147,7 @@ fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
         renderer.device(),
         renderer.queue(),
         [canvas as f32, canvas as f32],
+        1.0,
         &[placed],
     );
     let mut encoder = renderer

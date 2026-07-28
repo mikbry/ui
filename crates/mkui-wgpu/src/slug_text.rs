@@ -61,7 +61,12 @@ pub fn place_slug_run(
         let units_per_em = (outline.units_per_em.max(1)) as f32;
         let path = glyph_outline_to_path(&outline);
         let blob_key = SlugGlyphKey::from_run(run, glyph.glyph_id, Affine2Fixed::IDENTITY);
-        let blob = match cache.encode(blob_key, &path) {
+        // #157 Phase 2: normalize the band overlap epsilon against this
+        // face's *real* units-per-em, not the cache's default `1.0` — a
+        // 2048-upem face would otherwise get an epsilon 2048x smaller than
+        // intended. `blob_key` already carries `font_id`, so a cache shared
+        // across faces with different units-per-em still can't alias blobs.
+        let blob = match cache.encode_with_units_per_em(blob_key, &path, units_per_em) {
             Ok(blob) => blob,
             // An empty outline (e.g. the space glyph) draws nothing.
             Err(_) => continue,

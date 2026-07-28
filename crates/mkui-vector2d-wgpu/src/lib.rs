@@ -67,23 +67,37 @@ pub use mkui_vector2d::{
 
 use mkui_vector2d::{encode_vector_path, stroke_to_fill, SlugConfig};
 
-/// Half a physical pixel, expressed in font units via a glyph's own placement
-/// scale (#157 Phase 2 step 4: bounded 2D dilation). Added to every edge of a
-/// glyph's *font-unit* bounds, before pixel projection, so the anti-aliasing
-/// footprint at the ink boundary is never clipped by the quad.
+/// Half a *physical* pixel, expressed in font units via a glyph's own
+/// placement scale and the frame's logical→physical pixel ratio (#157 Phase 2
+/// step 4: bounded 2D dilation). Added to every edge of a glyph's *font-unit*
+/// bounds, before pixel projection, so the anti-aliasing footprint at the ink
+/// boundary is never clipped by the quad.
 ///
-/// mkui's screen transform is a uniform, axis-aligned scale + translate — no
-/// rotation, skew, or perspective. The reference adapter's vertex shader
-/// (`slug_dilate`, "A Decade of Slug" § Dynamic Dilation) derives the
-/// equivalent half-pixel expansion from the render's full Jacobian so it
-/// stays correct under an arbitrary transform; for the transform mkui
-/// actually ships, that general computation collapses to this closed form —
-/// `0.5 / scale` font units, scaled back by the same `scale` at projection
-/// time, is exactly half a screen pixel at every DPI. Full per-render
-/// MVP/viewport-derived dynamic dilation is deliberately out of scope for
-/// this mission (mkui doesn't ship perspective/transform text yet).
-fn half_pixel_dilation_units(scale_px_per_unit: f32) -> f32 {
-    0.5 / scale_px_per_unit.max(f32::EPSILON)
+/// `scale_px_per_unit` and every other coordinate this crate packs
+/// (`origin_px`, `viewport_px`) are in the caller's own pixel space, which in
+/// mkui-wgpu's real windowed renderer is *logical* pixels — the physical
+/// surface can carry more device pixels per logical pixel on a HiDPI display
+/// (`device_pixel_ratio > 1.0`). Dilating by a flat `0.5` in that logical
+/// space would shrink to less than half a *physical* pixel at 1x and grow
+/// past it at 2x/3x, exactly the asymmetry Codex's original Sprint 8 review
+/// flagged (`app.rs`'s logical→physical gap). Dividing by `device_pixel_ratio`
+/// too corrects for that: `0.5 / (device_pixel_ratio * scale)` font units,
+/// scaled back by `scale` at projection time, is exactly half a *physical*
+/// pixel regardless of the window's DPI. Callers with no logical/physical
+/// split (an offscreen render whose `viewport_px` already equals the
+/// physical target, e.g. this crate's own tests) pass `1.0`.
+///
+/// mkui's screen transform is otherwise a uniform, axis-aligned scale +
+/// translate — no rotation, skew, or perspective. The reference adapter's
+/// vertex shader (`slug_dilate`, "A Decade of Slug" § Dynamic Dilation)
+/// derives the equivalent half-pixel expansion from the render's full
+/// Jacobian so it stays correct under an arbitrary transform; for the
+/// transform mkui actually ships, that general computation collapses to this
+/// closed form. Full per-render MVP/viewport-derived dynamic dilation is
+/// deliberately out of scope for this mission (mkui doesn't ship
+/// perspective/transform text yet).
+fn half_pixel_dilation_units(scale_px_per_unit: f32, device_pixel_ratio: f32) -> f32 {
+    0.5 / (device_pixel_ratio.max(f32::EPSILON) * scale_px_per_unit.max(f32::EPSILON))
 }
 
 /// A Slug glyph blob placed on screen.
@@ -251,8 +265,11 @@ pub(crate) struct PackedSlug {
 
 /// Pack placed glyphs into shared GPU buffers. Glyphs with no curves are
 /// skipped (they would emit an empty quad). Returns the flat curve/band/index
-/// streams plus one [`GpuGlyph`] instance per drawable glyph.
-pub(crate) fn pack(glyphs: &[PlacedSlugGlyph]) -> PackedSlug {
+/// streams plus one [`GpuGlyph`] instance per drawable glyph. `device_pixel_ratio`
+/// is the frame's physical-pixels-per-logical-pixel ratio (`1.0` when the
+/// caller's pixel space has no logical/physical split) — see
+/// [`half_pixel_dilation_units`].
+pub(crate) fn pack(glyphs: &[PlacedSlugGlyph], device_pixel_ratio: f32) -> PackedSlug {
     let mut packed = PackedSlug::default();
     for placed in glyphs {
         let blob = placed.blob.as_ref();
@@ -300,13 +317,13 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph]) -> PackedSlug {
             .indices
             .extend_from_slice(&blob.vertical_curve_indices);
 
-        // Dilated screen quad: expand the font-unit bounds by half a screen
-        // pixel's worth of font units *before* projecting to pixels, so the
-        // dilation is exactly half a physical pixel regardless of `scale`
-        // (see `half_pixel_dilation_units`). Font units are y-up; screen is
-        // y-down, so the glyph's y_max maps to the smaller (top) screen y.
+        // Dilated screen quad: expand the font-unit bounds by half a
+        // *physical* pixel's worth of font units *before* projecting to
+        // pixels (see `half_pixel_dilation_units`). Font units are y-up;
+        // screen is y-down, so the glyph's y_max maps to the smaller (top)
+        // screen y.
         let [ox, oy] = placed.origin_px;
-        let dilation = half_pixel_dilation_units(scale);
+        let dilation = half_pixel_dilation_units(scale, device_pixel_ratio);
         let left = ox + (blob.bounds.x_min - dilation) * scale;
         let right = ox + (blob.bounds.x_max + dilation) * scale;
         let top = oy - (blob.bounds.y_max + dilation) * scale;
@@ -409,31 +426,38 @@ impl SlugAdapter {
     }
 
     /// Pack `glyphs` and upload them as a [`PreparedSlug`] for `viewport_px`
-    /// (the logical-pixel viewport the quads are projected against). Returns
-    /// `None` when there is nothing drawable (no glyph carried any curves) so
-    /// the caller can skip the draw entirely. Borrows device + queue only.
+    /// (the logical-pixel viewport the quads are projected against).
+    /// `device_pixel_ratio` is the frame's physical-pixels-per-logical-pixel
+    /// ratio (`1.0` for a caller with no logical/physical split, e.g. an
+    /// offscreen render whose `viewport_px` already is the physical target) —
+    /// see [`half_pixel_dilation_units`]. Returns `None` when there is
+    /// nothing drawable (no glyph carried any curves) so the caller can skip
+    /// the draw entirely. Borrows device + queue only.
     pub fn prepare(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         viewport_px: [f32; 2],
+        device_pixel_ratio: f32,
         glyphs: &[PlacedSlugGlyph],
     ) -> Option<PreparedSlug> {
-        self.prepare_packed(device, queue, viewport_px, pack(glyphs))
+        self.prepare_packed(device, queue, viewport_px, pack(glyphs, device_pixel_ratio))
     }
 
     /// Encode and prepare arbitrary [`VectorPath`] fills and [`PlacedStroke`]s
     /// for `viewport_px`, reusing the exact glyph coverage pipeline. Each fill is
     /// lowered via `encode_vector_path` and each stroke via `stroke_to_fill` +
     /// `encode_vector_path` into the shared [`SlugGlyph`] records, then packed and
-    /// uploaded identically to a glyph frame. Items that paint nothing (empty,
-    /// non-finite, or a non-positive stroke width) are skipped; returns `None`
-    /// when nothing is drawable. Borrows device + queue only.
+    /// uploaded identically to a glyph frame. `device_pixel_ratio` is as in
+    /// [`Self::prepare`]. Items that paint nothing (empty, non-finite, or a
+    /// non-positive stroke width) are skipped; returns `None` when nothing is
+    /// drawable. Borrows device + queue only.
     pub fn prepare_paths(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         viewport_px: [f32; 2],
+        device_pixel_ratio: f32,
         fills: &[PlacedVectorPath],
         strokes: &[PlacedStroke],
     ) -> Option<PreparedSlug> {
@@ -442,7 +466,12 @@ impl SlugAdapter {
             .filter_map(encode_fill)
             .chain(strokes.iter().filter_map(encode_stroke))
             .collect();
-        self.prepare_packed(device, queue, viewport_px, pack(&placed))
+        self.prepare_packed(
+            device,
+            queue,
+            viewport_px,
+            pack(&placed, device_pixel_ratio),
+        )
     }
 
     /// Upload already-packed records into a [`PreparedSlug`]. Shared by
@@ -622,7 +651,7 @@ mod tests {
 
     #[test]
     fn pack_emits_one_instance_per_drawable_glyph() {
-        let packed = pack(&[placed(triangle_blob()), placed(triangle_blob())]);
+        let packed = pack(&[placed(triangle_blob()), placed(triangle_blob())], 1.0);
         assert_eq!(packed.glyphs.len(), 2, "one instance per glyph");
         // Two glyphs, each with three curves → six curve records, and the
         // second glyph's offsets must follow the first.
@@ -634,8 +663,8 @@ mod tests {
     #[test]
     fn pack_concatenates_band_and_index_streams_with_per_glyph_bases() {
         let blob = triangle_blob();
-        let single = pack(&[placed(blob.clone())]);
-        let double = pack(&[placed(blob.clone()), placed(blob.clone())]);
+        let single = pack(&[placed(blob.clone())], 1.0);
+        let double = pack(&[placed(blob.clone()), placed(blob.clone())], 1.0);
 
         // The second glyph's bases pick up exactly where the first ended.
         assert_eq!(
@@ -656,7 +685,7 @@ mod tests {
     #[test]
     fn pack_records_match_the_neutral_blob_verbatim() {
         let blob = triangle_blob();
-        let packed = pack(&[placed(blob.clone())]);
+        let packed = pack(&[placed(blob.clone())], 1.0);
         // Curve records are copied 1:1 from the neutral blob (no reinterpretation).
         for (gpu, src) in packed.curves.iter().zip(blob.curves.iter()) {
             assert_eq!(gpu.p0, [src.p0.x, src.p0.y]);
@@ -693,11 +722,11 @@ mod tests {
     #[test]
     fn dilated_quad_brackets_the_scaled_glyph_bounds() {
         let p = placed(triangle_blob());
-        let packed = pack(std::slice::from_ref(&p));
+        let packed = pack(std::slice::from_ref(&p), 1.0);
         let g = packed.glyphs[0];
         let scale = p.scale_px_per_unit;
         // Half a physical pixel at this scale (#157 Phase 2).
-        let dilation_px = half_pixel_dilation_units(scale) * scale;
+        let dilation_px = half_pixel_dilation_units(scale, 1.0) * scale;
         assert!(
             (dilation_px - 0.5).abs() < 1e-4,
             "half-pixel dilation must be ~0.5 physical px regardless of scale, got {dilation_px}"
@@ -712,6 +741,26 @@ mod tests {
             g.quad_min[1] < g.quad_max[1],
             "top must be above bottom in y-down screen space"
         );
+    }
+
+    #[test]
+    fn dilation_stays_half_a_physical_pixel_across_device_pixel_ratios() {
+        // Codex R1 review of #161: dilating by a flat amount in the caller's
+        // *logical*-pixel space (mkui-wgpu's real windowed renderer projects
+        // Slug quads against the logical viewport, #97) would shrink to less
+        // than half a physical pixel at 1x and grow past it at 2x/3x. The
+        // dilation in *logical* px must shrink as `device_pixel_ratio` grows
+        // so the *physical* dilation stays exactly 0.5 at every ratio.
+        let scale = 37.0; // an arbitrary, non-round placement scale.
+        for device_pixel_ratio in [1.0_f32, 1.5, 2.0, 3.0] {
+            let logical_dilation_px = half_pixel_dilation_units(scale, device_pixel_ratio) * scale;
+            let physical_dilation_px = logical_dilation_px * device_pixel_ratio;
+            assert!(
+                (physical_dilation_px - 0.5).abs() < 1e-4,
+                "device_pixel_ratio={device_pixel_ratio}: physical dilation must stay \
+                 ~0.5px, got {physical_dilation_px} (logical {logical_dilation_px})"
+            );
+        }
     }
 
     #[test]
@@ -730,7 +779,7 @@ mod tests {
             vertical_bands: Vec::new(),
             vertical_curve_indices: Vec::new(),
         });
-        let packed = pack(&[placed(empty)]);
+        let packed = pack(&[placed(empty)], 1.0);
         assert!(packed.glyphs.is_empty(), "a curve-less glyph emits no quad");
     }
 
@@ -791,7 +840,7 @@ mod tests {
     #[test]
     fn fill_encodes_and_packs_like_a_glyph() {
         let placed = encode_fill(&fill_triangle()).expect("triangle fill encodes");
-        let packed = pack(&[placed]);
+        let packed = pack(&[placed], 1.0);
         assert_eq!(packed.glyphs.len(), 1, "one instance for one fill");
         // A triangle flattens to three straight edges (all line sentinels).
         assert_eq!(packed.curves.len(), 3);
@@ -869,7 +918,7 @@ mod tests {
             color: [0.0, 0.0, 1.0, 1.0],
         };
         let placed = encode_stroke(&stroke).expect("stroked line encodes");
-        let packed = pack(&[placed]);
+        let packed = pack(&[placed], 1.0);
         assert_eq!(packed.glyphs.len(), 1);
         // A butt-capped line strokes to a rectangle → four straight edges.
         assert!(!packed.curves.is_empty());

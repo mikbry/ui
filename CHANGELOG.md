@@ -12,23 +12,34 @@ breaking changes can land on minor bumps).
   epsilon (mkui-slug-rewrite mission, `mikbry/ui#157` steps 4-5).**
   - **Half-physical-pixel dilation (bounded 2D case).** `crates/mkui-vector2d-wgpu`'s
     quad expansion changed from a flat `1.5`-pixel constant to a half-pixel
-    dilation derived from each glyph's own placement scale
-    (`half_pixel_dilation_units`, applied to the font-unit bounds before
-    pixel projection): `0.5 / scale`, scaled back by the same `scale` at
-    projection time, is exactly half a physical pixel at every DPI. mkui's
-    screen transform is a uniform, axis-aligned scale + translate (no
-    rotation/skew/perspective), so this closed form is exactly what the
-    reference adapter's general Jacobian-based `slug_dilate` collapses to for
-    that transform. Full per-render MVP/viewport-derived dynamic dilation
-    stays out of scope (mkui doesn't ship perspective/transform text yet).
+    dilation derived from each glyph's own placement scale and the frame's
+    logical→physical pixel ratio (`half_pixel_dilation_units`, applied to the
+    font-unit bounds before pixel projection): `0.5 / (device_pixel_ratio *
+    scale)`, scaled back by the same `scale` at projection time, is exactly
+    half a *physical* pixel at every DPI. `SlugAdapter::prepare`/`prepare_paths`
+    gained a `device_pixel_ratio` parameter (`1.0` for a caller with no
+    logical/physical split); the real windowed renderer (`mkui-wgpu`'s
+    `render/mod.rs`) derives it from the physical surface config vs. the
+    logical scene viewport, closing the exact logical→physical gap Codex's
+    original Sprint 8 review flagged at `app.rs`. mkui's screen transform is
+    a uniform, axis-aligned scale + translate (no rotation/skew/perspective),
+    so this closed form is exactly what the reference adapter's general
+    Jacobian-based `slug_dilate` collapses to for that transform. Full
+    per-render MVP/viewport-derived dynamic dilation stays out of scope
+    (mkui doesn't ship perspective/transform text yet).
   - **Band overlap epsilon.** `crates/mkui-vector2d`'s CPU band builder
     (`build_bands`) now widens the scan-axis overlap test by an epsilon on
     both sides, closing the floating-point gap that could otherwise drop a
     curve sitting almost exactly on a band boundary. `SlugConfig` gained a
-    `units_per_em` field (default `1.0`, additive — every existing
-    `SlugConfig::new` call site is unaffected) and a `with_units_per_em`
-    builder; the epsilon is `units_per_em / 1024.0`, matching the upstream
-    README's recommended `1/1024` em overlap.
+    `units_per_em` field (default `1.0`, additive and `Eq`/`Hash`-preserving —
+    every existing `SlugConfig::new` call site is unaffected) and a
+    `with_units_per_em` builder; the epsilon is `units_per_em / 1024.0`,
+    matching the upstream README's recommended `1/1024` em overlap.
+    `SlugBlobCache` gained `encode_with_units_per_em` so the real SFNT-backed
+    glyph path (`mkui-wgpu`'s `slug_text::place_slug_run`) can normalize the
+    epsilon against each face's *actual* units-per-em instead of the cache's
+    default — a 2048-upem face would otherwise get an epsilon 2048x too
+    small to have any effect.
   - Verified against the ratified `reference-harness/` adapter under the same
     pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
     (Δ ≤ 1/255, SSIM = 1.000000), plus a new thin-gap regression scan on the
