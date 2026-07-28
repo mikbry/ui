@@ -67,9 +67,24 @@ pub use mkui_vector2d::{
 
 use mkui_vector2d::{encode_vector_path, stroke_to_fill, SlugConfig};
 
-/// Pixels of dilation added to every edge of a glyph's screen quad so the
-/// anti-aliasing footprint at the ink boundary is not clipped by the quad.
-const QUAD_DILATION_PX: f32 = 1.5;
+/// Half a physical pixel, expressed in font units via a glyph's own placement
+/// scale (#157 Phase 2 step 4: bounded 2D dilation). Added to every edge of a
+/// glyph's *font-unit* bounds, before pixel projection, so the anti-aliasing
+/// footprint at the ink boundary is never clipped by the quad.
+///
+/// mkui's screen transform is a uniform, axis-aligned scale + translate — no
+/// rotation, skew, or perspective. The reference adapter's vertex shader
+/// (`slug_dilate`, "A Decade of Slug" § Dynamic Dilation) derives the
+/// equivalent half-pixel expansion from the render's full Jacobian so it
+/// stays correct under an arbitrary transform; for the transform mkui
+/// actually ships, that general computation collapses to this closed form —
+/// `0.5 / scale` font units, scaled back by the same `scale` at projection
+/// time, is exactly half a screen pixel at every DPI. Full per-render
+/// MVP/viewport-derived dynamic dilation is deliberately out of scope for
+/// this mission (mkui doesn't ship perspective/transform text yet).
+fn half_pixel_dilation_units(scale_px_per_unit: f32) -> f32 {
+    0.5 / scale_px_per_unit.max(f32::EPSILON)
+}
 
 /// A Slug glyph blob placed on screen.
 ///
@@ -285,13 +300,17 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph]) -> PackedSlug {
             .indices
             .extend_from_slice(&blob.vertical_curve_indices);
 
-        // Dilated screen quad. Font units are y-up; screen is y-down, so the
-        // glyph's y_max maps to the smaller (top) screen y.
+        // Dilated screen quad: expand the font-unit bounds by half a screen
+        // pixel's worth of font units *before* projecting to pixels, so the
+        // dilation is exactly half a physical pixel regardless of `scale`
+        // (see `half_pixel_dilation_units`). Font units are y-up; screen is
+        // y-down, so the glyph's y_max maps to the smaller (top) screen y.
         let [ox, oy] = placed.origin_px;
-        let left = ox + blob.bounds.x_min * scale - QUAD_DILATION_PX;
-        let right = ox + blob.bounds.x_max * scale + QUAD_DILATION_PX;
-        let top = oy - blob.bounds.y_max * scale - QUAD_DILATION_PX;
-        let bottom = oy - blob.bounds.y_min * scale + QUAD_DILATION_PX;
+        let dilation = half_pixel_dilation_units(scale);
+        let left = ox + (blob.bounds.x_min - dilation) * scale;
+        let right = ox + (blob.bounds.x_max + dilation) * scale;
+        let top = oy - (blob.bounds.y_max + dilation) * scale;
+        let bottom = oy - (blob.bounds.y_min - dilation) * scale;
 
         packed.glyphs.push(GpuGlyph {
             color: placed.color,
@@ -677,24 +696,18 @@ mod tests {
         let packed = pack(std::slice::from_ref(&p));
         let g = packed.glyphs[0];
         let scale = p.scale_px_per_unit;
-        // x: origin + bounds*scale, dilated outward by QUAD_DILATION_PX.
-        assert_eq!(
-            g.quad_min[0],
-            p.origin_px[0] + 0.0 * scale - QUAD_DILATION_PX
+        // Half a physical pixel at this scale (#157 Phase 2).
+        let dilation_px = half_pixel_dilation_units(scale) * scale;
+        assert!(
+            (dilation_px - 0.5).abs() < 1e-4,
+            "half-pixel dilation must be ~0.5 physical px regardless of scale, got {dilation_px}"
         );
-        assert_eq!(
-            g.quad_max[0],
-            p.origin_px[0] + 100.0 * scale + QUAD_DILATION_PX
-        );
+        // x: origin + bounds*scale, dilated outward by half a physical pixel.
+        assert_eq!(g.quad_min[0], p.origin_px[0] + 0.0 * scale - dilation_px);
+        assert_eq!(g.quad_max[0], p.origin_px[0] + 100.0 * scale + dilation_px);
         // y is flipped: font y_max → top (smaller screen y) → quad_min.y.
-        assert_eq!(
-            g.quad_min[1],
-            p.origin_px[1] - 100.0 * scale - QUAD_DILATION_PX
-        );
-        assert_eq!(
-            g.quad_max[1],
-            p.origin_px[1] - 0.0 * scale + QUAD_DILATION_PX
-        );
+        assert_eq!(g.quad_min[1], p.origin_px[1] - 100.0 * scale - dilation_px);
+        assert_eq!(g.quad_max[1], p.origin_px[1] - 0.0 * scale + dilation_px);
         assert!(
             g.quad_min[1] < g.quad_max[1],
             "top must be above bottom in y-down screen space"

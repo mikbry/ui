@@ -61,22 +61,36 @@ use mkui_text::{Affine2Fixed, FontId, LayoutRun, VariationSettings};
 /// Immutable encoder configuration. Held by the owning [`SlugBlobCache`]; it is
 /// **not** part of [`SlugGlyphKey`] so two caches with different configs form
 /// separate namespaces and cannot alias each other's blobs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlugConfig {
     horizontal_bands: u16,
     vertical_bands: u16,
     revision: u32,
+    units_per_em: f32,
 }
 
 impl SlugConfig {
     /// Construct a config. Band counts are clamped to at least 1 (a glyph
-    /// always needs one row and one column).
+    /// always needs one row and one column). `units_per_em` defaults to `1.0`
+    /// (the path's own coordinate units carry the em) — callers encoding real
+    /// font outlines should set the face's actual units-per-em via
+    /// [`Self::with_units_per_em`] so the band overlap epsilon (#157 Phase 2
+    /// step 5) normalizes correctly to that font's design-unit scale.
     pub fn new(horizontal_bands: u16, vertical_bands: u16, revision: u32) -> Self {
         Self {
             horizontal_bands: horizontal_bands.max(1),
             vertical_bands: vertical_bands.max(1),
             revision,
+            units_per_em: 1.0,
         }
+    }
+
+    /// Set the font's units-per-em (or the path's own em scale, for non-font
+    /// geometry). Clamped to a small positive floor so the derived band
+    /// overlap epsilon is never zero or negative.
+    pub fn with_units_per_em(mut self, units_per_em: f32) -> Self {
+        self.units_per_em = units_per_em.max(f32::EPSILON);
+        self
     }
 
     pub fn horizontal_bands(self) -> u16 {
@@ -91,6 +105,11 @@ impl SlugConfig {
     /// layout or band algorithm changes so #66 can reject stale blobs.
     pub fn revision(self) -> u32 {
         self.revision
+    }
+
+    /// The em scale band overlap is normalized against. Defaults to `1.0`.
+    pub fn units_per_em(self) -> f32 {
+        self.units_per_em
     }
 }
 
@@ -318,11 +337,18 @@ pub fn encode_slug_glyph(
         y_max: path.bounds.max.y,
     };
 
+    // #157 Phase 2 step 5: overlap adjacent bands by a small epsilon,
+    // normalized to the config's em scale (upstream README's recommended
+    // `1/1024` em), so a curve sitting almost exactly on a band boundary
+    // (a floating-point sliver from a real font's rounding) still lands in
+    // both neighbouring bands rather than falling through the gap.
+    let band_epsilon = config.units_per_em() / 1024.0;
     let (horizontal_bands, horizontal_curve_indices) = build_bands(
         &curves,
         bounds.y_min,
         bounds.y_max,
         config.horizontal_bands(),
+        band_epsilon,
         SlugCurve::y_extent,
         SlugCurve::curve_extrema_max_x,
     );
@@ -331,6 +357,7 @@ pub fn encode_slug_glyph(
         bounds.x_min,
         bounds.x_max,
         config.vertical_bands(),
+        band_epsilon,
         SlugCurve::x_extent,
         SlugCurve::curve_extrema_max_y,
     );
@@ -389,16 +416,20 @@ fn flatten_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, SlugEncodeError> 
 const AXIS_PARALLEL_EPSILON: f32 = 1e-6;
 
 /// Partition `[lo, hi]` into `count` equal bands. A curve joins a band when its
-/// scan-axis extent overlaps the band **and** the curve is not axis-parallel
-/// (`extent_span >= ε`). Members are ordered by descending `sort_key` — the
-/// cross-axis curve extremum (max-x for horizontal rows, max-y for vertical
-/// columns) — with ascending curve index breaking ties, per the Slug
-/// scanline-rasterization invariant.
+/// scan-axis extent overlaps the band, widened by `epsilon` on both sides
+/// (#157 Phase 2 step 5 — closes floating-point gaps at a shared band
+/// boundary; upstream's README recommends `1/1024` em, normalized by the
+/// caller against the config's `units_per_em`), **and** the curve is not
+/// axis-parallel (`extent_span >= ε`). Members are ordered by descending
+/// `sort_key` — the cross-axis curve extremum (max-x for horizontal rows,
+/// max-y for vertical columns) — with ascending curve index breaking ties,
+/// per the Slug scanline-rasterization invariant.
 pub(crate) fn build_bands(
     curves: &[SlugCurve],
     lo: f32,
     hi: f32,
     count: u16,
+    epsilon: f32,
     extent: impl Fn(&SlugCurve) -> (f32, f32),
     sort_key: impl Fn(&SlugCurve) -> f32,
 ) -> (Vec<BandRange>, Vec<u32>) {
@@ -428,9 +459,11 @@ pub(crate) fn build_bands(
             if c_hi - c_lo < AXIS_PARALLEL_EPSILON {
                 continue;
             }
-            // Conservative inclusive overlap: a curve on a shared edge lands in
-            // both neighbouring bands.
-            if c_hi >= lower && c_lo <= upper {
+            // Inclusive overlap, widened by the band epsilon on both sides so
+            // a curve landing a hair outside `[lower, upper]` due to
+            // floating-point rounding still joins the band instead of
+            // leaving a thin uncovered gap at the boundary.
+            if c_hi >= lower - epsilon && c_lo <= upper + epsilon {
                 members.push(idx as u32);
             }
         }

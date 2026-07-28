@@ -8,6 +8,38 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Slug rendering completion, Phase 2 — bounded dilation + band overlap
+  epsilon (mkui-slug-rewrite mission, `mikbry/ui#157` steps 4-5).**
+  - **Half-physical-pixel dilation (bounded 2D case).** `crates/mkui-vector2d-wgpu`'s
+    quad expansion changed from a flat `1.5`-pixel constant to a half-pixel
+    dilation derived from each glyph's own placement scale
+    (`half_pixel_dilation_units`, applied to the font-unit bounds before
+    pixel projection): `0.5 / scale`, scaled back by the same `scale` at
+    projection time, is exactly half a physical pixel at every DPI. mkui's
+    screen transform is a uniform, axis-aligned scale + translate (no
+    rotation/skew/perspective), so this closed form is exactly what the
+    reference adapter's general Jacobian-based `slug_dilate` collapses to for
+    that transform. Full per-render MVP/viewport-derived dynamic dilation
+    stays out of scope (mkui doesn't ship perspective/transform text yet).
+  - **Band overlap epsilon.** `crates/mkui-vector2d`'s CPU band builder
+    (`build_bands`) now widens the scan-axis overlap test by an epsilon on
+    both sides, closing the floating-point gap that could otherwise drop a
+    curve sitting almost exactly on a band boundary. `SlugConfig` gained a
+    `units_per_em` field (default `1.0`, additive — every existing
+    `SlugConfig::new` call site is unaffected) and a `with_units_per_em`
+    builder; the epsilon is `units_per_em / 1024.0`, matching the upstream
+    README's recommended `1/1024` em overlap.
+  - Verified against the ratified `reference-harness/` adapter under the same
+    pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
+    (Δ ≤ 1/255, SSIM = 1.000000), plus a new thin-gap regression scan on the
+    curve-heavy `o`/`g` fixtures at 1×/1.5×/2× DPI (a thin-gap texel only
+    counts as a regression when the ratified reference doesn't have the same
+    texel — its analytic coverage can legitimately produce an isolated
+    near-zero-alpha texel at a tight curve intersection).
+  - No change to `encode_slug_glyph`'s or `subdivide_cubic`'s signatures, the
+    linear-color present-pass contract (#155), or the render-pass
+    architecture.
+
 - **Slug rendering completion, Phase 1 — dual-ray coverage + `fwidth` AA
   (mkui-slug-rewrite mission, `mikbry/ui#157` steps 1-3).** `crates/mkui-vector2d-wgpu`'s
   Slug coverage pipeline now implements the full published algorithm instead

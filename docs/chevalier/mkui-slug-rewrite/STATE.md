@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-28T02:00:00Z
+**Last updated:** 2026-07-28T03:00:00Z
 **Current phase:** 2
-**Phase status:** in-progress
+**Phase status:** codex-review
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -43,8 +43,35 @@
   `gpu-tests,slug` under Lavapipe: 147/147) all pass. Dispatching dame next.
 
 ## Phase 2
-- PR: pending
-- Status: in-progress (steps 4+5 — bounded dilation + band overlap epsilon)
+- PR: pending (opening now)
+- Opened: 2026-07-28
+- Codex verdicts: pending (dispatching now)
+- Dame verdicts: pending
+- Merged: pending
+- Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
+  pixel dilation (replacing the flat 1.5px constant with `0.5/scale`,
+  font-unit-space dilation before pixel projection — mathematically the
+  closed form the reference's Jacobian-based `slug_dilate` collapses to for
+  mkui's non-skewed transform) and a band overlap epsilon (`units_per_em /
+  1024.0`, additive `SlugConfig.units_per_em` field defaulting to `1.0`, every
+  existing call site unaffected). Self-verified under the same pinned Docker +
+  Lavapipe image as Phase 1: all 24 Phase 1 comparisons still hold (Δ ≤ 1/255,
+  SSIM = 1.000000) after both changes together, plus a new thin-gap
+  regression scan on `o`/`g` at 3 DPIs (one false-positive caught and fixed:
+  `g_2x` has a legitimate near-zero-alpha texel that's byte-identical to the
+  reference, so the scan now only flags texels absent from the reference's
+  own golden). `cargo fmt --check`, workspace clippy (`-D warnings`,
+  including `slug`/`gpu-tests,slug`/`atoms-on-wgpu`/`text` feature
+  combinations), and `cargo test` for `mkui-vector2d`, `mkui-vector2d-wgpu`,
+  `mkui-wgpu` (default, `slug`, `gpu-tests,slug` under Lavapipe: 148/148) all
+  pass. Dispatching Codex code-review next.
+- Known substrate quirk (carried from Phase 1): dame dispatched via the
+  `--brief-file dame-rubric.md` fallback shape returns its verdict as prose
+  containing an explicit `Verdict: **APPROVE**`/`REQUEST_CHANGES` line, but
+  the `miky agent assign` outbox's own auto-classification header looks for a
+  literal, unformatted `VERDICT:` marker and mis-tags anything else
+  "comment". Read the review body, not the header, when applying
+  `verdict_mapping`.
 
 ## Phase 3
 - PR: pending

@@ -317,3 +317,75 @@ fn phase1_matches_reference_adapter_within_rubric_thresholds() {
         failures.join("\n")
     );
 }
+
+/// A zero-alpha texel bordered on either axis by texels at >= 50% alpha —
+/// the signature of a floating-point band-boundary gap punching a hole
+/// through solid ink (dame-rubric.md § Phase 2 "No thin-gap regressions").
+const HALF_ALPHA: u8 = 128;
+
+fn thin_gap_coordinates(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
+    let width = width as usize;
+    let height = height as usize;
+    let alpha = |x: usize, y: usize| pixels[(y * width + x) * BYTES_PER_PIXEL as usize + 3];
+    let mut hits = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            if alpha(x, y) != 0 {
+                continue;
+            }
+            let horiz_gap = x > 0
+                && x + 1 < width
+                && alpha(x - 1, y) >= HALF_ALPHA
+                && alpha(x + 1, y) >= HALF_ALPHA;
+            let vert_gap = y > 0
+                && y + 1 < height
+                && alpha(x, y - 1) >= HALF_ALPHA
+                && alpha(x, y + 1) >= HALF_ALPHA;
+            if horiz_gap || vert_gap {
+                hits.push((x as u32, y as u32));
+            }
+        }
+    }
+    hits
+}
+
+#[test]
+fn phase2_no_thin_gap_regressions_on_curve_heavy_glyphs() {
+    // dame-rubric.md § Phase 2: `o` and `g` are the curve-heavy, band-epsilon-
+    // sensitive fixtures — their bowls cross many band boundaries at
+    // near-tangent angles, exactly where a floating-point gap would open a
+    // one-pixel hole through solid ink. A thin-gap texel is only a
+    // *regression* if the ratified reference doesn't have the same texel:
+    // the reference's own analytic coverage can legitimately produce an
+    // isolated near-zero-alpha texel at a tight curve intersection (a real
+    // feature of the geometry, not a bug), and Phase 1 already proved mkui
+    // reproduces the reference byte-for-byte at that texel when it does.
+    let mut failures = Vec::new();
+    for name in ["o", "g"] {
+        let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
+        for (dpi, label) in DPI_CASES {
+            let (canvas, rendered) = render_mkui(&glyph, dpi);
+            let (_, _, golden) = read_known_good_png(name, label);
+            let rendered_gaps: std::collections::HashSet<_> =
+                thin_gap_coordinates(&rendered, canvas, canvas)
+                    .into_iter()
+                    .collect();
+            let golden_gaps: std::collections::HashSet<_> =
+                thin_gap_coordinates(&golden, canvas, canvas)
+                    .into_iter()
+                    .collect();
+            let mut regressions: Vec<_> = rendered_gaps.difference(&golden_gaps).copied().collect();
+            regressions.sort_unstable();
+            if !regressions.is_empty() {
+                failures.push(format!(
+                    "{name}_{label}: thin-gap regressions at {regressions:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Phase 2 thin-gap regressions found:\n{}",
+        failures.join("\n")
+    );
+}
