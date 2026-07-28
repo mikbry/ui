@@ -5,9 +5,9 @@
 **Phase status:** codex-review
 
 ## Phase 1
-- PR: pending (opening now)
+- PR: #160 (https://github.com/mikbry/ui/pull/160)
 - Opened: 2026-07-28
-- Codex verdicts: pending
+- Codex verdicts: pending (dispatching now)
 - Dame verdicts: pending
 - Merged: pending
 - Notes: Implemented Codex 8-step-plan steps 1-3 (vertical band upload, dual-ray
