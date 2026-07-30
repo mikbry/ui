@@ -269,6 +269,7 @@ mod tests {
                 origin_px: [0.0, 0.0],
                 scale_px_per_unit: 1.0,
                 color: [1.0, 1.0, 1.0, 1.0],
+                cap_height_px: f32::INFINITY,
             })
         };
 

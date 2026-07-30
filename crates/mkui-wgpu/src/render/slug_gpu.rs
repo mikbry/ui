@@ -106,6 +106,9 @@ fn placed_square(color: [f32; 4]) -> PlacedSlugGlyph {
         origin_px: [7.0, 57.0],
         scale_px_per_unit: 0.5,
         color,
+        // Hand-authored fixture, not text — opts out of the Phase 3
+        // small-text baseline snap.
+        cap_height_px: f32::INFINITY,
     }
 }
 
@@ -374,4 +377,89 @@ fn slug_adapter_builds_on_the_vulkan_cpu_contract() {
     // pipeline against that device proves the adapter provisions there.
     let renderer = harness();
     let _adapter = SlugAdapter::new(renderer.device(), renderer.format());
+}
+
+/// Render `placed_square` with `cap_height_px: 12.0` (below
+/// `SMALL_TEXT_CAP_HEIGHT_PX`) at the given pen Y and `device_pixel_ratio`,
+/// through the real `SlugAdapter::prepare`/`draw` path — no test-local math,
+/// only the production `pack` codepath.
+fn render_small_text_at(
+    renderer: &OffscreenRenderer,
+    adapter: &SlugAdapter,
+    origin_y: f32,
+    device_pixel_ratio: f32,
+) -> Vec<u8> {
+    let placed = PlacedSlugGlyph {
+        blob: square_glyph(),
+        origin_px: [7.0, origin_y],
+        scale_px_per_unit: 0.5,
+        color: [0.0, 1.0, 0.0, 1.0],
+        cap_height_px: 12.0,
+    };
+    let prepared = adapter.prepare(
+        renderer.device(),
+        renderer.queue(),
+        [W as f32, H as f32],
+        device_pixel_ratio,
+        &[placed],
+    );
+    let mut encoder = renderer
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("small-text snap test encoder"),
+        });
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("small-text snap test pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: renderer.view(),
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if let Some(prepared) = prepared.as_ref() {
+            adapter.draw(&mut pass, prepared);
+        }
+    }
+    renderer.queue().submit(Some(encoder.finish()));
+    renderer.read_rgba().expect("readback must succeed")
+}
+
+#[test]
+fn small_text_snap_reaches_real_pixels_at_a_fractional_device_pixel_ratio() {
+    // dame-rubric.md § Phase 3 (N), and Codex round 1 of the Phase 3 PR
+    // review: the piecewise-constancy unit tests on `snap_to_physical_pixel`
+    // and on `pack`'s `GpuGlyph` output prove the *math*; this proves the
+    // snap actually reaches rendered pixels through the real
+    // `SlugAdapter::prepare`/`draw` path, at a fractional DPR (1.5x) —
+    // exactly the case Codex flagged (an earlier revision baked a stale DPR
+    // into the baseline before the real per-frame value was known).
+    let renderer = harness();
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let device_pixel_ratio = 1.5f32;
+
+    // At 1.5x DPR, snap_to_physical_pixel(v, 1.5) = round(v*1.5)/1.5:
+    // 57.0 and 57.4 both round to physical row 86 (57.333...); 57.7 rounds to
+    // physical row 87 (58.0) — a real cell boundary crossing.
+    let same_cell_a = render_small_text_at(&renderer, &adapter, 57.0, device_pixel_ratio);
+    let same_cell_b = render_small_text_at(&renderer, &adapter, 57.4, device_pixel_ratio);
+    assert_eq!(
+        same_cell_a, same_cell_b,
+        "two pen positions in the same physical-pixel cell must render byte-identical \
+         once the small-text snap is applied"
+    );
+
+    let other_cell = render_small_text_at(&renderer, &adapter, 57.7, device_pixel_ratio);
+    assert_ne!(
+        same_cell_a, other_cell,
+        "crossing the physical-pixel cell boundary must change the render"
+    );
 }
