@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T09:15:00Z
+**Last updated:** 2026-07-30T09:20:00Z
 **Current phase:** 2
-**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced `BLOCKED.md` (added by `0411739` on this branch, removed at `53e4e88`) is resolved. Resuming the Codex review / dame dispatch loop.
+**Phase status:** blocked — see [`BLOCKED.md`](BLOCKED.md) (`blocked_reason: dame_infrastructure_gap`). The rubric-amendment block (`oracle_ambiguity`) that produced the previous `BLOCKED.md` (added by `0411739`, removed at `53e4e88`) IS resolved — operator ratified amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30), the byte-identical exception is implemented, and Codex round 4 APPROVEd the result. Mission paused again immediately after, on a different criterion: the dame invocation dispatched to close out Phase 2 did not actually perform dame's rubric-bound review (see `BLOCKED.md`).
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -20,6 +20,16 @@
   `9f76af3`, zero commits on `{CHARTER,dame-rubric,codex-8-step-plan}.md`
   since `b338bd9`, full diff scoped to `crates/mkui-vector2d-wgpu/`,
   `crates/mkui-wgpu/`, `CHANGELOG.md`, and this file.
+
+  **2026-07-30 addendum:** while investigating a Phase 2 dame dispatch,
+  found that this Phase 1 dame verdict (`d99d1d7`, round 3 of PR #160's
+  review thread) shows the same "review follow-up" diff-scoping pattern
+  documented in Phase 2's `BLOCKED.md` (`blocked_reason:
+  dame_infrastructure_gap`) — it re-confirmed round 1's finding rather than
+  applying dame-rubric.md fresh. Recorded here for audit-trail accuracy;
+  not remediated (Phase 1 is merged) — see Phase 2 `BLOCKED.md` for the
+  full analysis and operator options, which also apply retroactively to
+  this verdict.
 - Merged: 2026-07-28T12:04:36Z (squash sha `7cb352c4b683f559a8123852599ce68b54369509`)
 - Notes: Implemented Codex 8-step-plan steps 1-3 (vertical band upload, dual-ray
   weighted coverage with `0x2e74` root eligibility, `fwidth`-derived AA width)
@@ -57,8 +67,15 @@
   including Lavapipe `gpu-offscreen`; local fmt + `mkui-vector2d` 81/81 +
   `mkui-vector2d-wgpu` 15/15 also checked. One non-blocking audit-trail nit
   — a STATE.md sha citation was off by one commit — fixed same-commit)
-- Dame verdicts: not yet dispatched
-- Merged: pending — unblocked, resuming Codex/dame loop (see below)
+- Dame verdicts: dispatched (review id `ae-01785402938253164000-00000000`,
+  sha `fdfc100`) — returned an APPROVE-shaped verdict, but NOT treated as
+  BLESS: the underlying review did not evaluate dame-rubric.md's Phase 2
+  criteria (no rendering, no dilation measurement, no independent adapter
+  regeneration, no preflight sensitivity test) — it was scoped as a
+  diff-only "review follow-up" against Codex round 4 instead. See
+  `BLOCKED.md` (`blocked_reason: dame_infrastructure_gap`) for the full
+  analysis.
+- Merged: pending — **BLOCKED, see [`BLOCKED.md`](BLOCKED.md)**
 - Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
   pixel dilation and a band overlap epsilon (additive `SlugConfig.units_per_em`
   field defaulting to `1.0`, every existing call site unaffected). Codex round
@@ -174,7 +191,18 @@
   `docs/chevalier/mkui-slug-rewrite/STATE.md`, plus the two amendment-carried
   doc files above — all within CHARTER § YOLO scope's Scope directories.
   PR #161 carries both required labels (`chevalier`, `mission:mkui-slug-rewrite`).
-- Known substrate quirk (carried from Phase 1): dame dispatched via the
+
+  **Dame dispatch (2026-07-30):** dispatched per CHARTER §
+  `verification_oracle.dame_invocation.command` at sha `fdfc100`. Returned
+  an APPROVE-shaped verdict that, on inspection, did not evaluate any
+  dame-rubric.md Phase 2 criterion — see `BLOCKED.md`
+  (`blocked_reason: dame_infrastructure_gap`) for the full finding,
+  including corroborating evidence that Phase 1's dame BLESS had the same
+  gap. NOT treating this as BLESS; not merging PR #161. Mission paused
+  pending operator direction.
+- Known substrate quirk (carried from Phase 1, superseded in scope by the
+  2026-07-30 `dame_infrastructure_gap` finding above — that finding is the
+  substantive version of this same underlying gap): dame dispatched via the
   `--brief-file dame-rubric.md` fallback shape returns its verdict as prose
   containing an explicit `Verdict: **APPROVE**`/`REQUEST_CHANGES` line, but
   the `miky agent assign` outbox's own auto-classification header looks for a
