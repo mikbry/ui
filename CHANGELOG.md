@@ -8,6 +8,66 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Slug rendering completion, Phase 2 — bounded dilation + band overlap
+  epsilon (mkui-slug-rewrite mission, `mikbry/ui#157` steps 4-5).**
+  - **Half-physical-pixel dilation (bounded 2D case).** `crates/mkui-vector2d-wgpu`'s
+    quad expansion changed from a flat `1.5`-pixel constant to a half-pixel
+    dilation derived from each glyph's own placement scale and the frame's
+    logical→physical pixel ratio (`half_pixel_dilation_units`, applied to the
+    font-unit bounds before pixel projection): `0.5 / (device_pixel_ratio *
+    scale)`, scaled back by the same `scale` at projection time, is exactly
+    half a *physical* pixel at every DPI. `SlugAdapter::prepare`/`prepare_paths`
+    gained a `device_pixel_ratio` parameter (`1.0` for a caller with no
+    logical/physical split); the real windowed renderer (`mkui-wgpu`'s
+    `render/mod.rs`) derives it from the physical surface config vs. the
+    logical scene viewport, closing the exact logical→physical gap Codex's
+    original Sprint 8 review flagged at `app.rs`. mkui's screen transform is
+    a uniform, axis-aligned scale + translate (no rotation/skew/perspective),
+    so this closed form is exactly what the reference adapter's general
+    Jacobian-based `slug_dilate` collapses to for that transform. Full
+    per-render MVP/viewport-derived dynamic dilation stays out of scope
+    (mkui doesn't ship perspective/transform text yet).
+  - **Band overlap epsilon.** `crates/mkui-vector2d`'s CPU band builder
+    (`build_bands`) now widens the scan-axis overlap test by an epsilon on
+    both sides, closing the floating-point gap that could otherwise drop a
+    curve sitting almost exactly on a band boundary. `SlugConfig` gained a
+    `units_per_em` field (default `1.0`, additive and `Eq`/`Hash`-preserving —
+    every existing `SlugConfig::new` call site is unaffected) and a
+    `with_units_per_em` builder; the epsilon is `units_per_em / 1024.0`,
+    matching the upstream README's recommended `1/1024` em overlap.
+    `SlugBlobCache` gained `encode_with_units_per_em` so the real SFNT-backed
+    glyph path (`mkui-wgpu`'s `slug_text::place_slug_run`) can normalize the
+    epsilon against each face's *actual* units-per-em instead of the cache's
+    default — a 2048-upem face would otherwise get an epsilon 2048x too
+    small to have any effect.
+  - Verified against the ratified `reference-harness/` adapter under the same
+    pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
+    (Δ ≤ 1/255, SSIM = 1.000000).
+  - **Thin-gap regression test.** dame-rubric.md's Phase 2 "no thin-gap
+    regressions" criterion, applied at its literal ≥50% bordering-alpha
+    threshold, was jointly unsatisfiable with the same section's Δ ≤ 4/255
+    reference-comparison criterion: the ratified `g` fixture (2× DPI) itself
+    produces a zero-alpha texel at (157,156) bordered by 206/248 alpha — a
+    literal hit under the rubric's own threshold — and mkui reproduces that
+    texel byte-for-byte from the reference. No implementation that matches
+    the oracle could pass both criteria as literally written (not resolved
+    by loosening the detection threshold — tried and rejected by Codex
+    review as redefining a frozen criterion). Resolved by operator rubric
+    amendment 1 (v1.2.1): the check now excludes any thin-gap texel that is
+    byte-identical to the reference golden at the same coordinate — a hit
+    only counts as a regression if it also diverges (Δ > 0) from the
+    reference there. Test un-ignored.
+  - Two new CPU-level tests exercise the real encoder end to end (not a
+    pre-encoded fixture): `band_overlap_epsilon_normalizes_to_units_per_em`
+    proves a curve straddling a band boundary by `0.0005` em joins the band
+    under the default epsilon and is excluded under a tighter `units_per_em`;
+    `cache_encode_with_units_per_em_overrides_the_cache_default_per_call`
+    proves the same through `SlugBlobCache`'s per-call override — the exact
+    path `place_slug_run` depends on.
+  - No change to `encode_slug_glyph`'s or `subdivide_cubic`'s signatures, the
+    linear-color present-pass contract (#155), or the render-pass
+    architecture.
+
 - **Slug rendering completion, Phase 1 — dual-ray coverage + `fwidth` AA
   (mkui-slug-rewrite mission, `mikbry/ui#157` steps 1-3).** `crates/mkui-vector2d-wgpu`'s
   Slug coverage pipeline now implements the full published algorithm instead

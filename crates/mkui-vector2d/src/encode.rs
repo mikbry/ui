@@ -70,11 +70,14 @@ pub fn encode_vector_path(
     // bounds — every curve still lands in the right bands.
     let bounds = control_hull_bounds(&curves);
 
+    // #157 Phase 2 step 5 — see `slug::encode_slug_glyph`'s identical epsilon.
+    let band_epsilon = config.units_per_em() / 1024.0;
     let (horizontal_bands, horizontal_curve_indices) = build_bands(
         &curves,
         bounds.y_min,
         bounds.y_max,
         config.horizontal_bands(),
+        band_epsilon,
         SlugCurve::y_extent,
         SlugCurve::curve_extrema_max_x,
     );
@@ -83,6 +86,7 @@ pub fn encode_vector_path(
         bounds.x_min,
         bounds.x_max,
         config.vertical_bands(),
+        band_epsilon,
         SlugCurve::x_extent,
         SlugCurve::curve_extrema_max_y,
     );

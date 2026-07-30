@@ -122,6 +122,7 @@ fn render_pixels(
         renderer.device(),
         renderer.queue(),
         [W as f32, H as f32],
+        1.0,
         glyphs,
     );
     let mut encoder = renderer
@@ -313,6 +314,7 @@ fn overlapping_ui_and_slug_respect_command_order_both_ways() {
                 renderer.device(),
                 renderer.queue(),
                 [W as f32, H as f32],
+                1.0,
                 &[placed_square([0.0, 1.0, 0.0, 1.0])],
             )
             .expect("glyph prepares");

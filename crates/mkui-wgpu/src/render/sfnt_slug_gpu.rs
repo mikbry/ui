@@ -70,6 +70,7 @@ fn render_slug(
         renderer.device(),
         renderer.queue(),
         [W as f32, H as f32],
+        1.0,
         glyphs,
     );
     let mut encoder = renderer
@@ -402,6 +403,7 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
             renderer.device(),
             renderer.queue(),
             [W as f32, H as f32],
+            1.0,
             &collected,
         )
         .expect("Slug glyphs must prepare");
