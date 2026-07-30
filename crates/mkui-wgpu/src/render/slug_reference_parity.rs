@@ -390,7 +390,7 @@ fn phase2_no_thin_gap_regressions_on_curve_heavy_glyphs() {
     // (157,156), Δ=0 vs mkui). A hit only counts if it also diverges from
     // the reference (Δ > 0) at that coordinate. See dame-rubric.md v1.2.1
     // (ratified `07926f0`) for the amendment; the original oracle-ambiguity
-    // finding this resolves was posted at sha `5d6085a`.
+    // finding this resolves was added at sha `0411739`.
     let mut failures = Vec::new();
     for name in ["o", "g"] {
         let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));

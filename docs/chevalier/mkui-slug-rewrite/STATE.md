@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-30T09:15:00Z
 **Current phase:** 2
-**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced `BLOCKED.md` (posted `5d6085a` on this branch, removed at `53e4e88`) is resolved. Resuming the Codex review / dame dispatch loop.
+**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced `BLOCKED.md` (added by `0411739` on this branch, removed at `53e4e88`) is resolved. Resuming the Codex review / dame dispatch loop.
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -50,7 +50,13 @@
   new test-coverage finding); REQUEST_CHANGES (round 3, sha 5d6085a —
   confirmed round-2 coverage-gap fix correct; blocking finding: thin-gap
   threshold raised from rubric's literal 128 to 250 illegitimately redefines
-  a frozen criterion instead of satisfying it)
+  a frozen criterion instead of satisfying it); APPROVE (round 4, sha
+  0c553c0 — confirmed the round-3 blocker is resolved exactly per the
+  ratified amendment: literal 128 threshold restored, test active, only
+  byte-identical-to-reference texels exempted; exact-head CI green
+  including Lavapipe `gpu-offscreen`; local fmt + `mkui-vector2d` 81/81 +
+  `mkui-vector2d-wgpu` 15/15 also checked. One non-blocking audit-trail nit
+  — a STATE.md sha citation was off by one commit — fixed same-commit)
 - Dame verdicts: not yet dispatched
 - Merged: pending — unblocked, resuming Codex/dame loop (see below)
 - Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
