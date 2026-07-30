@@ -381,7 +381,7 @@ noted once here rather than repeated per-phase.
   catching and fixing a real defect, not just rubber-stamping.
 
 ## Phase 4
-- PR: pending (opening now)
+- PR: #164 (https://github.com/mikbry/ui/pull/164)
 - Opened: 2026-07-30
 - Status: implemented Codex 8-step-plan step 8, variant B — chosen because
   the ratified reference-harness adapter has no way to render at an
