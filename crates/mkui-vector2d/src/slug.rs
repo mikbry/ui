@@ -66,17 +66,34 @@ pub struct SlugConfig {
     horizontal_bands: u16,
     vertical_bands: u16,
     revision: u32,
+    /// `units_per_em`'s bit pattern (`f32::to_bits`), so the config keeps
+    /// deriving `Eq`/`Hash` (`f32` implements neither) — no downstream
+    /// map/set usage of `SlugConfig` loses those impls.
+    units_per_em_bits: u32,
 }
 
 impl SlugConfig {
     /// Construct a config. Band counts are clamped to at least 1 (a glyph
-    /// always needs one row and one column).
+    /// always needs one row and one column). `units_per_em` defaults to `1.0`
+    /// (the path's own coordinate units carry the em) — callers encoding real
+    /// font outlines should set the face's actual units-per-em via
+    /// [`Self::with_units_per_em`] so the band overlap epsilon (#157 Phase 2
+    /// step 5) normalizes correctly to that font's design-unit scale.
     pub fn new(horizontal_bands: u16, vertical_bands: u16, revision: u32) -> Self {
         Self {
             horizontal_bands: horizontal_bands.max(1),
             vertical_bands: vertical_bands.max(1),
             revision,
+            units_per_em_bits: 1.0_f32.to_bits(),
         }
+    }
+
+    /// Set the font's units-per-em (or the path's own em scale, for non-font
+    /// geometry). Clamped to a small positive floor so the derived band
+    /// overlap epsilon is never zero or negative.
+    pub fn with_units_per_em(mut self, units_per_em: f32) -> Self {
+        self.units_per_em_bits = units_per_em.max(f32::EPSILON).to_bits();
+        self
     }
 
     pub fn horizontal_bands(self) -> u16 {
@@ -91,6 +108,11 @@ impl SlugConfig {
     /// layout or band algorithm changes so #66 can reject stale blobs.
     pub fn revision(self) -> u32 {
         self.revision
+    }
+
+    /// The em scale band overlap is normalized against. Defaults to `1.0`.
+    pub fn units_per_em(self) -> f32 {
+        f32::from_bits(self.units_per_em_bits)
     }
 }
 
@@ -318,11 +340,18 @@ pub fn encode_slug_glyph(
         y_max: path.bounds.max.y,
     };
 
+    // #157 Phase 2 step 5: overlap adjacent bands by a small epsilon,
+    // normalized to the config's em scale (upstream README's recommended
+    // `1/1024` em), so a curve sitting almost exactly on a band boundary
+    // (a floating-point sliver from a real font's rounding) still lands in
+    // both neighbouring bands rather than falling through the gap.
+    let band_epsilon = config.units_per_em() / 1024.0;
     let (horizontal_bands, horizontal_curve_indices) = build_bands(
         &curves,
         bounds.y_min,
         bounds.y_max,
         config.horizontal_bands(),
+        band_epsilon,
         SlugCurve::y_extent,
         SlugCurve::curve_extrema_max_x,
     );
@@ -331,6 +360,7 @@ pub fn encode_slug_glyph(
         bounds.x_min,
         bounds.x_max,
         config.vertical_bands(),
+        band_epsilon,
         SlugCurve::x_extent,
         SlugCurve::curve_extrema_max_y,
     );
@@ -389,16 +419,20 @@ fn flatten_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, SlugEncodeError> 
 const AXIS_PARALLEL_EPSILON: f32 = 1e-6;
 
 /// Partition `[lo, hi]` into `count` equal bands. A curve joins a band when its
-/// scan-axis extent overlaps the band **and** the curve is not axis-parallel
-/// (`extent_span >= ε`). Members are ordered by descending `sort_key` — the
-/// cross-axis curve extremum (max-x for horizontal rows, max-y for vertical
-/// columns) — with ascending curve index breaking ties, per the Slug
-/// scanline-rasterization invariant.
+/// scan-axis extent overlaps the band, widened by `epsilon` on both sides
+/// (#157 Phase 2 step 5 — closes floating-point gaps at a shared band
+/// boundary; upstream's README recommends `1/1024` em, normalized by the
+/// caller against the config's `units_per_em`), **and** the curve is not
+/// axis-parallel (`extent_span >= ε`). Members are ordered by descending
+/// `sort_key` — the cross-axis curve extremum (max-x for horizontal rows,
+/// max-y for vertical columns) — with ascending curve index breaking ties,
+/// per the Slug scanline-rasterization invariant.
 pub(crate) fn build_bands(
     curves: &[SlugCurve],
     lo: f32,
     hi: f32,
     count: u16,
+    epsilon: f32,
     extent: impl Fn(&SlugCurve) -> (f32, f32),
     sort_key: impl Fn(&SlugCurve) -> f32,
 ) -> (Vec<BandRange>, Vec<u32>) {
@@ -428,9 +462,11 @@ pub(crate) fn build_bands(
             if c_hi - c_lo < AXIS_PARALLEL_EPSILON {
                 continue;
             }
-            // Conservative inclusive overlap: a curve on a shared edge lands in
-            // both neighbouring bands.
-            if c_hi >= lower && c_lo <= upper {
+            // Inclusive overlap, widened by the band epsilon on both sides so
+            // a curve landing a hair outside `[lower, upper]` due to
+            // floating-point rounding still joins the band instead of
+            // leaving a thin uncovered gap at the boundary.
+            if c_hi >= lower - epsilon && c_lo <= upper + epsilon {
                 members.push(idx as u32);
             }
         }
@@ -487,17 +523,36 @@ impl SlugBlobCache {
     /// stored blob is reused and the hit counter increments. On a miss the blob
     /// is encoded once, stored, and the miss counter increments. On an encode
     /// error nothing is stored (the cache is never poisoned) and no counter
-    /// moves.
+    /// moves. Uses the cache's own `units_per_em` (default `1.0`) for the band
+    /// overlap epsilon; callers encoding real font outlines should use
+    /// [`Self::encode_with_units_per_em`] instead.
     pub fn encode(
         &mut self,
         key: SlugGlyphKey,
         path: &VectorPath,
     ) -> Result<Arc<SlugGlyph>, SlugEncodeError> {
+        self.encode_with_units_per_em(key, path, self.config.units_per_em())
+    }
+
+    /// Encode `path` under `key` as [`Self::encode`] does, but normalize the
+    /// band overlap epsilon (#157 Phase 2 step 5) against `units_per_em`
+    /// instead of the cache's own config for this call only. Lets one cache
+    /// serve glyphs from fonts with different units-per-em: `key` (via
+    /// [`SlugGlyphKey::font_id`]) already disambiguates by font identity, so
+    /// per-call `units_per_em` cannot alias two fonts' blobs together — only
+    /// the derived epsilon differs, never correctness.
+    pub fn encode_with_units_per_em(
+        &mut self,
+        key: SlugGlyphKey,
+        path: &VectorPath,
+        units_per_em: f32,
+    ) -> Result<Arc<SlugGlyph>, SlugEncodeError> {
         if let Some(blob) = self.blobs.get(&key) {
             self.hits += 1;
             return Ok(Arc::clone(blob));
         }
-        let glyph = encode_slug_glyph(path, &self.config)?;
+        let config = self.config.with_units_per_em(units_per_em);
+        let glyph = encode_slug_glyph(path, &config)?;
         let blob = Arc::new(glyph);
         self.blobs.insert(key, Arc::clone(&blob));
         self.misses += 1;
@@ -576,6 +631,92 @@ mod tests {
             synthesis_flags: 0,
             outline_transform: Affine2Fixed::IDENTITY,
         }
+    }
+
+    /// True iff `curve_index` is listed within horizontal band `band_index`'s
+    /// own slice of the index stream (not just anywhere in the flat stream —
+    /// a curve deep inside an adjacent band's un-widened range would also
+    /// appear there regardless of the epsilon under test).
+    fn horizontal_band_contains(glyph: &SlugGlyph, band_index: usize, curve_index: u32) -> bool {
+        let band = glyph.horizontal_bands[band_index];
+        let start = band.first_curve as usize;
+        let end = start + band.curve_count as usize;
+        glyph.horizontal_curve_indices[start..end].contains(&curve_index)
+    }
+
+    /// A single non-axis-parallel line whose y-extent (`50.0005..50.0015`)
+    /// sits just above the lower/upper band boundary at `y = 50` (bounds
+    /// `[0, 100]`, 2 horizontal bands). Exact (unwidened) overlap excludes it
+    /// from the lower `[0, 50]` band; a wide-enough epsilon pulls it back in.
+    fn boundary_straddling_path() -> VectorPath {
+        VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(10.0, 50.0005)),
+                PathCommand::LineTo(Vec2::new(20.0, 50.0015)),
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0)),
+        )
+    }
+
+    #[test]
+    fn band_overlap_epsilon_normalizes_to_units_per_em() {
+        // #157 Phase 2 step 5: this exercises `build_bands`'s widened overlap
+        // test through the real encoder — not a pre-encoded fixture — so
+        // shrinking the epsilon back to zero (or a units_per_em too small to
+        // matter) would fail this test, unlike a GPU test that only replays
+        // already-encoded band tables.
+        let path = boundary_straddling_path();
+
+        // Default units_per_em = 1.0 -> epsilon = 1/1024 ~= 0.000977, wide
+        // enough that the curve's 0.0005 offset past the boundary still
+        // pulls it into the lower [0, 50] band.
+        let wide = encode_slug_glyph(&path, &SlugConfig::new(2, 1, 1)).unwrap();
+        assert!(
+            horizontal_band_contains(&wide, 0, 0),
+            "units_per_em=1.0's epsilon (1/1024) must pull the near-boundary \
+             curve into the lower band"
+        );
+
+        // A tighter units_per_em (as if a font's design units were a fraction
+        // of an em) shrinks the epsilon below the curve's 0.0005 offset,
+        // excluding it from the lower band again.
+        let narrow_config = SlugConfig::new(2, 1, 1).with_units_per_em(0.1);
+        let narrow = encode_slug_glyph(&path, &narrow_config).unwrap();
+        assert!(
+            !horizontal_band_contains(&narrow, 0, 0),
+            "a tighter units_per_em must shrink the epsilon back below the \
+             boundary offset"
+        );
+    }
+
+    #[test]
+    fn cache_encode_with_units_per_em_overrides_the_cache_default_per_call() {
+        // Proves the exact plumbing `mkui-wgpu`'s `slug_text::place_slug_run`
+        // relies on: a shared cache (one fixed `SlugConfig`, default
+        // units_per_em = 1.0) still applies a *different*, real font's
+        // units-per-em when the caller passes one per glyph. `SlugGlyphKey`'s
+        // `font_id` already disambiguates the two calls below, so this cannot
+        // alias the two fonts' blobs together — only the derived epsilon
+        // (and thus band membership) differs.
+        let path = boundary_straddling_path();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(2, 1, 1));
+
+        let wide = cache
+            .encode_with_units_per_em(golden_key(font_id()), &path, 1.0)
+            .unwrap();
+        assert!(horizontal_band_contains(&wide, 0, 0));
+
+        let narrow = cache
+            .encode_with_units_per_em(golden_key(font_id()), &path, 0.1)
+            .unwrap();
+        assert!(!horizontal_band_contains(&narrow, 0, 0));
+
+        // Plain `encode` (what `mkui-text`'s space-glyph / non-SFNT callers
+        // use) falls back to the cache's own units_per_em (1.0 here) — same
+        // outcome as `wide`.
+        let via_plain_encode = cache.encode(golden_key(font_id()), &path).unwrap();
+        assert!(horizontal_band_contains(&via_plain_encode, 0, 0));
     }
 
     #[test]

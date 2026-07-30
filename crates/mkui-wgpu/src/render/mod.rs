@@ -460,10 +460,22 @@ impl Renderer {
                     #[cfg(feature = "slug")]
                     {
                         let glyphs = scene_slug_glyphs(&scene.primitives[range]);
+                        // Slug glyphs are placed in the same logical-pixel
+                        // viewport as everything else (#97, ADR 0006), but
+                        // dilation (#157 Phase 2 step 4) needs to be exactly
+                        // half a *physical* pixel: derive the frame's
+                        // physical-pixels-per-logical-pixel ratio from the
+                        // physical surface config vs. the logical viewport
+                        // rather than threading `winit::Window::scale_factor`
+                        // through — both describe the same ratio, and this
+                        // stays entirely local to the render call.
+                        let device_pixel_ratio =
+                            self.config.width as f32 / scene.viewport.width.max(1.0);
                         if let Some(prepared) = self.slug_adapter.prepare(
                             &self.device,
                             &self.queue,
                             [scene.viewport.width, scene.viewport.height],
+                            device_pixel_ratio,
                             &glyphs,
                         ) {
                             lane_draws.push(LaneDraw::Slug(prepared));

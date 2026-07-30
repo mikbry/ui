@@ -147,6 +147,7 @@ fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
         renderer.device(),
         renderer.queue(),
         [canvas as f32, canvas as f32],
+        1.0,
         &[placed],
     );
     let mut encoder = renderer
@@ -314,6 +315,108 @@ fn phase1_matches_reference_adapter_within_rubric_thresholds() {
     assert!(
         failures.is_empty(),
         "Phase 1 rubric comparisons failed:\n{}",
+        failures.join("\n")
+    );
+}
+
+/// A zero-alpha texel bordered on either axis by texels at ≥50% alpha — the
+/// literal thin-gap signature specified by dame-rubric.md § Phase 2 "No
+/// thin-gap regressions": "Pixel-scan for zero-alpha pixels bordered by ≥50%
+/// alpha on both sides (thin-gap signature). Zero such pixels required."
+///
+/// This threshold is intentionally the rubric's literal value, not a tuned
+/// one. An earlier revision raised it to 250 to dodge a known false positive
+/// at the ratified `g` fixture (2x DPI, texel (157,156): neighbours 206/248,
+/// ordinary AA, not a defect) — Codex round 3 correctly rejected that as
+/// redefining a frozen criterion rather than satisfying it. The ratified
+/// reference adapter's own output trips this literal heuristic at that exact
+/// texel (Δ=0 vs. mkui, per the Phase 1 parity comparison); dame-rubric.md
+/// v1.2.1's byte-identical exception (see `texel_delta` below) resolves that
+/// tension without loosening this constant.
+const HALF_ALPHA: u8 = 128;
+
+fn thin_gap_coordinates(pixels: &[u8], width: u32, height: u32) -> Vec<(u32, u32)> {
+    let width = width as usize;
+    let height = height as usize;
+    let alpha = |x: usize, y: usize| pixels[(y * width + x) * BYTES_PER_PIXEL as usize + 3];
+    let mut hits = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            if alpha(x, y) != 0 {
+                continue;
+            }
+            let horiz_gap = x > 0
+                && x + 1 < width
+                && alpha(x - 1, y) >= HALF_ALPHA
+                && alpha(x + 1, y) >= HALF_ALPHA;
+            let vert_gap = y > 0
+                && y + 1 < height
+                && alpha(x, y - 1) >= HALF_ALPHA
+                && alpha(x, y + 1) >= HALF_ALPHA;
+            if horiz_gap || vert_gap {
+                hits.push((x as u32, y as u32));
+            }
+        }
+    }
+    hits
+}
+
+/// Per-channel delta between `rendered` and `golden` at a single texel — the
+/// coordinate-scoped counterpart to [`diff`]'s whole-image scan, used to
+/// decide whether a thin-gap hit is a real regression (dame-rubric.md
+/// v1.2.1 § Phase 2 "No thin-gap regressions" byte-identical exception).
+fn texel_delta(rendered: &[u8], golden: &[u8], width: u32, x: u32, y: u32) -> u8 {
+    let idx = (y as usize * width as usize + x as usize) * BYTES_PER_PIXEL as usize;
+    rendered[idx..idx + BYTES_PER_PIXEL as usize]
+        .iter()
+        .zip(&golden[idx..idx + BYTES_PER_PIXEL as usize])
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn phase2_no_thin_gap_regressions_on_curve_heavy_glyphs() {
+    // dame-rubric.md § Phase 2: `o` and `g` are the curve-heavy, band-epsilon-
+    // sensitive fixtures — their bowls cross many band boundaries at
+    // near-tangent angles, exactly where a floating-point gap would open a
+    // one-pixel hole through solid ink. The rubric requires zero *regression*
+    // texels at the literal `HALF_ALPHA` threshold.
+    //
+    // v1.2.1 amendment (ratified 07926f0): a thin-gap hit that is
+    // byte-identical to the ratified reference-harness golden at the same
+    // coordinate is not a regression — the reference oracle itself produces
+    // this pattern at tight curve intersections (e.g. `g_2x` texel
+    // (157,156), Δ=0 vs mkui). A hit only counts if it also diverges from
+    // the reference (Δ > 0) at that coordinate. See dame-rubric.md v1.2.1
+    // (ratified `07926f0`) for the amendment; the original oracle-ambiguity
+    // finding this resolves was added at sha `0411739`.
+    let mut failures = Vec::new();
+    for name in ["o", "g"] {
+        let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
+        for (dpi, label) in DPI_CASES {
+            let (canvas, rendered) = render_mkui(&glyph, dpi);
+            let (golden_w, golden_h, golden) = read_known_good_png(name, label);
+            assert_eq!(
+                (canvas, canvas),
+                (golden_w, golden_h),
+                "{name}_{label}: canvas size must match the reference adapter's"
+            );
+            let gaps = thin_gap_coordinates(&rendered, canvas, canvas);
+            let regressions: Vec<(u32, u32)> = gaps
+                .into_iter()
+                .filter(|&(x, y)| texel_delta(&rendered, &golden, canvas, x, y) > 0)
+                .collect();
+            if !regressions.is_empty() {
+                failures.push(format!(
+                    "{name}_{label}: thin-gap texels at {regressions:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Phase 2 thin-gap regressions found:\n{}",
         failures.join("\n")
     );
 }
