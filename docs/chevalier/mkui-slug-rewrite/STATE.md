@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T12:00:00Z
-**Current phase:** 3
-**Phase status:** in progress — Phase 2 merged, see § Phase 2 below. No active block.
+**Last updated:** 2026-07-30T14:00:00Z
+**Current phase:** 4
+**Phase status:** starting — Phase 3 merged, see § Phase 3 below. No active block.
 
 ## Dame infrastructure gap — standing note (applies to Phases 2-4 until resolved)
 
@@ -359,14 +359,40 @@ noted once here rather than repeated per-phase.
   feature-slug matrix clippy (`mkui-vector2d-wgpu`, `mkui-wgpu --features
   slug`, `atoms-on-wgpu --features slug`, `text --features slug`, all
   `--all-targets`) clean.
-- Dame dispatch: per the standing note above, will NOT dispatch a second
-  `--brief-file dame-rubric.md` round for this phase; merges on the
-  self-check + CI-green + Codex-round-1-APPROVE pattern instead. Flagging
-  here per the mkui orchestrator's offer: if the operator wants a Phase 3
-  visual smoke test (as they ran for Phase 2) before Phase 4's mandatory
-  gate, this is the point to request it — otherwise chevalier proceeds
-  straight through to Phase 4 on the substitute-evidence pattern.
+- Dame dispatch: per the standing note above, did NOT dispatch a second
+  `--brief-file dame-rubric.md` round for this phase.
+- Merged: 2026-07-30, squash sha `506c4f8`.
+- **Ratification: same operator-adjudicated evidence pattern as Phase 2**
+  (BLOCKED.md `dame_infrastructure_gap` option 3, applied prospectively per
+  the standing note above) — chevalier's line-by-line self-check against
+  every rubric § Phase 3 criterion, CI green (30/30 including
+  `gpu-offscreen` with VVL) on exact head `83a5997`, and a genuine two-round
+  Codex review: round 1 (real, fresh thread on this PR) found an actual
+  defect — the first cut baked a stale, caller-supplied `device_pixel_ratio`
+  into the baseline at scene-construction time — REQUEST_CHANGES; fixed by
+  moving the snap into `mkui-vector2d-wgpu`'s `pack` (frame-fresh DPR, same
+  home as Phase 2's dilation); round 2 confirmed the fix APPROVE, CI still
+  green, no new findings (one non-blocking nit — the PR description
+  described the superseded implementation — fixed via `gh pr edit` before
+  merge). Dame's independent application remains deferred until
+  `mikbry/miky#605` lands — retroactively applies to Phases 1-3.
+  Arguably this phase's Codex cycle is *stronger* evidence than a bare
+  round-1 APPROVE would have been: it demonstrates the review loop actually
+  catching and fixing a real defect, not just rubber-stamping.
 
 ## Phase 4
 - PR: pending
-- Status: not started
+- Status: not started — Codex 8-step-plan step 8 (Abel/label routing
+  decision). Scope-decision-first per dame-rubric.md § Phase 4: chevalier
+  must choose variant A (route the "Abel via Slug, label via bitmap" demo
+  label through SFNT/Slug too) or variant B (restrict bitmap to integer
+  scales + device-pixel snapping) and document the choice + rationale in
+  `docs/architecture/N-bitmap-vs-slug-labels.md` before implementing.
+  **Phase 4 MERGE GATE (CHARTER § Interaction points Point 2):** dame BLESS
+  does NOT authorize chevalier to merge this phase's PR — chevalier posts
+  `COMPLETION.md` with the PR OPEN + evidence-pattern-BLESSED, and the
+  operator's visual smoke test (`cargo run -p text --features slug`,
+  `atoms-on-wgpu --features slug`, `native-showcase`) is the final merge
+  gate. This is the one phase boundary that still needs operator
+  interaction per the CHARTER's 2-touchpoint contract, regardless of the
+  standing dame-infrastructure-gap workaround.
