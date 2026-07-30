@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T16:00:00Z
+**Last updated:** 2026-07-30T18:00:00Z
 **Current phase:** 4
-**Phase status:** in progress — implemented + self-verified, dispatching Codex round 1. No active block.
+**Phase status:** COMPLETION.md posted — PR #164 open, awaiting operator visual smoke test (final merge gate). No active block. See `COMPLETION.md`.
 
 ## Dame infrastructure gap — standing note (applies to Phases 2-4 until resolved)
 
@@ -390,7 +390,12 @@ noted once here rather than repeated per-phase.
   48px") unverifiable without amending the immutable oracle. Full rationale
   in `docs/architecture/0008-bitmap-vs-slug-labels.md` (cited in the PR
   body). Codex round 1 found a real defect (fixed — see notes below);
-  round 2 dispatched to confirm.
+  round 2 confirmed APPROVE, CI 30/30 green including `gpu-offscreen`.
+  `COMPLETION.md` posted; PR #164 remains OPEN pending the operator's
+  visual smoke test (CHARTER § Interaction points Point 2 / dame-rubric.md
+  § Phase 4 MERGE GATE) — this is the mission's final merge, not
+  chevalier's to perform. No further chevalier action expected on this
+  mission until the operator merges PR #164 or requests changes.
 - Notes:
   - **(S) Bitmap font restricted to integer scales:** `mkui-text`'s
     `bitmap::bitmap_scale` now rounds to the nearest integer
