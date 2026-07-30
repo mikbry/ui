@@ -67,6 +67,47 @@ breaking changes can land on minor bumps).
   - No change to `encode_slug_glyph`'s or `subdivide_cubic`'s signatures, the
     linear-color present-pass contract (#155), or the render-pass
     architecture.
+- **Slug rendering completion, Phase 3 — cap-height/baseline snap for small
+  UI text + golden-image regression tests (mkui-slug-rewrite mission,
+  `mikbry/ui#157` steps 6-7).**
+  - **Baseline snap.** `crates/mkui-wgpu`'s `slug_text::place_slug_run` now
+    rounds each glyph's baseline Y to the nearest physical pixel
+    (`snap_to_physical_pixel`) when `run.font_size_px` is below a
+    `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold — this codebase doesn't parse
+    the SFNT `OS/2.sCapHeight` table, so `font_size_px` is the documented
+    proxy metric for cap height. `place_slug_run` gained a
+    `device_pixel_ratio` parameter (all three call sites — the two
+    `sfnt_slug_gpu` GPU tests and the `text` example — pass `1.0`, their
+    known DPI). Text at or above the threshold is left unsnapped: the "Mag"
+    demo title (48px) and the Phase 1/2 parity fixtures (96-192 logical px
+    effective em) are both provably unaffected (see the new
+    `text_at_or_above_threshold_is_never_snapped` test).
+  - **Piecewise-constancy self-check.** Five new CPU-only unit tests in
+    `slug_text.rs` prove: the snap function groups 100 sub-pixel offsets
+    across one physical-pixel period into exactly 2 cells split at the
+    midpoint (`snap_to_physical_pixel_is_piecewise_constant_over_one_period`);
+    the grid scales correctly at device-pixel ratios 1x/1.5x/2x/3x
+    (`snap_to_physical_pixel_scales_grid_with_device_pixel_ratio`); a real
+    font-backed run (Abel, 12px) actually gets quantized through
+    `place_slug_run` end to end, not just in the isolated math
+    (`small_text_baseline_snap_moves_in_quantized_physical_pixel_steps`); text
+    at/above threshold passes through unsnapped
+    (`text_at_or_above_threshold_is_never_snapped`,
+    `threshold_boundary_is_exclusive_at_16px`).
+  - **Golden-image regression tests.** `crates/mkui-wgpu/tests/goldens/`
+    gains 24 committed PNGs (the 8 ratified glyph fixtures × 1x/1.5x/2x DPI),
+    captured from mkui's own renderer via a new `#[ignore]`d
+    `capture_phase3_golden_images` regen tool (analogous to the
+    reference-harness's `--write-fixtures`). A new always-on test,
+    `phase3_golden_images_match_committed_baseline_at_all_dpis`, re-renders
+    and diffs against these committed files at the same thresholds as Phase
+    1 (Δ ≤ 4/255, differing pixels ≤ 10, SSIM ≥ 0.995) — a real, reviewable
+    artifact distinct from Phase 1's dynamic re-render-and-diff, addressing
+    Codex's original step-7 complaint that prior tests only asserted "some
+    pixels changed" and couldn't catch softness or asymmetric antialiasing.
+  - Verified under the same pinned Docker + Lavapipe image as prior phases:
+    `mkui-vector2d`, `mkui-vector2d-wgpu`, `mkui-wgpu` (default, `slug`,
+    `gpu-tests,slug`) all pass; `cargo fmt --check` clean.
 
 - **Slug rendering completion, Phase 1 — dual-ray coverage + `fwidth` AA
   (mkui-slug-rewrite mission, `mikbry/ui#157` steps 1-3).** `crates/mkui-vector2d-wgpu`'s

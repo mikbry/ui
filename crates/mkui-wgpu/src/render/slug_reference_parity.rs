@@ -420,3 +420,98 @@ fn phase2_no_thin_gap_regressions_on_curve_heavy_glyphs() {
         failures.join("\n")
     );
 }
+
+/// #157 Phase 3 (Codex plan step 7): committed golden-image regression tests
+/// at 1x/1.5x/2x DPI, distinct from Phase 1's `known-good` comparison. Phase
+/// 1's test dynamically re-renders and diffs against the *reference
+/// adapter's* committed PNGs every run but never itself commits an artifact;
+/// these are real, reviewable PNG files capturing mkui's own render output,
+/// giving humans/tooling something to visually diff against directly (Codex's
+/// original complaint: prior tests only asserted "some pixels changed" and
+/// couldn't catch softness or asymmetric antialiasing).
+fn crate_goldens_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/goldens")
+}
+
+fn read_committed_golden(name: &str, dpi_label: &str) -> (u32, u32, Vec<u8>) {
+    let path = crate_goldens_dir().join(format!("{name}_{dpi_label}.png"));
+    let file = fs::File::open(&path).unwrap_or_else(|e| panic!("opening {}: {e}", path.display()));
+    let decoder = png::Decoder::new(file);
+    let mut reader = decoder.read_info().expect("reading PNG header");
+    let mut buffer = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buffer).expect("decoding PNG frame");
+    buffer.truncate(info.buffer_size());
+    (info.width, info.height, buffer)
+}
+
+fn write_png(path: &Path, width: u32, height: u32, pixels: &[u8]) {
+    let file =
+        fs::File::create(path).unwrap_or_else(|e| panic!("creating {}: {e}", path.display()));
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("writing PNG header");
+    writer.write_image_data(pixels).expect("writing PNG data");
+}
+
+/// Regenerates `crates/mkui-wgpu/tests/goldens/` from mkui's own renderer.
+/// Not run in CI (`#[ignore]`) — this is the capture/regen tool, analogous to
+/// the reference-harness's own `--write-fixtures` flag. Invoke manually with
+/// `cargo test -p mkui-wgpu --features "gpu-tests,slug" -- --ignored
+/// capture_phase3_golden_images` after an intentional rendering change, then
+/// review the resulting PNG diffs before committing.
+#[test]
+#[ignore]
+fn capture_phase3_golden_images() {
+    fs::create_dir_all(crate_goldens_dir()).expect("creating tests/goldens/");
+    for name in GLYPH_NAMES {
+        let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
+        for (dpi, label) in DPI_CASES {
+            let (canvas, rendered) = render_mkui(&glyph, dpi);
+            write_png(
+                &crate_goldens_dir().join(format!("{name}_{label}.png")),
+                canvas,
+                canvas,
+                &rendered,
+            );
+        }
+    }
+}
+
+#[test]
+fn phase3_golden_images_match_committed_baseline_at_all_dpis() {
+    // dame-rubric.md § Phase 3: (S) golden-image tests exist for 3 DPI scales
+    // — the files under `crate_goldens_dir()` themselves; (N) chevalier's
+    // committed goldens match adapter-regenerated goldens at Phase 1's
+    // thresholds — checked here by re-rendering through mkui and diffing
+    // against the committed files (this session's self-check standing in for
+    // dame's independent regeneration; see STATE.md's standing dame note).
+    let mut failures = Vec::new();
+    for name in GLYPH_NAMES {
+        let glyph = read_glyph(&harness_dir().join("glyphs").join(format!("{name}.slug")));
+        for (dpi, label) in DPI_CASES {
+            let (canvas, rendered) = render_mkui(&glyph, dpi);
+            let (golden_w, golden_h, golden) = read_committed_golden(name, label);
+            assert_eq!(
+                (canvas, canvas),
+                (golden_w, golden_h),
+                "{name}_{label}: canvas size must match the committed golden's"
+            );
+            let (max_delta, differing) = diff(&rendered, &golden);
+            let ssim = ssim_r(&rendered, &golden, canvas, canvas);
+            if max_delta > MAX_CHANNEL_DELTA || differing > MAX_DIFFERING_PIXELS || ssim < MIN_SSIM
+            {
+                failures.push(format!(
+                    "{name}_{label}: max_channel_delta={max_delta} (limit {MAX_CHANNEL_DELTA}), \
+                     differing_pixels={differing} (limit {MAX_DIFFERING_PIXELS}), \
+                     ssim={ssim:.6} (floor {MIN_SSIM})"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Phase 3 golden-image regressions found:\n{}",
+        failures.join("\n")
+    );
+}
