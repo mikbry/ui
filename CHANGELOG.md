@@ -22,24 +22,30 @@ breaking changes can land on minor bumps).
     forced nearest-neighbor upscaling to duplicate source rows/columns
     unevenly. A `debug_assert!` documents the always-integer invariant.
   - **Device-pixel position snap.** `mkui-wgpu`'s `tessellate_text` snaps
-    each glyph cell's screen position to the device-pixel grid below the
-    same `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold Phase 3 established for
-    Slug, using the frame's fresh `device_pixel_ratio` — computed once per
-    `Renderer::render` call and shared with the Slug lane's dilation/
-    baseline-snap math. `tessellate_primitives` gained a
-    `device_pixel_ratio` parameter; `tessellate_scene`/
-    `tessellate_scene_with_text` (used by `native-window`, `atoms-on-wgpu`,
-    and `mkui-wgpu`'s non-windowed `Renderer` helper) keep their existing
-    signatures, passing `1.0` internally — unaffected in behavior. Bitmap
-    tessellation already re-runs fresh every frame from the declarative
-    `Scene`, unlike Phase 3's first cut of the Slug baseline snap, so no
-    Phase-3-style staleness redesign was needed.
+    every glyph cell's screen position to the device-pixel grid,
+    unconditionally, using the frame's fresh `device_pixel_ratio` — computed
+    once per `Renderer::render` call and shared with the Slug lane's
+    dilation/baseline-snap math. Deliberately unconditional, unlike Phase
+    3's Slug baseline snap, which gates on a small-text threshold to protect
+    Phase 1/2's large-text adapter-parity fixtures — the bitmap lane has no
+    such fixtures to protect. (An earlier revision incorrectly copied
+    Phase 3's threshold onto bitmap; Codex round 1 of this PR's review
+    caught that it left the demo's own 16px label unsnapped — see Codex
+    plan step 8's literal text, "snap every glyph to device pixels" — and it
+    was removed.) `tessellate_primitives` gained a `device_pixel_ratio`
+    parameter; `tessellate_scene`/`tessellate_scene_with_text` (used by
+    `native-window`, `atoms-on-wgpu`, and `mkui-wgpu`'s non-windowed
+    `Renderer` helper) keep their existing signatures, passing `1.0`
+    internally — unaffected in behavior. Bitmap tessellation already re-runs
+    fresh every frame from the declarative `Scene`, unlike Phase 3's first
+    cut of the Slug baseline snap, so no Phase-3-style staleness redesign
+    was needed.
   - Piecewise-constancy self-check tests mirror Phase 3's exact pattern:
     isolated tests on the snap function (100 sub-pixel offsets -> exactly 2
     cells at 1x DPI, correctly scaled at 1x/1.5x/2x/3x) plus an integration
     test through the real `Scene` -> `tessellate_primitives` path proving a
-    12px "#" glyph's position quantizes in one-physical-pixel steps at 2x
-    DPR, and a 20px glyph passes every sub-pixel offset through unsnapped.
+    "#" glyph's position quantizes in one-physical-pixel steps at 2x DPR at
+    every font size tested, including the demo's actual 16px label size.
   - Verified: `cargo fmt --check`, workspace clippy, and feature-slug matrix
     clippy (all `-D warnings`) clean; `cargo test -p mkui-text` 81/81;
     `cargo test -p mkui-wgpu` (default, `slug`, `gpu-tests,slug`) all pass.

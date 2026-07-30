@@ -389,7 +389,8 @@ noted once here rather than repeated per-phase.
   ("dame renders the label text at 12px via adapter... SAME comparison for
   48px") unverifiable without amending the immutable oracle. Full rationale
   in `docs/architecture/0008-bitmap-vs-slug-labels.md` (cited in the PR
-  body). Dispatching Codex round 1 next.
+  body). Codex round 1 found a real defect (fixed — see notes below);
+  round 2 dispatched to confirm.
 - Notes:
   - **(S) Bitmap font restricted to integer scales:** `mkui-text`'s
     `bitmap::bitmap_scale` now rounds to the nearest integer
@@ -398,29 +399,40 @@ noted once here rather than repeated per-phase.
     float — a fractional scale forced nearest-neighbor upscaling to
     duplicate the 5×7 face's source rows/columns unevenly.
   - **(S) Device-pixel snapping applied:** `mkui-wgpu`'s `tessellate_text`
-    snaps each glyph cell's origin to the device-pixel grid below the same
-    `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold Phase 3 used for Slug, using
-    the frame's fresh `device_pixel_ratio` (computed once per
-    `Renderer::render` call in `render/mod.rs`, shared with the Slug lane's
-    own dilation/baseline-snap math — the same hoist point, no duplicate
-    computation). `tessellate_primitives` gained a `device_pixel_ratio`
-    parameter; `tessellate_scene`/`tessellate_scene_with_text` (used by
-    `examples/native-window`, `examples/atoms-on-wgpu`, and `mkui-wgpu`'s
-    non-windowed `Renderer` helper — none in Phase 4's YOLO scope) keep
-    their existing signatures unchanged, passing `1.0` internally, so none
-    of those callers needed touching. Bitmap tessellation already re-runs
-    fresh every frame from the declarative `Scene` (unlike Phase 3's first,
-    reverted cut of the Slug baseline snap), so no separate staleness
-    redesign was needed — confirmed by reading the actual call graph, not
-    assumed by analogy.
+    snaps every glyph cell's origin to the device-pixel grid,
+    unconditionally, using the frame's fresh `device_pixel_ratio` (computed
+    once per `Renderer::render` call in `render/mod.rs`, shared with the
+    Slug lane's own dilation/baseline-snap math — the same hoist point, no
+    duplicate computation). `tessellate_primitives` gained a
+    `device_pixel_ratio` parameter; `tessellate_scene`/
+    `tessellate_scene_with_text` (used by `examples/native-window`,
+    `examples/atoms-on-wgpu`, and `mkui-wgpu`'s non-windowed `Renderer`
+    helper — none in Phase 4's YOLO scope) keep their existing signatures
+    unchanged, passing `1.0` internally, so none of those callers needed
+    touching. Bitmap tessellation already re-runs fresh every frame from the
+    declarative `Scene` (unlike Phase 3's first, reverted cut of the Slug
+    baseline snap), so no separate staleness redesign was needed — confirmed
+    by reading the actual call graph, not assumed by analogy.
+
+    **Codex round 1 finding, real and fixed in round 2:** the first cut
+    incorrectly copied Phase 3's small-text threshold gate onto the bitmap
+    snap. That threshold exists for Slug specifically to protect Phase 1/2's
+    large-text adapter-parity fixtures; the bitmap lane carries no such
+    fixtures at all, and Codex plan step 8's literal text is "snap every
+    glyph to device pixels" — no threshold. Codex round 1 caught that the
+    gated version left `examples/text`'s own demo label (16px, exactly at
+    the copied threshold) unsnapped, and flagged that the test suite
+    "explicitly codifies the incorrect ≥16px behavior." Fixed by removing
+    the gate entirely; the snap is now unconditional for bitmap text.
   - **(N) Sub-pixel-invariance:** mirrors Phase 3's exact test shape in
     `crates/mkui-wgpu/src/tessellation.rs`: two isolated tests on the snap
     function (100 sub-pixel offsets over one physical-pixel period group
     into exactly 2 cells at 1x DPI; correctly scaled at 1x/1.5x/2x/3x) plus
     an integration test through the real `Scene` → `tessellate_primitives`
-    path proving a 12px "#" glyph's position quantizes in one-physical-
-    pixel steps at 2x DPR, and a 20px glyph passes every sub-pixel offset
-    through unsnapped (`<`, not `<=`, at the threshold).
+    path proving a "#" glyph's position quantizes in one-physical-pixel
+    steps at 2x DPR at every font size swept (12px, 16px, 20px, 48px) —
+    16px is the demo label's actual size, per Codex's explicit request for
+    coverage at that exact value.
   - Two new tests in `mkui-text`'s `bitmap.rs` sweep 500 font sizes (0.1px
     to 50px) proving `bitmap_scale` always returns a positive integer, plus
     a table check that 16px rounds to 2× (not truncates to 1×) and 14px
