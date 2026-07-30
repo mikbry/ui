@@ -16,6 +16,22 @@ use crate::types::{
     TextAlign,
 };
 
+/// #157 Phase 4 (Codex plan step 8 variant B): below this cap-height, bitmap
+/// text output positions are snapped to the device-pixel grid. Same
+/// threshold and rationale as Phase 3's Slug baseline snap — this codebase
+/// doesn't parse font cap-height metrics, so `font_size_px` is the
+/// documented proxy.
+const SMALL_TEXT_CAP_HEIGHT_PX: f32 = 16.0;
+
+/// Round `value_px` to the nearest physical pixel at `device_pixel_ratio`,
+/// then convert back to logical pixels. A local copy of the same snap used
+/// by `mkui-vector2d-wgpu`'s Slug lane (Phase 3) — duplicated rather than
+/// shared across crates because this module has no `slug`-feature
+/// dependency on that crate, and the function is two lines.
+fn snap_to_physical_pixel(value_px: f32, device_pixel_ratio: f32) -> f32 {
+    (value_px * device_pixel_ratio).round() / device_pixel_ratio.max(f32::EPSILON)
+}
+
 pub fn tessellate_scene(scene: &Scene) -> Vec<GuiTriangle> {
     let system = BitmapTextSystem::new();
     tessellate_scene_with_text(scene, &system)
@@ -24,24 +40,39 @@ pub fn tessellate_scene(scene: &Scene) -> Vec<GuiTriangle> {
 /// Tessellate `scene` using an explicit text system. Renderers that hold
 /// their own `Arc<dyn TextSystem>` (so they can swap implementations
 /// between sprints) call this directly rather than the convenience wrapper.
+/// `device_pixel_ratio` is `1.0` (no logical/physical split) — callers with
+/// a real per-frame DPR use [`tessellate_primitives`] directly, as the
+/// windowed `Renderer::render` does.
 pub fn tessellate_scene_with_text(scene: &Scene, text_system: &dyn TextSystem) -> Vec<GuiTriangle> {
-    tessellate_primitives(&scene.primitives, text_system)
+    tessellate_primitives(&scene.primitives, text_system, 1.0)
 }
 
 /// Tessellate a contiguous slice of primitives. The ordered render path (#66)
 /// calls this per [`crate::RenderCommand`] run so each command's geometry is
 /// emitted in scene order; `tessellate_scene_with_text` is the whole-scene
 /// convenience over the full primitive list.
+///
+/// `device_pixel_ratio` is the frame's physical-pixels-per-logical-pixel
+/// ratio (`1.0` when the caller's pixel space has no logical/physical
+/// split) — below [`SMALL_TEXT_CAP_HEIGHT_PX`], bitmap glyph positions are
+/// snapped to the device-pixel grid (#157 Phase 4 variant B); this function
+/// re-tessellates fresh from the declarative `Scene` on every call (the
+/// windowed renderer calls it once per frame), so — unlike Phase 3's first,
+/// reverted cut of the Slug baseline snap — there is no scene-construction-
+/// time caching for a DPI change to go stale against.
 pub fn tessellate_primitives(
     primitives: &[Primitive],
     text_system: &dyn TextSystem,
+    device_pixel_ratio: f32,
 ) -> Vec<GuiTriangle> {
     let mut triangles = Vec::new();
     for primitive in primitives {
         match primitive {
             Primitive::Shadow(shadow) => tessellate_shadow(&mut triangles, *shadow),
             Primitive::Quad(quad) => tessellate_quad(&mut triangles, *quad),
-            Primitive::Text(text) => tessellate_text(&mut triangles, text, text_system),
+            Primitive::Text(text) => {
+                tessellate_text(&mut triangles, text, text_system, device_pixel_ratio)
+            }
             Primitive::Icon(icon) => tessellate_icon(&mut triangles, icon),
             // Slug glyphs are not tessellated to triangles — they draw on the
             // Slug coverage lane (#66). The ordered render path routes them
@@ -83,7 +114,12 @@ fn tessellate_quad(triangles: &mut Vec<GuiTriangle>, quad: Quad) {
     }
 }
 
-fn tessellate_text(triangles: &mut Vec<GuiTriangle>, text: &Text, system: &dyn TextSystem) {
+fn tessellate_text(
+    triangles: &mut Vec<GuiTriangle>,
+    text: &Text,
+    system: &dyn TextSystem,
+    device_pixel_ratio: f32,
+) {
     let line_height = text.style.line_height_px.max(1.0);
     let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
     // The bitmap face is the only face this renderer drives in Sprint 7, so a
@@ -118,8 +154,18 @@ fn tessellate_text(triangles: &mut Vec<GuiTriangle>, text: &Text, system: &dyn T
             if image.format != GlyphFormat::Alpha {
                 continue;
             }
-            let base_x = text.rect.origin.x + run.origin_x_px + glyph.x_px + image.left_px as f32;
-            let base_y = text.rect.origin.y + run.origin_y_px + glyph.y_px + image.top_px as f32;
+            let mut base_x =
+                text.rect.origin.x + run.origin_x_px + glyph.x_px + image.left_px as f32;
+            let mut base_y =
+                text.rect.origin.y + run.origin_y_px + glyph.y_px + image.top_px as f32;
+            // #157 Phase 4 variant B: snap the whole glyph cell's origin as
+            // one unit (not each output pixel independently) so its 5×7
+            // raster shape is preserved exactly, just aligned to the device
+            // pixel grid.
+            if text.style.font_size_px < SMALL_TEXT_CAP_HEIGHT_PX {
+                base_x = snap_to_physical_pixel(base_x, device_pixel_ratio);
+                base_y = snap_to_physical_pixel(base_y, device_pixel_ratio);
+            }
             for oy in 0..image.height_px {
                 for ox in 0..image.width_px {
                     let alpha = image.data[(oy * image.width_px + ox) as usize];
@@ -212,5 +258,144 @@ mod tests {
             style: WgpuTheme::default().body_style,
         });
         assert!(tessellate_scene(&scene).is_empty());
+    }
+
+    // ---- Phase 4 variant B: bitmap device-pixel snap (#157 step 8) --------
+
+    // dame-rubric.md § Phase 4 variant B (N): the snap function itself,
+    // tested in isolation with exact control over the sub-pixel sweep —
+    // the same literal claim as Phase 3's Slug baseline snap ("100
+    // sub-pixel offsets across one physical-pixel period group into
+    // exactly 2 piecewise-constant cells, split at the period's midpoint").
+    #[test]
+    fn snap_to_physical_pixel_is_piecewise_constant_over_one_period() {
+        let base = 10.0f32;
+        let mut values = Vec::with_capacity(100);
+        for i in 0..100 {
+            let t = i as f32 / 100.0;
+            values.push(snap_to_physical_pixel(base + t, 1.0));
+        }
+        let mut distinct = values.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct,
+            vec![10.0, 11.0],
+            "expected exactly 2 cells (nearest-pixel snap), got {distinct:?}"
+        );
+        for (i, &v) in values.iter().enumerate() {
+            let t = i as f32 / 100.0;
+            let expected = if t < 0.5 { 10.0 } else { 11.0 };
+            assert_eq!(
+                v, expected,
+                "offset {t} landed in the wrong cell (value {v})"
+            );
+        }
+    }
+
+    #[test]
+    fn snap_to_physical_pixel_scales_grid_with_device_pixel_ratio() {
+        for dpr in [1.0f32, 1.5, 2.0, 3.0] {
+            let base = 10.0f32;
+            let mut values = Vec::with_capacity(100);
+            for i in 0..100 {
+                let t = (i as f32 / 100.0) / dpr;
+                values.push(snap_to_physical_pixel(base + t, dpr));
+            }
+            let mut distinct = values.clone();
+            distinct.dedup();
+            assert_eq!(
+                distinct.len(),
+                2,
+                "device_pixel_ratio {dpr}: expected 2 cells, got {distinct:?}"
+            );
+            let delta = distinct[1] - distinct[0];
+            assert!(
+                (delta - 1.0 / dpr).abs() < 1e-4,
+                "device_pixel_ratio {dpr}: cell delta {delta} should be one physical \
+                 pixel (1/{dpr} logical px)"
+            );
+        }
+    }
+
+    /// Tessellate a single "#" glyph at `font_size_px`, `rect_origin_y`, and
+    /// `device_pixel_ratio`, returning the minimum Y coordinate across every
+    /// emitted triangle vertex — a stand-in for the glyph cell's overall
+    /// screen position that shifts in lockstep with `base_y` regardless of
+    /// which specific bits are "on" in the raster.
+    fn min_triangle_y(font_size_px: f32, rect_origin_y: f32, device_pixel_ratio: f32) -> f32 {
+        let system = BitmapTextSystem::new();
+        let mut style = WgpuTheme::default().body_style;
+        style.font_size_px = font_size_px;
+        let mut scene = Scene::new(Size::new(240.0, 80.0));
+        scene.text(Text {
+            rect: Rect::new(Point::new(8.0, rect_origin_y), Size::new(220.0, 40.0)),
+            content: "#".to_string(),
+            style,
+        });
+        let triangles = tessellate_primitives(&scene.primitives, &system, device_pixel_ratio);
+        assert!(
+            !triangles.is_empty(),
+            "\"#\" must tessellate to some triangles"
+        );
+        triangles
+            .iter()
+            .flat_map(|t| t.points.iter().map(|p| p.y))
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    // Integration-level proof that `tessellate_text` actually wires the snap
+    // in (gated correctly) through the real `Scene` -> `tessellate_primitives`
+    // path, rather than the math being correct in isolation but never reached.
+    #[test]
+    fn small_text_position_snap_moves_in_quantized_physical_pixel_steps() {
+        let font_size_px = 12.0; // below SMALL_TEXT_CAP_HEIGHT_PX
+        let device_pixel_ratio = 2.0f32;
+
+        let mut values = Vec::with_capacity(100);
+        for i in 0..100 {
+            let rect_origin_y = 8.0 + i as f32 * 0.05;
+            values.push(min_triangle_y(
+                font_size_px,
+                rect_origin_y,
+                device_pixel_ratio,
+            ));
+        }
+        let mut distinct = values.clone();
+        distinct.dedup();
+        assert!(
+            distinct.len() < values.len(),
+            "small bitmap text position must be quantized, not continuous \
+             ({} distinct of {})",
+            distinct.len(),
+            values.len()
+        );
+        for w in distinct.windows(2) {
+            let step = w[1] - w[0];
+            assert!(
+                (step - 1.0 / device_pixel_ratio).abs() < 1e-4,
+                "quantization step {step} must equal one physical pixel \
+                 (1/{device_pixel_ratio} logical px)"
+            );
+        }
+    }
+
+    #[test]
+    fn text_at_or_above_threshold_is_never_position_snapped() {
+        let font_size_px = 20.0; // >= SMALL_TEXT_CAP_HEIGHT_PX
+        let mut values = Vec::with_capacity(50);
+        for i in 0..50 {
+            let rect_origin_y = 8.0 + i as f32 * 0.01;
+            values.push(min_triangle_y(font_size_px, rect_origin_y, 1.0));
+        }
+        let mut distinct = values.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            values.len(),
+            "unsnapped text must pass every sub-pixel offset through unchanged, \
+             got {} distinct of {}",
+            distinct.len(),
+            values.len()
+        );
     }
 }

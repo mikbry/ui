@@ -232,9 +232,23 @@ impl TextSystem for BitmapTextSystem {
 }
 
 /// Bitmap scale derived from a requested font size. Matches the predecessor
-/// prototype's `(font_size_px / 10.0).max(1.0)`.
+/// prototype's `(font_size_px / 10.0).max(1.0)`, clamped to the nearest
+/// **integer** scale (#157 Phase 4, Codex plan step 8 variant B): the bitmap
+/// face is a fixed 5×7 pixel grid with no intermediate representation, so a
+/// non-integer scale (e.g. a 16px request giving `1.6`) forces the
+/// nearest-neighbor upscale in `rasterize` to duplicate source rows/columns
+/// unevenly, which is exactly the kind of asymmetric, blurry scaling this
+/// mission's Slug work fixes for vector text — restricting the bitmap lane
+/// to integer scales keeps every source bit an exact N×N block on screen.
+/// `debug_assert!` documents (and catches in debug builds) the invariant
+/// this function must uphold: the return value is always a positive integer.
 pub fn bitmap_scale(font_size_px: f32) -> f32 {
-    (font_size_px / REFERENCE_FONT_SIZE_PX).max(1.0)
+    let scale = (font_size_px / REFERENCE_FONT_SIZE_PX).max(1.0).round();
+    debug_assert!(
+        scale >= 1.0 && scale.fract() == 0.0,
+        "bitmap_scale must return a positive integer, got {scale} for font_size_px={font_size_px}"
+    );
+    scale
 }
 
 /// How many bitmap glyphs fit within `width` given a per-glyph `advance` and
@@ -482,6 +496,37 @@ mod tests {
         let lines = wrap_text_lines("selected terrain patch with a very long action hint", 12, 2);
         assert_eq!(lines.len(), 2);
         assert!(lines[1].ends_with("..."));
+    }
+
+    #[test]
+    fn bitmap_scale_is_always_a_positive_integer() {
+        // #157 Phase 4 variant B: the bitmap face is restricted to integer
+        // scales — no font_size_px should ever produce a fractional scale.
+        for tenths in 1..500 {
+            let font_size_px = tenths as f32 / 10.0; // sweeps 0.1..50.0px
+            let scale = bitmap_scale(font_size_px);
+            assert!(
+                scale >= 1.0,
+                "font_size_px {font_size_px}: scale {scale} < 1.0"
+            );
+            assert_eq!(
+                scale.fract(),
+                0.0,
+                "font_size_px {font_size_px}: scale {scale} is not an integer"
+            );
+        }
+    }
+
+    #[test]
+    fn bitmap_scale_rounds_to_the_nearest_integer() {
+        // 16px / 10.0 = 1.6 -> rounds to 2, not truncated to 1.
+        assert_eq!(bitmap_scale(16.0), 2.0);
+        // 14px / 10.0 = 1.4 -> rounds down to 1.
+        assert_eq!(bitmap_scale(14.0), 1.0);
+        // Exact multiples of REFERENCE_FONT_SIZE_PX are unaffected.
+        assert_eq!(bitmap_scale(10.0), 1.0);
+        assert_eq!(bitmap_scale(20.0), 2.0);
+        assert_eq!(bitmap_scale(30.0), 3.0);
     }
 
     #[test]

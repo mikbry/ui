@@ -37,6 +37,11 @@ and the seven records below.
   the backend-neutral CPU contracts (font/outline, Slug encoding), while
   `mkui-vector2d-wgpu` and `mkui-wgpu` own the GPU resources and surface/frame
   lifecycle. Bitmap stays the v0.10.0 default; the `slug` feature is default-off.
+- [ADR 0008 — Bitmap labels restricted to integer scales + device-pixel snap, not routed through Slug](0008-bitmap-vs-slug-labels.md)
+  — Codex plan step 8's demo label stays on the bitmap lane; its two
+  correctness gaps (non-integer scaling, unsnapped sub-pixel positions) are
+  fixed instead, since the ratified reference-harness adapter has no way to
+  verify a Slug-routed label at arbitrary font sizes.
 
 ## ADR format conventions
 

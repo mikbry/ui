@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T14:00:00Z
+**Last updated:** 2026-07-30T16:00:00Z
 **Current phase:** 4
-**Phase status:** starting — Phase 3 merged, see § Phase 3 below. No active block.
+**Phase status:** in progress — implemented + self-verified, dispatching Codex round 1. No active block.
 
 ## Dame infrastructure gap — standing note (applies to Phases 2-4 until resolved)
 
@@ -381,13 +381,63 @@ noted once here rather than repeated per-phase.
   catching and fixing a real defect, not just rubber-stamping.
 
 ## Phase 4
-- PR: pending
-- Status: not started — Codex 8-step-plan step 8 (Abel/label routing
-  decision). Scope-decision-first per dame-rubric.md § Phase 4: chevalier
-  must choose variant A (route the "Abel via Slug, label via bitmap" demo
-  label through SFNT/Slug too) or variant B (restrict bitmap to integer
-  scales + device-pixel snapping) and document the choice + rationale in
-  `docs/architecture/N-bitmap-vs-slug-labels.md` before implementing.
+- PR: pending (opening now)
+- Opened: 2026-07-30
+- Status: implemented Codex 8-step-plan step 8, variant B — chosen because
+  the ratified reference-harness adapter has no way to render at an
+  arbitrary font size, making variant A's own (N) BLESS criterion
+  ("dame renders the label text at 12px via adapter... SAME comparison for
+  48px") unverifiable without amending the immutable oracle. Full rationale
+  in `docs/architecture/0008-bitmap-vs-slug-labels.md` (cited in the PR
+  body). Dispatching Codex round 1 next.
+- Notes:
+  - **(S) Bitmap font restricted to integer scales:** `mkui-text`'s
+    `bitmap::bitmap_scale` now rounds to the nearest integer
+    (`(font_size_px / REFERENCE_FONT_SIZE_PX).max(1.0).round()`, with a
+    `debug_assert!` on the invariant) instead of returning an arbitrary
+    float — a fractional scale forced nearest-neighbor upscaling to
+    duplicate the 5×7 face's source rows/columns unevenly.
+  - **(S) Device-pixel snapping applied:** `mkui-wgpu`'s `tessellate_text`
+    snaps each glyph cell's origin to the device-pixel grid below the same
+    `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold Phase 3 used for Slug, using
+    the frame's fresh `device_pixel_ratio` (computed once per
+    `Renderer::render` call in `render/mod.rs`, shared with the Slug lane's
+    own dilation/baseline-snap math — the same hoist point, no duplicate
+    computation). `tessellate_primitives` gained a `device_pixel_ratio`
+    parameter; `tessellate_scene`/`tessellate_scene_with_text` (used by
+    `examples/native-window`, `examples/atoms-on-wgpu`, and `mkui-wgpu`'s
+    non-windowed `Renderer` helper — none in Phase 4's YOLO scope) keep
+    their existing signatures unchanged, passing `1.0` internally, so none
+    of those callers needed touching. Bitmap tessellation already re-runs
+    fresh every frame from the declarative `Scene` (unlike Phase 3's first,
+    reverted cut of the Slug baseline snap), so no separate staleness
+    redesign was needed — confirmed by reading the actual call graph, not
+    assumed by analogy.
+  - **(N) Sub-pixel-invariance:** mirrors Phase 3's exact test shape in
+    `crates/mkui-wgpu/src/tessellation.rs`: two isolated tests on the snap
+    function (100 sub-pixel offsets over one physical-pixel period group
+    into exactly 2 cells at 1x DPI; correctly scaled at 1x/1.5x/2x/3x) plus
+    an integration test through the real `Scene` → `tessellate_primitives`
+    path proving a 12px "#" glyph's position quantizes in one-physical-
+    pixel steps at 2x DPR, and a 20px glyph passes every sub-pixel offset
+    through unsnapped (`<`, not `<=`, at the threshold).
+  - Two new tests in `mkui-text`'s `bitmap.rs` sweep 500 font sizes (0.1px
+    to 50px) proving `bitmap_scale` always returns a positive integer, plus
+    a table check that 16px rounds to 2× (not truncates to 1×) and 14px
+    rounds to 1×.
+  - Verified under the same pinned Docker + Lavapipe image (`rust:1.89-
+    bookworm`, digest `948f9b08`) as all prior phases: `cargo fmt --check`
+    clean; workspace clippy (CI excludes) clean; feature-slug matrix clippy
+    clean; `cargo test -p mkui-text` 81/81; `-p mkui-vector2d` 81/81;
+    `-p mkui-vector2d-wgpu` 20/20; `-p mkui-wgpu` (default) 133/133,
+    (`slug`) 137/137, (`gpu-tests,slug`) 156/156 (1 ignored — the Phase 3
+    golden-capture regen tool, by design); `cargo build --workspace`
+    (excluding the three backend-pinned showcases) succeeds — confirming
+    `native-window` and `atoms-on-wgpu` still compile unmodified against the
+    unchanged `tessellate_scene` signature.
+- Dame dispatch: per the standing note above, will NOT dispatch a second
+  `--brief-file dame-rubric.md` round for this phase; merges on the
+  self-check + CI-green + Codex-review pattern instead.
   **Phase 4 MERGE GATE (CHARTER § Interaction points Point 2):** dame BLESS
   does NOT authorize chevalier to merge this phase's PR — chevalier posts
   `COMPLETION.md` with the PR OPEN + evidence-pattern-BLESSED, and the
