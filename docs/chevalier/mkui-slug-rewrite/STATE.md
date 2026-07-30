@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-07-30T09:15:00Z
 **Current phase:** 2
-**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced [`BLOCKED.md`](https://github.com/mikbry/ui/blob/07926f041a29fd9adc4cf114890ecdd50960ae49/docs/chevalier/mkui-slug-rewrite/BLOCKED.md) is resolved and that file has been removed from this branch. Resuming the Codex review / dame dispatch loop.
+**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced `BLOCKED.md` (posted `5d6085a` on this branch, removed at `53e4e88`) is resolved. Resuming the Codex review / dame dispatch loop.
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -154,6 +154,20 @@
   removed from the branch (block resolved). Resuming Codex review from
   round 3's clean state (only the thin-gap finding was blocking) before
   dame dispatch.
+
+  **Cross-phase invariant pre-check (for dame, ahead of dispatch):** the
+  rebase deliberately carries `07926f0` (rubric amendment 1) into this
+  branch's history, so `git log docs/chevalier/mkui-slug-rewrite/{CHARTER,
+  dame-rubric,codex-8-step-plan}.md` since ratification-tip `b338bd9` shows
+  exactly one commit: `07926f0`, authored by the operator (Mik), not
+  chevalier — the ratified amendment the protocol explicitly contemplates,
+  not tampering. `git log docs/chevalier/mkui-slug-rewrite/reference-harness/`
+  since `9f76af3` shows zero commits (adapter untouched). `git diff
+  --name-only 7cb352c..HEAD` (prior-phase tip) touches only
+  `crates/mkui-vector2d{,-wgpu}/`, `crates/mkui-wgpu/`, `CHANGELOG.md`,
+  `docs/chevalier/mkui-slug-rewrite/STATE.md`, plus the two amendment-carried
+  doc files above — all within CHARTER § YOLO scope's Scope directories.
+  PR #161 carries both required labels (`chevalier`, `mission:mkui-slug-rewrite`).
 - Known substrate quirk (carried from Phase 1): dame dispatched via the
   `--brief-file dame-rubric.md` fallback shape returns its verdict as prose
   containing an explicit `Verdict: **APPROVE**`/`REQUEST_CHANGES` line, but

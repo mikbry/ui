@@ -43,18 +43,20 @@ breaking changes can land on minor bumps).
   - Verified against the ratified `reference-harness/` adapter under the same
     pinned Docker + Lavapipe image as Phase 1: all 24 comparisons still hold
     (Δ ≤ 1/255, SSIM = 1.000000).
-  - **Thin-gap regression test currently `#[ignore]`d — see
-    `docs/chevalier/mkui-slug-rewrite/BLOCKED.md`.** dame-rubric.md's Phase 2
-    "no thin-gap regressions" criterion, applied at its literal ≥50%
-    bordering-alpha threshold, is jointly unsatisfiable with the same
-    section's Δ ≤ 4/255 reference-comparison criterion: the ratified `g`
-    fixture (2× DPI) itself produces a zero-alpha texel at (157,156) bordered
-    by 206/248 alpha — a literal hit under the rubric's own threshold — and
-    mkui reproduces that texel byte-for-byte from the reference. No
-    implementation that matches the oracle can pass both criteria as
-    literally written. Blocked pending operator rubric amendment; not
-    resolved by loosening the detection threshold (tried and rejected by
-    Codex review as redefining a frozen criterion).
+  - **Thin-gap regression test.** dame-rubric.md's Phase 2 "no thin-gap
+    regressions" criterion, applied at its literal ≥50% bordering-alpha
+    threshold, was jointly unsatisfiable with the same section's Δ ≤ 4/255
+    reference-comparison criterion: the ratified `g` fixture (2× DPI) itself
+    produces a zero-alpha texel at (157,156) bordered by 206/248 alpha — a
+    literal hit under the rubric's own threshold — and mkui reproduces that
+    texel byte-for-byte from the reference. No implementation that matches
+    the oracle could pass both criteria as literally written (not resolved
+    by loosening the detection threshold — tried and rejected by Codex
+    review as redefining a frozen criterion). Resolved by operator rubric
+    amendment 1 (v1.2.1): the check now excludes any thin-gap texel that is
+    byte-identical to the reference golden at the same coordinate — a hit
+    only counts as a regression if it also diverges (Δ > 0) from the
+    reference there. Test un-ignored.
   - Two new CPU-level tests exercise the real encoder end to end (not a
     pre-encoded fixture): `band_overlap_epsilon_normalizes_to_units_per_em`
     proves a curve straddling a band boundary by `0.0005` em joins the band
