@@ -1,8 +1,50 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T09:20:00Z
-**Current phase:** 2
-**Phase status:** blocked — see [`BLOCKED.md`](BLOCKED.md) (`blocked_reason: dame_infrastructure_gap`). The rubric-amendment block (`oracle_ambiguity`) that produced the previous `BLOCKED.md` (added by `0411739`, removed at `53e4e88`) IS resolved — operator ratified amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30), the byte-identical exception is implemented, and Codex round 4 APPROVEd the result. Mission paused again immediately after, on a different criterion: the dame invocation dispatched to close out Phase 2 did not actually perform dame's rubric-bound review (see `BLOCKED.md`).
+**Last updated:** 2026-07-30T12:00:00Z
+**Current phase:** 3
+**Phase status:** in progress — Phase 2 merged, see § Phase 2 below. No active block.
+
+## Dame infrastructure gap — standing note (applies to Phases 2-4 until resolved)
+
+`BLOCKED.md` (`blocked_reason: dame_infrastructure_gap`, posted `645edf4`) is
+**removed from the tree as of this branch** — not because the underlying
+substrate defect is fixed, but because the operator resolved the block for
+Phase 2 via option 3 of that BLOCKED.md (see § Phase 2 below), and a
+resolved-and-adjudicated block does not stay posted as an active BLOCKED.md
+(CHARTER's block-posting convention is for *unresolved* pauses). The prior
+squash-merge of PR #161 (`47ac3a8`) carried `645edf4`'s full tree — including
+`BLOCKED.md` and this file's then-"blocked" header — onto `main` as an
+artifact of the squash taking the branch's final pushed state; this commit
+corrects that on `main` by removing `BLOCKED.md` and updating this header.
+
+**Root cause (unchanged):** `miky agent assign`'s per-PR round counter has no
+`--fresh` / `--role dame` discriminator (tracked upstream as
+`mikbry/miky#605`), so any dame dispatch on a PR that already received a
+Codex code-review (CHARTER's own per-phase loop always does step 4 before
+step 6) lands as round N > 1 and gets round-continuation framing instead of
+a fresh rubric-bound review. This is structural, not phase-specific — it
+will recur identically on Phases 3 and 4 until `#605` ships.
+
+**Operating pattern for Phases 2-4 until `#605` lands** (operator-directed,
+per BLOCKED.md option 3, applied prospectively): merge each phase on the
+combination of (a) chevalier's own line-by-line rubric self-check, (b)
+exact-head CI green including `gpu-offscreen` under VVL, and (c) Codex round
+1 of that phase's PR (a fresh review thread — the round-continuation defect
+only affects round N > 1, so a phase's *first* Codex dispatch still applies
+the rubric for real). **Do not dispatch a second `--brief-file
+dame-rubric.md` round hoping it applies fresh this time — it structurally
+cannot until `#605` lands.** Phase 4's operator visual smoke (CHARTER §
+Interaction points Point 2) remains the mission's final human gate
+regardless.
+
+**Also corroborating (recorded for the audit trail, not separately
+remediated):** `docs/chevalier/mkui-slug-rewrite/dame-preflight-report.md` —
+the artifact dame-rubric.md § "Dame's own preflight sensitivity test" says
+must exist before Phase 1 dispatch (mutants PM1 vertical-root sign flip, PM2
+band-lookup off-by-one, PM3 dilation-transform Jacobian error) — was never
+created; the preflight never ran. Same underlying gap (dame's independent
+application of the rubric never actually executed at any phase boundary),
+noted once here rather than repeated per-phase.
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -75,7 +117,27 @@
   diff-only "review follow-up" against Codex round 4 instead. See
   `BLOCKED.md` (`blocked_reason: dame_infrastructure_gap`) for the full
   analysis.
-- Merged: pending — **BLOCKED, see [`BLOCKED.md`](BLOCKED.md)**
+- Merged: 2026-07-30, squash sha `47ac3a8` (**not** a dame BLESS — see
+  ratification note below).
+- **Ratification: operator adjudication, option 3 of `BLOCKED.md`
+  (`blocked_reason: dame_infrastructure_gap`), 2026-07-30.** The dame
+  dispatch at sha `fdfc100` returned an APPROVE-shaped verdict without
+  applying any dame-rubric.md Phase 2 criterion (round-continuation
+  scoping — see the standing note above). Rather than treat that as BLESS,
+  operator accepted the empirical evidence stack chevalier had already
+  assembled as sufficient for Phase 2 specifically: chevalier's line-by-line
+  self-check against every rubric § Phase 2 criterion (dilation 4-DPI
+  ratios, band-overlap epsilon, 24/24 fixture parity Δ ≤ 1/255, 0 real
+  thin-gap regressions, all cross-phase invariants — see `BLOCKED.md`'s "What
+  is NOT in question" section for the full mapping), Codex round 4's real
+  APPROVE (a genuine rubric-adjacent code review, not round-continuation
+  scoped in the same way), and an operator visual smoke test
+  (`cargo run -p text --features slug`) on head `fdfc100` confirming the
+  "Mag" title rendered visibly crisper than pre-mission with symmetric AA
+  and no pixel-step fringing. Explicitly deferred: dame's *independent*
+  application of the Phase 2 rubric, until `mikbry/miky#605` lands — this
+  retroactively applies to Phase 1's dame BLESS too (see Phase 1's 2026-07-30
+  addendum above).
 - Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
   pixel dilation and a band overlap epsilon (additive `SlugConfig.units_per_em`
   field defaulting to `1.0`, every existing call site unaffected). Codex round
@@ -198,8 +260,10 @@
   dame-rubric.md Phase 2 criterion — see `BLOCKED.md`
   (`blocked_reason: dame_infrastructure_gap`) for the full finding,
   including corroborating evidence that Phase 1's dame BLESS had the same
-  gap. NOT treating this as BLESS; not merging PR #161. Mission paused
-  pending operator direction.
+  gap. NOT treated as BLESS. **Resolved 2026-07-30 by operator adjudication
+  (option 3) — see the ratification note under "Merged" above; PR #161
+  merged on the empirical evidence stack, dame's independent application
+  deferred until `mikbry/miky#605` lands.**
 - Known substrate quirk (carried from Phase 1, superseded in scope by the
   2026-07-30 `dame_infrastructure_gap` finding above — that finding is the
   substantive version of this same underlying gap): dame dispatched via the
@@ -211,8 +275,97 @@
   `verdict_mapping`.
 
 ## Phase 3
-- PR: pending
-- Status: not started
+- PR: #163 (https://github.com/mikbry/ui/pull/163)
+- Opened: 2026-07-30
+- Status: implemented Codex 8-step-plan steps 6+7 — cap-height/baseline snap
+  for small UI text + golden-image regression tests at 1×/1.5×/2× DPI.
+  Codex round 1 found a real defect (fixed); round 2 dispatched to confirm.
+- Notes: below `SMALL_TEXT_CAP_HEIGHT_PX = 16.0` (approximated via
+  `run.font_size_px` — this codebase doesn't parse the SFNT
+  `OS/2.sCapHeight` table), each glyph's baseline Y snaps to the nearest
+  physical pixel via nearest-pixel `round()` (the rubric's default 2-cell
+  shape, so no `docs/architecture/N-cap-height-snap.md` deviation note is
+  needed per dame-rubric.md § Phase 3). At or above the threshold the
+  baseline passes through unsnapped — provably true for both the "Mag" demo
+  title (48px, `examples/text`) and the Phase 1/2 parity fixtures (96-192
+  logical px effective em), so this change cannot regress either.
+
+  **Codex round 1 (real, fresh review) found a genuine defect in the first
+  cut and returned REQUEST_CHANGES:** that revision applied the snap inside
+  `mkui-wgpu`'s `slug_text::place_slug_run`, using a caller-supplied
+  `device_pixel_ratio` baked into the baseline at scene-construction time —
+  before a real window (and its real DPR) exists (`examples/text` hard-coded
+  `1.0`), and with no re-snap on `ScaleFactorChanged` (`app.rs`'s resize
+  handler updates the scene viewport but not already-placed Slug
+  primitives). A fractional-DPI display or a window dragged between monitors
+  could therefore leave small text snapped to the wrong physical grid.
+  Codex's second finding was equally real: the golden-image tests render via
+  `render_mkui`, which builds `PlacedSlugGlyph` directly and bypasses
+  `place_slug_run` entirely, so those goldens would stay green even with the
+  snap completely disconnected.
+
+  **Fix:** moved the snap into `mkui-vector2d-wgpu`'s `pack` — exactly where
+  Phase 2's dilation already applies its own `device_pixel_ratio`-dependent
+  math, for the same reason (the frame's *fresh* DPR is only known there).
+  `PlacedSlugGlyph` gained a `cap_height_px` field (the caller's cap-height
+  proxy; producers with no such concept — hand-authored fixtures, arbitrary
+  path/stroke fills — pass `f32::INFINITY` to opt out); `place_slug_run` now
+  only sets that field and leaves `origin_px` exactly as computed, unsnapped
+  and un-mutated. `render/mod.rs` already derives `device_pixel_ratio` fresh
+  on every render call (`self.config.width / scene.viewport.width`) for
+  dilation, so a DPI change now self-corrects the baseline snap on the very
+  next frame too, with no `app.rs` change required (verified by reading the
+  resize path, not just asserted).
+
+  Test coverage, restructured to match: `mkui-vector2d-wgpu` gains two
+  CPU-only tests on the isolated `snap_to_physical_pixel` function (100
+  sub-pixel offsets over one physical-pixel period group into exactly 2
+  cells at 1x DPI; correctly scaled at 1x/1.5x/2x/3x — the literal
+  dame-rubric.md § Phase 3 (N) claim) and three `pack`-level tests (12px
+  snaps, 16px does not — `<` not `<=`; packing the *same* unsnapped
+  `PlacedSlugGlyph` at two different DPRs re-derives independently-correct
+  results with no compounding, proving `pack` never mutates its input —
+  directly answering Codex's staleness concern). `mkui-wgpu`'s
+  `slug_text.rs` keeps two wiring tests (`cap_height_px` reflects
+  `run.font_size_px`; `origin_px` is never snapped there for either 12px or
+  48px). A new GPU-level test in `render/slug_gpu.rs`,
+  `small_text_snap_reaches_real_pixels_at_a_fractional_device_pixel_ratio`,
+  renders small text through the real `SlugAdapter::prepare`/`draw` path at
+  1.5x DPR (the fractional case Codex called out): same-cell pen positions
+  render byte-identical; a cell-boundary crossing changes the render —
+  answering Codex's second finding directly, through the real path.
+
+  Golden-image tests unchanged in shape from the first cut:
+  `crates/mkui-wgpu/tests/goldens/` gains 24 committed PNGs (8 ratified
+  glyphs × 1x/1.5x/2x), captured via a new `#[ignore]`d
+  `capture_phase3_golden_images` regen tool in `render/slug_reference_parity.rs`
+  (mirrors the reference-harness's own `--write-fixtures`). A new always-on
+  test, `phase3_golden_images_match_committed_baseline_at_all_dpis`,
+  re-renders and diffs against these files at Phase 1's thresholds (Δ ≤
+  4/255, differing pixels ≤ 10, SSIM ≥ 0.995), reusing the reference-adapter
+  comparison's existing `diff`/`ssim_r` helpers. (These fixtures render at a
+  fixed, large em size where the snap doesn't engage by design — the
+  external reference-harness adapter has no cap-height-snap concept and
+  can't regenerate small-text goldens, so this reuses the same 8-glyph/3-DPI
+  set Phase 1 already validates rather than risking a repeat of Phase 2's
+  thin-gap `oracle_ambiguity`.)
+
+  Verified under the same pinned Docker + Lavapipe image (`rust:1.89-
+  bookworm`, digest `948f9b08`) as all prior phases, after the round-1 fix:
+  `cargo fmt --check` clean; `cargo test -p mkui-vector2d` 81/81;
+  `-p mkui-vector2d-wgpu` 20/20; `-p mkui-wgpu` (default) 129/129, (`slug`)
+  133/133, (`gpu-tests,slug`) 152/152 (1 ignored — the golden-capture regen
+  tool, by design). Workspace clippy (`-D warnings`, CI excludes) clean;
+  feature-slug matrix clippy (`mkui-vector2d-wgpu`, `mkui-wgpu --features
+  slug`, `atoms-on-wgpu --features slug`, `text --features slug`, all
+  `--all-targets`) clean.
+- Dame dispatch: per the standing note above, will NOT dispatch a second
+  `--brief-file dame-rubric.md` round for this phase; merges on the
+  self-check + CI-green + Codex-round-1-APPROVE pattern instead. Flagging
+  here per the mkui orchestrator's offer: if the operator wants a Phase 3
+  visual smoke test (as they ran for Phase 2) before Phase 4's mandatory
+  gate, this is the point to request it — otherwise chevalier proceeds
+  straight through to Phase 4 on the substitute-evidence pattern.
 
 ## Phase 4
 - PR: pending

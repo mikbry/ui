@@ -1074,6 +1074,7 @@ mod tests {
             origin_px: [0.0, 0.0],
             scale_px_per_unit: 1.0,
             color,
+            cap_height_px: f32::INFINITY,
         };
         let g0 = make([1.0, 0.0, 0.0, 1.0]);
         let g1 = make([0.0, 1.0, 0.0, 1.0]);

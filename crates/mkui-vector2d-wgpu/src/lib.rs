@@ -100,6 +100,26 @@ fn half_pixel_dilation_units(scale_px_per_unit: f32, device_pixel_ratio: f32) ->
     0.5 / (device_pixel_ratio.max(f32::EPSILON) * scale_px_per_unit.max(f32::EPSILON))
 }
 
+/// #157 Phase 3 (Codex 8-step-plan step 6): below this cap-height, small UI
+/// text gets its baseline snapped to the physical pixel grid. Lives here
+/// (alongside [`half_pixel_dilation_units`]) rather than in the text-layout
+/// caller because, like dilation, the snap needs the frame's *fresh*
+/// `device_pixel_ratio` — Codex round 1 of this phase's PR review correctly
+/// rejected an earlier revision that baked a caller-supplied DPR into the
+/// baseline at scene-construction time (`place_slug_run`), before the real
+/// per-frame DPR is known and without re-snapping on `ScaleFactorChanged`.
+/// Doing it in [`pack`] instead means every frame re-derives the snap from
+/// [`PlacedSlugGlyph::origin_px`] (kept unsnapped by the caller) and the
+/// frame's own `device_pixel_ratio`, so a DPI change self-corrects with no
+/// separate invalidation path.
+const SMALL_TEXT_CAP_HEIGHT_PX: f32 = 16.0;
+
+/// Round `value_px` to the nearest physical pixel at `device_pixel_ratio`,
+/// then convert back to logical pixels.
+fn snap_to_physical_pixel(value_px: f32, device_pixel_ratio: f32) -> f32 {
+    (value_px * device_pixel_ratio).round() / device_pixel_ratio.max(f32::EPSILON)
+}
+
 /// A Slug glyph blob placed on screen.
 ///
 /// The placement is the minimal affine the GPU lane needs: a pen `origin_px`
@@ -111,12 +131,21 @@ fn half_pixel_dilation_units(scale_px_per_unit: f32, device_pixel_ratio: f32) ->
 pub struct PlacedSlugGlyph {
     /// The size-independent outline blob from `mkui-vector2d`.
     pub blob: Arc<SlugGlyph>,
-    /// Screen-pixel position (y-down) of the glyph's font-unit origin.
+    /// Screen-pixel position (y-down) of the glyph's font-unit origin. Always
+    /// the caller's *unsnapped* pen position — see `cap_height_px` below.
     pub origin_px: [f32; 2],
     /// Pixels per font unit (placement scale).
     pub scale_px_per_unit: f32,
     /// Straight-alpha RGBA fill colour in `[0, 1]`.
     pub color: [f32; 4],
+    /// #157 Phase 3: the text-layout caller's cap-height proxy for this
+    /// glyph (its run's nominal font size), used by [`pack`] to gate the
+    /// below-`SMALL_TEXT_CAP_HEIGHT_PX` baseline snap. Producers with no
+    /// natural cap-height concept (hand-authored fixtures, arbitrary
+    /// [`PlacedVectorPath`]/[`PlacedStroke`] fills) pass `f32::INFINITY` to
+    /// opt out unambiguously — never default to a small value, which would
+    /// silently enable snapping and desync a fixture's expected geometry.
+    pub cap_height_px: f32,
 }
 
 /// An arbitrary [`VectorPath`] fill placed on screen.
@@ -179,6 +208,9 @@ fn encode_fill(placed: &PlacedVectorPath) -> Option<PlacedSlugGlyph> {
         origin_px: placed.origin_px,
         scale_px_per_unit: placed.scale_px_per_unit,
         color: placed.color,
+        // Arbitrary path fills have no cap-height concept; opt out of the
+        // Phase 3 small-text baseline snap.
+        cap_height_px: f32::INFINITY,
     })
 }
 
@@ -192,6 +224,8 @@ fn encode_stroke(placed: &PlacedStroke) -> Option<PlacedSlugGlyph> {
         origin_px: placed.origin_px,
         scale_px_per_unit: placed.scale_px_per_unit,
         color: placed.color,
+        // Stroked outlines have no cap-height concept either; opt out.
+        cap_height_px: f32::INFINITY,
     })
 }
 
@@ -323,6 +357,16 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph], device_pixel_ratio: f32) -> Packe
         // screen is y-down, so the glyph's y_max maps to the smaller (top)
         // screen y.
         let [ox, oy] = placed.origin_px;
+        // #157 Phase 3: below the small-text cap-height threshold, snap the
+        // baseline to the frame's *current* physical pixel grid — computed
+        // fresh here (not cached from scene-construction time) so a DPI
+        // change is reflected on the very next frame with no separate
+        // invalidation path. `placed.origin_px` itself is never mutated.
+        let oy = if placed.cap_height_px < SMALL_TEXT_CAP_HEIGHT_PX {
+            snap_to_physical_pixel(oy, device_pixel_ratio)
+        } else {
+            oy
+        };
         let dilation = half_pixel_dilation_units(scale, device_pixel_ratio);
         let left = ox + (blob.bounds.x_min - dilation) * scale;
         let right = ox + (blob.bounds.x_max + dilation) * scale;
@@ -646,6 +690,9 @@ mod tests {
             origin_px: [10.0, 200.0],
             scale_px_per_unit: 0.5,
             color: [1.0, 1.0, 1.0, 1.0],
+            // Opts out of the Phase 3 small-text snap — these pre-Phase-3
+            // tests assert exact, unsnapped geometry.
+            cap_height_px: f32::INFINITY,
         }
     }
 
@@ -761,6 +808,151 @@ mod tests {
                  ~0.5px, got {physical_dilation_px} (logical {logical_dilation_px})"
             );
         }
+    }
+
+    // ---- Phase 3: small-text baseline snap (#157 step 6) -------------------
+
+    // dame-rubric.md § Phase 3 (N): the snap function itself, tested in
+    // isolation with exact control over the sub-pixel sweep — this is the
+    // literal claim ("100 sub-pixel offsets across one physical-pixel period
+    // group into exactly 2 piecewise-constant cells, split at the period's
+    // midpoint").
+    #[test]
+    fn snap_to_physical_pixel_is_piecewise_constant_over_one_period() {
+        let base = 10.0f32;
+        let mut values = Vec::with_capacity(100);
+        for i in 0..100 {
+            let t = i as f32 / 100.0;
+            values.push(snap_to_physical_pixel(base + t, 1.0));
+        }
+        let mut distinct = values.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct,
+            vec![10.0, 11.0],
+            "expected exactly 2 cells (nearest-pixel snap), got {distinct:?}"
+        );
+        for (i, &v) in values.iter().enumerate() {
+            let t = i as f32 / 100.0;
+            let expected = if t < 0.5 { 10.0 } else { 11.0 };
+            assert_eq!(
+                v, expected,
+                "offset {t} landed in the wrong cell (value {v})"
+            );
+        }
+    }
+
+    #[test]
+    fn snap_to_physical_pixel_scales_grid_with_device_pixel_ratio() {
+        for dpr in [1.0f32, 1.5, 2.0, 3.0] {
+            let base = 10.0f32;
+            let mut values = Vec::with_capacity(100);
+            for i in 0..100 {
+                // Sweep one physical-pixel period, expressed in logical px.
+                let t = (i as f32 / 100.0) / dpr;
+                values.push(snap_to_physical_pixel(base + t, dpr));
+            }
+            let mut distinct = values.clone();
+            distinct.dedup();
+            assert_eq!(
+                distinct.len(),
+                2,
+                "device_pixel_ratio {dpr}: expected 2 cells, got {distinct:?}"
+            );
+            let delta = distinct[1] - distinct[0];
+            assert!(
+                (delta - 1.0 / dpr).abs() < 1e-4,
+                "device_pixel_ratio {dpr}: cell delta {delta} should be one physical \
+                 pixel (1/{dpr} logical px)"
+            );
+        }
+    }
+
+    fn placed_with_cap_height(
+        blob: Arc<SlugGlyph>,
+        origin_px: [f32; 2],
+        cap_height_px: f32,
+    ) -> PlacedSlugGlyph {
+        PlacedSlugGlyph {
+            blob,
+            origin_px,
+            scale_px_per_unit: 0.5,
+            color: [1.0, 1.0, 1.0, 1.0],
+            cap_height_px,
+        }
+    }
+
+    #[test]
+    fn pack_snaps_small_text_baseline_and_leaves_origin_px_untouched() {
+        let blob = triangle_blob();
+        // font_size_px 12 < SMALL_TEXT_CAP_HEIGHT_PX (16) — must snap.
+        let p = placed_with_cap_height(blob, [10.0, 200.3], 12.0);
+        let packed = pack(std::slice::from_ref(&p), 1.0);
+        // quad_max.y is origin.y - bounds.y_min*scale + dilation; back out the
+        // effective baseline by comparing against the unsnapped-baseline
+        // dilation math at the *snapped* value (200.3 -> 200.0 at 1x DPR).
+        let scale = p.scale_px_per_unit;
+        let dilation_px = half_pixel_dilation_units(scale, 1.0) * scale;
+        let g = packed.glyphs[0];
+        assert_eq!(
+            g.quad_max[1],
+            200.0 - 0.0 * scale + dilation_px,
+            "baseline 200.3 must snap to 200.0 at 1x DPR for small text"
+        );
+        // `pack` takes `&[PlacedSlugGlyph]` by reference — the caller's own
+        // struct must stay unsnapped so re-packing at a different DPR next
+        // frame re-derives the snap fresh rather than compounding.
+        assert_eq!(
+            p.origin_px[1], 200.3,
+            "pack() must not mutate the caller's PlacedSlugGlyph"
+        );
+    }
+
+    #[test]
+    fn pack_does_not_snap_text_at_or_above_cap_height_threshold() {
+        let blob = triangle_blob();
+        // font_size_px 16 == SMALL_TEXT_CAP_HEIGHT_PX — must NOT snap (`<`, not `<=`).
+        let p = placed_with_cap_height(blob, [10.0, 200.3], 16.0);
+        let packed = pack(std::slice::from_ref(&p), 1.0);
+        let scale = p.scale_px_per_unit;
+        let dilation_px = half_pixel_dilation_units(scale, 1.0) * scale;
+        let g = packed.glyphs[0];
+        assert_eq!(
+            g.quad_max[1],
+            200.3 - 0.0 * scale + dilation_px,
+            "16px text (== threshold) must pass through unsnapped"
+        );
+    }
+
+    #[test]
+    fn pack_re_derives_the_snap_fresh_at_a_new_device_pixel_ratio_each_call() {
+        // Codex round 1 of the Phase 3 PR review: an earlier revision baked
+        // the snap into the baseline at scene-construction time using a
+        // caller-supplied DPR that could go stale (e.g. a window moved to a
+        // different-DPI monitor). Packing the *same* unsnapped
+        // `PlacedSlugGlyph` at two different device_pixel_ratios must
+        // produce two independently-correct snaps, not a compounded one.
+        let blob = triangle_blob();
+        let p = placed_with_cap_height(blob, [10.0, 200.3], 12.0);
+        let scale = p.scale_px_per_unit;
+
+        let packed_1x = pack(std::slice::from_ref(&p), 1.0);
+        let dilation_1x = half_pixel_dilation_units(scale, 1.0) * scale;
+        assert_eq!(
+            packed_1x.glyphs[0].quad_max[1],
+            200.0 - 0.0 * scale + dilation_1x,
+            "1x DPR: 200.3 snaps to 200.0"
+        );
+
+        let packed_2x = pack(std::slice::from_ref(&p), 2.0);
+        let dilation_2x = half_pixel_dilation_units(scale, 2.0) * scale;
+        // 200.3 at 2x physical grid: 200.3*2=400.6 -> round 401 -> /2 = 200.5.
+        assert_eq!(
+            packed_2x.glyphs[0].quad_max[1],
+            200.5 - 0.0 * scale + dilation_2x,
+            "2x DPR: 200.3 snaps to 200.5 (independently, from the same \
+             unsnapped input — no compounding from the 1x call above)"
+        );
     }
 
     #[test]
