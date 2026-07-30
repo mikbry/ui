@@ -70,30 +70,51 @@ breaking changes can land on minor bumps).
 - **Slug rendering completion, Phase 3 — cap-height/baseline snap for small
   UI text + golden-image regression tests (mkui-slug-rewrite mission,
   `mikbry/ui#157` steps 6-7).**
-  - **Baseline snap.** `crates/mkui-wgpu`'s `slug_text::place_slug_run` now
-    rounds each glyph's baseline Y to the nearest physical pixel
-    (`snap_to_physical_pixel`) when `run.font_size_px` is below a
-    `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold — this codebase doesn't parse
-    the SFNT `OS/2.sCapHeight` table, so `font_size_px` is the documented
-    proxy metric for cap height. `place_slug_run` gained a
-    `device_pixel_ratio` parameter (all three call sites — the two
-    `sfnt_slug_gpu` GPU tests and the `text` example — pass `1.0`, their
-    known DPI). Text at or above the threshold is left unsnapped: the "Mag"
-    demo title (48px) and the Phase 1/2 parity fixtures (96-192 logical px
-    effective em) are both provably unaffected (see the new
-    `text_at_or_above_threshold_is_never_snapped` test).
-  - **Piecewise-constancy self-check.** Five new CPU-only unit tests in
-    `slug_text.rs` prove: the snap function groups 100 sub-pixel offsets
-    across one physical-pixel period into exactly 2 cells split at the
-    midpoint (`snap_to_physical_pixel_is_piecewise_constant_over_one_period`);
-    the grid scales correctly at device-pixel ratios 1x/1.5x/2x/3x
-    (`snap_to_physical_pixel_scales_grid_with_device_pixel_ratio`); a real
-    font-backed run (Abel, 12px) actually gets quantized through
-    `place_slug_run` end to end, not just in the isolated math
-    (`small_text_baseline_snap_moves_in_quantized_physical_pixel_steps`); text
-    at/above threshold passes through unsnapped
-    (`text_at_or_above_threshold_is_never_snapped`,
-    `threshold_boundary_is_exclusive_at_16px`).
+  - **Baseline snap, applied at per-frame pack time.** `crates/mkui-vector2d-wgpu`'s
+    `pack` now rounds a glyph's baseline Y to the nearest physical pixel
+    (`snap_to_physical_pixel`) when `PlacedSlugGlyph::cap_height_px` is below
+    a `SMALL_TEXT_CAP_HEIGHT_PX` (16px) threshold, using the frame's *fresh*
+    `device_pixel_ratio` — the same parameter Phase 2's dilation already
+    reads there. `PlacedSlugGlyph` gained the `cap_height_px` field (the
+    text-layout caller's font-size proxy for cap height, since this codebase
+    doesn't parse the SFNT `OS/2.sCapHeight` table; producers with no
+    cap-height concept — hand-authored fixtures, arbitrary path/stroke fills
+    — pass `f32::INFINITY` to opt out unambiguously). `origin_px` itself is
+    never mutated or snapped by the caller: `mkui-wgpu`'s
+    `slug_text::place_slug_run` sets `cap_height_px` from `run.font_size_px`
+    and leaves the baseline exactly as computed.
+    - **Design history (Codex round 1 finding, real and fixed in round 2):**
+      an earlier revision applied the snap *inside* `place_slug_run` itself,
+      using a caller-supplied `device_pixel_ratio` baked in at
+      scene-construction time — before a real window (and its real DPR)
+      exists, and with no re-snap on `ScaleFactorChanged`. Codex correctly
+      flagged that a fractional-DPI display or a window moved between
+      monitors could leave small text snapped to the wrong physical grid,
+      and that the golden tests (which bypass `place_slug_run` entirely)
+      couldn't have caught a disconnected snap. Moving the snap into `pack`
+      — mirroring exactly where Phase 2's dilation already lives — means
+      every render call re-derives it from the frame's actual
+      `device_pixel_ratio` (`crates/mkui-wgpu`'s `render/mod.rs` computes it
+      from `self.config.width / scene.viewport.width` on every frame), so a
+      DPI change self-corrects on the very next frame with no separate
+      invalidation path and no `app.rs` change needed.
+  - **Piecewise-constancy self-check.** `mkui-vector2d-wgpu` gains: two
+    CPU-only tests on the isolated `snap_to_physical_pixel` function proving
+    100 sub-pixel offsets across one physical-pixel period group into
+    exactly 2 cells split at the midpoint, correctly scaled at device-pixel
+    ratios 1x/1.5x/2x/3x; three `pack`-level tests proving the gate applies
+    correctly (12px snaps, 16px does not — `<`, not `<=`) and that packing
+    the *same* unsnapped `PlacedSlugGlyph` at two different DPRs produces two
+    independently-correct results with no compounding (proving `pack` never
+    mutates its input). `mkui-wgpu`'s `slug_text.rs` keeps two focused wiring
+    tests (`cap_height_px` reflects `run.font_size_px`; `origin_px` is never
+    snapped there regardless of font size). A new GPU-level test in
+    `render/slug_gpu.rs`,
+    `small_text_snap_reaches_real_pixels_at_a_fractional_device_pixel_ratio`,
+    renders small text through the real `SlugAdapter::prepare`/`draw` path at
+    a fractional DPR (1.5x, the case Codex called out): two pen positions in
+    the same physical-pixel cell render byte-identical; crossing the cell
+    boundary changes the render.
   - **Golden-image regression tests.** `crates/mkui-wgpu/tests/goldens/`
     gains 24 committed PNGs (the 8 ratified glyph fixtures × 1x/1.5x/2x DPI),
     captured from mkui's own renderer via a new `#[ignore]`d
@@ -105,9 +126,15 @@ breaking changes can land on minor bumps).
     artifact distinct from Phase 1's dynamic re-render-and-diff, addressing
     Codex's original step-7 complaint that prior tests only asserted "some
     pixels changed" and couldn't catch softness or asymmetric antialiasing.
+    (These fixtures render at a fixed, large em size — the small-text snap
+    doesn't engage for them, by design: the external reference-harness
+    adapter has no cap-height-snap concept and can't regenerate small-text
+    goldens, so this reuses the same 8-glyph/3-DPI set Phase 1 already
+    validates rather than attempting an oracle-ambiguous comparison.)
   - Verified under the same pinned Docker + Lavapipe image as prior phases:
     `mkui-vector2d`, `mkui-vector2d-wgpu`, `mkui-wgpu` (default, `slug`,
-    `gpu-tests,slug`) all pass; `cargo fmt --check` clean.
+    `gpu-tests,slug`) all pass; `cargo fmt --check` and workspace +
+    feature-slug-matrix clippy (`-D warnings`) clean.
 
 - **Slug rendering completion, Phase 1 — dual-ray coverage + `fwidth` AA
   (mkui-slug-rewrite mission, `mikbry/ui#157` steps 1-3).** `crates/mkui-vector2d-wgpu`'s

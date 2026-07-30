@@ -247,7 +247,6 @@ fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
             &mut cache,
             &runs[0],
             box_origin,
-            1.0,
             Color::rgb(0.0, 1.0, 0.0),
         );
         assert_eq!(
@@ -326,7 +325,6 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
         &mut cache,
         &runs[0],
         box_origin,
-        1.0,
         Color::rgb(0.0, 1.0, 0.0),
     );
     assert_eq!(slug_glyphs.len(), 1);

@@ -142,6 +142,11 @@ fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
         origin_px: [padding, canvas as f32 - padding],
         scale_px_per_unit: em_pixels,
         color: [1.0, 1.0, 1.0, 1.0],
+        // The reference-harness camera renders these fixtures at a fixed,
+        // large em size (BASE_EM_PIXELS = 96) — never small text — and the
+        // external adapter has no cap-height-snap concept at all; opt out so
+        // the Phase 1/2/3 parity comparisons stay byte-exact against it.
+        cap_height_px: f32::INFINITY,
     };
     let prepared = adapter.prepare(
         renderer.device(),

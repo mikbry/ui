@@ -84,7 +84,6 @@ fn build_scene() -> mkui_wgpu::Scene {
             &mut cache,
             run,
             [48.0, 140.0],
-            1.0,
             Color::rgb(0.2, 0.9, 0.5),
         ) {
             scene.slug_glyph(glyph);

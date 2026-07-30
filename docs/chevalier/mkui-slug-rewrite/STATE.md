@@ -279,64 +279,86 @@ noted once here rather than repeated per-phase.
 - Opened: 2026-07-30
 - Status: implemented Codex 8-step-plan steps 6+7 — cap-height/baseline snap
   for small UI text + golden-image regression tests at 1×/1.5×/2× DPI.
-  Dispatching Codex round 1 next.
-- Notes: `crates/mkui-wgpu/src/slug_text.rs`'s `place_slug_run` gained a
-  `device_pixel_ratio` parameter and a `SMALL_TEXT_CAP_HEIGHT_PX = 16.0`
-  gate: below that threshold (approximated via `run.font_size_px` — this
-  codebase doesn't parse the SFNT `OS/2.sCapHeight` table), each glyph's
-  baseline Y snaps to the nearest physical pixel via nearest-pixel `round()`
-  (the rubric's default 2-cell shape, so no `docs/architecture/
-  N-cap-height-snap.md` deviation note is needed per dame-rubric.md § Phase
-  3). At or above the threshold, `device_pixel_ratio` is unused and the
+  Codex round 1 found a real defect (fixed); round 2 dispatched to confirm.
+- Notes: below `SMALL_TEXT_CAP_HEIGHT_PX = 16.0` (approximated via
+  `run.font_size_px` — this codebase doesn't parse the SFNT
+  `OS/2.sCapHeight` table), each glyph's baseline Y snaps to the nearest
+  physical pixel via nearest-pixel `round()` (the rubric's default 2-cell
+  shape, so no `docs/architecture/N-cap-height-snap.md` deviation note is
+  needed per dame-rubric.md § Phase 3). At or above the threshold the
   baseline passes through unsnapped — provably true for both the "Mag" demo
   title (48px, `examples/text`) and the Phase 1/2 parity fixtures (96-192
   logical px effective em), so this change cannot regress either.
-  All three `place_slug_run` call sites (two `sfnt_slug_gpu` GPU tests, the
-  `text` example) pass `device_pixel_ratio = 1.0`, their known DPI.
 
-  Five new CPU-only unit tests in `slug_text.rs` (no GPU/Lavapipe required)
-  prove the rubric's piecewise-constancy claim end to end:
-  `snap_to_physical_pixel_is_piecewise_constant_over_one_period` (100
-  sub-pixel offsets across one physical-pixel period at 1x DPI group into
-  exactly 2 cells split at the midpoint — the literal dame-rubric.md § Phase
-  3 (N) claim, on the isolated snap function for exact control over the
-  sweep), `snap_to_physical_pixel_scales_grid_with_device_pixel_ratio` (same
-  at 1x/1.5x/2x/3x), `small_text_baseline_snap_moves_in_quantized_
-  physical_pixel_steps` (integration proof via a real Abel-backed 12px run
-  through `place_slug_run` itself — quantized steps of exactly one physical
-  pixel, not just correct math in isolation),
-  `text_at_or_above_threshold_is_never_snapped` (48px passes every sub-pixel
-  offset through continuously — protects the demo + parity fixtures),
-  `threshold_boundary_is_exclusive_at_16px` (`<`, not `<=`).
+  **Codex round 1 (real, fresh review) found a genuine defect in the first
+  cut and returned REQUEST_CHANGES:** that revision applied the snap inside
+  `mkui-wgpu`'s `slug_text::place_slug_run`, using a caller-supplied
+  `device_pixel_ratio` baked into the baseline at scene-construction time —
+  before a real window (and its real DPR) exists (`examples/text` hard-coded
+  `1.0`), and with no re-snap on `ScaleFactorChanged` (`app.rs`'s resize
+  handler updates the scene viewport but not already-placed Slug
+  primitives). A fractional-DPI display or a window dragged between monitors
+  could therefore leave small text snapped to the wrong physical grid.
+  Codex's second finding was equally real: the golden-image tests render via
+  `render_mkui`, which builds `PlacedSlugGlyph` directly and bypasses
+  `place_slug_run` entirely, so those goldens would stay green even with the
+  snap completely disconnected.
 
-  Golden-image tests: `crates/mkui-wgpu/tests/goldens/` gains 24 committed
-  PNGs (8 ratified glyphs × 1x/1.5x/2x), captured from mkui's own renderer
-  via a new `#[ignore]`d `capture_phase3_golden_images` regen tool (mirrors
-  the reference-harness's own `--write-fixtures` pattern) in
-  `render/slug_reference_parity.rs`. A new always-on test,
-  `phase3_golden_images_match_committed_baseline_at_all_dpis`, re-renders
-  and diffs against these files at Phase 1's thresholds (Δ ≤ 4/255,
-  differing pixels ≤ 10, SSIM ≥ 0.995) — reusing the reference-adapter
-  comparison's existing helpers (`diff`, `ssim_r`) rather than duplicating
-  them. This is a distinct deliverable from Phase 1's dynamic
-  compare-against-reference-harness test: a real, reviewable PNG artifact
-  addressing Codex's original step-7 complaint that prior tests only
-  asserted "some pixels changed" and couldn't catch softness or asymmetric
-  antialiasing. (The external reference-harness adapter itself cannot
-  regenerate these — its camera is hardcoded at `BASE_EM_PIXELS = 96` with
-  no cap-height-snap concept, so these goldens intentionally reuse the same
-  8 large ratified fixtures Phase 1 already validates, at the same 3 DPIs,
-  rather than attempting small-text goldens the oracle has no way to
-  produce — avoiding a repeat of Phase 2's thin-gap `oracle_ambiguity`.)
+  **Fix:** moved the snap into `mkui-vector2d-wgpu`'s `pack` — exactly where
+  Phase 2's dilation already applies its own `device_pixel_ratio`-dependent
+  math, for the same reason (the frame's *fresh* DPR is only known there).
+  `PlacedSlugGlyph` gained a `cap_height_px` field (the caller's cap-height
+  proxy; producers with no such concept — hand-authored fixtures, arbitrary
+  path/stroke fills — pass `f32::INFINITY` to opt out); `place_slug_run` now
+  only sets that field and leaves `origin_px` exactly as computed, unsnapped
+  and un-mutated. `render/mod.rs` already derives `device_pixel_ratio` fresh
+  on every render call (`self.config.width / scene.viewport.width`) for
+  dilation, so a DPI change now self-corrects the baseline snap on the very
+  next frame too, with no `app.rs` change required (verified by reading the
+  resize path, not just asserted).
+
+  Test coverage, restructured to match: `mkui-vector2d-wgpu` gains two
+  CPU-only tests on the isolated `snap_to_physical_pixel` function (100
+  sub-pixel offsets over one physical-pixel period group into exactly 2
+  cells at 1x DPI; correctly scaled at 1x/1.5x/2x/3x — the literal
+  dame-rubric.md § Phase 3 (N) claim) and three `pack`-level tests (12px
+  snaps, 16px does not — `<` not `<=`; packing the *same* unsnapped
+  `PlacedSlugGlyph` at two different DPRs re-derives independently-correct
+  results with no compounding, proving `pack` never mutates its input —
+  directly answering Codex's staleness concern). `mkui-wgpu`'s
+  `slug_text.rs` keeps two wiring tests (`cap_height_px` reflects
+  `run.font_size_px`; `origin_px` is never snapped there for either 12px or
+  48px). A new GPU-level test in `render/slug_gpu.rs`,
+  `small_text_snap_reaches_real_pixels_at_a_fractional_device_pixel_ratio`,
+  renders small text through the real `SlugAdapter::prepare`/`draw` path at
+  1.5x DPR (the fractional case Codex called out): same-cell pen positions
+  render byte-identical; a cell-boundary crossing changes the render —
+  answering Codex's second finding directly, through the real path.
+
+  Golden-image tests unchanged in shape from the first cut:
+  `crates/mkui-wgpu/tests/goldens/` gains 24 committed PNGs (8 ratified
+  glyphs × 1x/1.5x/2x), captured via a new `#[ignore]`d
+  `capture_phase3_golden_images` regen tool in `render/slug_reference_parity.rs`
+  (mirrors the reference-harness's own `--write-fixtures`). A new always-on
+  test, `phase3_golden_images_match_committed_baseline_at_all_dpis`,
+  re-renders and diffs against these files at Phase 1's thresholds (Δ ≤
+  4/255, differing pixels ≤ 10, SSIM ≥ 0.995), reusing the reference-adapter
+  comparison's existing `diff`/`ssim_r` helpers. (These fixtures render at a
+  fixed, large em size where the snap doesn't engage by design — the
+  external reference-harness adapter has no cap-height-snap concept and
+  can't regenerate small-text goldens, so this reuses the same 8-glyph/3-DPI
+  set Phase 1 already validates rather than risking a repeat of Phase 2's
+  thin-gap `oracle_ambiguity`.)
 
   Verified under the same pinned Docker + Lavapipe image (`rust:1.89-
-  bookworm`, digest `948f9b08`) as all prior phases: `cargo fmt --check`
-  clean; `cargo test -p mkui-vector2d` 81/81; `-p mkui-vector2d-wgpu` 15/15;
-  `-p mkui-wgpu` (default) 129/129, (`slug`) 136/136, (`gpu-tests,slug`)
-  154/154 (1 ignored — the golden-capture regen tool, by design). Workspace
-  clippy (`-D warnings`, CI excludes) clean; feature-slug matrix clippy
-  (`mkui-vector2d-wgpu`, `mkui-wgpu --features slug`, `atoms-on-wgpu
-  --features slug`, `text --features slug`, all `--all-targets`) clean.
+  bookworm`, digest `948f9b08`) as all prior phases, after the round-1 fix:
+  `cargo fmt --check` clean; `cargo test -p mkui-vector2d` 81/81;
+  `-p mkui-vector2d-wgpu` 20/20; `-p mkui-wgpu` (default) 129/129, (`slug`)
+  133/133, (`gpu-tests,slug`) 152/152 (1 ignored — the golden-capture regen
+  tool, by design). Workspace clippy (`-D warnings`, CI excludes) clean;
+  feature-slug matrix clippy (`mkui-vector2d-wgpu`, `mkui-wgpu --features
+  slug`, `atoms-on-wgpu --features slug`, `text --features slug`, all
+  `--all-targets`) clean.
 - Dame dispatch: per the standing note above, will NOT dispatch a second
   `--brief-file dame-rubric.md` round for this phase; merges on the
   self-check + CI-green + Codex-round-1-APPROVE pattern instead. Flagging
