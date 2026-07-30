@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-28T06:30:00Z
+**Last updated:** 2026-07-30T09:15:00Z
 **Current phase:** 2
-**Phase status:** blocked — see [`BLOCKED.md`](BLOCKED.md) (`blocked_reason: oracle_ambiguity`, rubric § Phase 2 criterion (N) "No thin-gap regressions")
+**Phase status:** unblocked — operator ratified rubric amendment 1 (PR #162, merge sha `07926f0`, 2026-07-30). Rubric v1.2.1 adds a byte-identical-to-reference exception to § Phase 2 criterion (N) "No thin-gap regressions"; the ambiguity that produced [`BLOCKED.md`](https://github.com/mikbry/ui/blob/07926f041a29fd9adc4cf114890ecdd50960ae49/docs/chevalier/mkui-slug-rewrite/BLOCKED.md) is resolved and that file has been removed from this branch. Resuming the Codex review / dame dispatch loop.
 
 ## Phase 1
 - PR: #160 (https://github.com/mikbry/ui/pull/160)
@@ -51,8 +51,8 @@
   confirmed round-2 coverage-gap fix correct; blocking finding: thin-gap
   threshold raised from rubric's literal 128 to 250 illegitimately redefines
   a frozen criterion instead of satisfying it)
-- Dame verdicts: not yet dispatched (blocked before dispatch — see below)
-- Merged: pending — **BLOCKED, see [`BLOCKED.md`](BLOCKED.md)**
+- Dame verdicts: not yet dispatched
+- Merged: pending — unblocked, resuming Codex/dame loop (see below)
 - Notes: Implemented Codex 8-step-plan steps 4-5 — bounded 2D half-physical-
   pixel dilation and a band overlap epsilon (additive `SlugConfig.units_per_em`
   field defaulting to `1.0`, every existing call site unaffected). Codex round
@@ -131,6 +131,29 @@
   epsilon, 24/24 Phase 1 comparisons, encoder/cache tests) verified clean.
   Not dispatching dame or Codex round 4 until operator amends the rubric or
   unblocks.
+
+  **Amendment 1 resolution (2026-07-30):** operator ratified option B (PR
+  #162, merge sha `07926f0`) — rubric v1.2.1 excludes thin-gap texels that
+  are byte-identical to the ratified reference-harness golden at the same
+  coordinate from the "No thin-gap regressions" check; a hit only counts as
+  a regression if it also diverges from the reference (Δ > 0) at that
+  coordinate. Rebased `chevalier/mkui-slug-rewrite-phase2` onto latest main
+  so `07926f0` is reachable from the PR head (clean rebase, no conflicts).
+  Implemented the exception in
+  `slug_reference_parity.rs::phase2_no_thin_gap_regressions_on_curve_heavy_glyphs`
+  (new `texel_delta` helper computes per-coordinate Δ against the golden;
+  the thin-gap scan only fails on hits with Δ > 0) and un-ignored the test.
+  Re-verified under the same Docker + Mesa/Lavapipe stack as prior phases:
+  `mkui-vector2d` 81/81, `mkui-vector2d-wgpu` 15/15, `mkui-wgpu` default
+  129/129, `mkui-wgpu` `gpu-tests,slug` 148/148 (0 ignored — the previously
+  `#[ignore]`d test now passes directly, confirmed empirically at `g_2x`
+  texel (157,156): mkui and the reference are byte-identical there, so it is
+  correctly excluded and contributes zero regressions). `cargo fmt --check`
+  and workspace clippy (`-D warnings`, CI's `console-showcase`/
+  `web-showcase`/`native-showcase` excludes) both clean. `BLOCKED.md`
+  removed from the branch (block resolved). Resuming Codex review from
+  round 3's clean state (only the thin-gap finding was blocking) before
+  dame dispatch.
 - Known substrate quirk (carried from Phase 1): dame dispatched via the
   `--brief-file dame-rubric.md` fallback shape returns its verdict as prose
   containing an explicit `Verdict: **APPROVE**`/`REQUEST_CHANGES` line, but
