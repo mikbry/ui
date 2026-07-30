@@ -275,7 +275,7 @@ noted once here rather than repeated per-phase.
   `verdict_mapping`.
 
 ## Phase 3
-- PR: pending (opening now)
+- PR: #163 (https://github.com/mikbry/ui/pull/163)
 - Opened: 2026-07-30
 - Status: implemented Codex 8-step-plan steps 6+7 — cap-height/baseline snap
   for small UI text + golden-image regression tests at 1×/1.5×/2× DPI.
