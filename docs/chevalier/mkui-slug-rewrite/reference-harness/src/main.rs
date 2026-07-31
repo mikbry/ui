@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail, ensure};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-const BASE_EM_PIXELS: f32 = 96.0;
+const DEFAULT_CAP_HEIGHT_PIXELS: f32 = 96.0;
 const BASE_CANVAS_PIXELS: f32 = 128.0;
 const BASE_PADDING_PIXELS: f32 = 16.0;
 const BAND_COUNT: usize = 8;
@@ -23,6 +23,7 @@ const GLYPH_NAMES: [&str; 8] = ["H", "A", "V", "M", "g", "o", "plus", "pipe"];
 
 #[derive(Debug)]
 struct Args {
+    cap_height: f32,
     dpi: f32,
     glyph: String,
     output: PathBuf,
@@ -32,6 +33,7 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args> {
+    let mut cap_height = DEFAULT_CAP_HEIGHT_PIXELS;
     let mut dpi = None;
     let mut glyph = None;
     let mut output = None;
@@ -43,6 +45,13 @@ fn parse_args() -> Result<Args> {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--cap-height" => {
+                cap_height = args
+                    .next()
+                    .context("--cap-height needs a value")?
+                    .parse::<f32>()
+                    .context("--cap-height must be a positive number")?;
+            }
             "--dpi" => {
                 dpi = Some(
                     args.next()
@@ -82,7 +91,8 @@ fn parse_args() -> Result<Args> {
                 println!(
                     "mkui-slug-reference-harness\n\n\
                      Render:\n  \
-                     cargo run -- --dpi <1|1.5|2> --glyph <{}> --output <path.png> \
+                     cargo run -- [--cap-height <px>] --dpi <1|1.5|2> --glyph <{}> \
+                     --output <path.png> \
                      [--shader <path.wgsl>]\n\n\
                      Fixture maintenance:\n  \
                      cargo run -- --write-fixtures glyphs\n\n\
@@ -98,6 +108,7 @@ fn parse_args() -> Result<Args> {
 
     if let Some(dir) = write_fixtures {
         return Ok(Args {
+            cap_height,
             dpi: 1.0,
             glyph: "H".to_owned(),
             output: PathBuf::new(),
@@ -109,6 +120,7 @@ fn parse_args() -> Result<Args> {
 
     if let Some((known_good, mutant)) = compare_paths {
         return Ok(Args {
+            cap_height,
             dpi: 1.0,
             glyph: "H".to_owned(),
             output: PathBuf::new(),
@@ -118,6 +130,10 @@ fn parse_args() -> Result<Args> {
         });
     }
 
+    ensure!(
+        cap_height.is_finite() && cap_height > 0.0,
+        "--cap-height must be positive"
+    );
     let dpi = dpi.context("missing --dpi")?;
     ensure!(dpi.is_finite() && dpi > 0.0, "--dpi must be positive");
     let glyph = glyph.context("missing --glyph")?;
@@ -133,6 +149,7 @@ fn parse_args() -> Result<Args> {
     );
 
     Ok(Args {
+        cap_height,
         dpi,
         glyph,
         output,
@@ -710,11 +727,15 @@ fn render(args: &Args) -> Result<()> {
     let shader_source = fs::read_to_string(&args.shader)
         .with_context(|| format!("reading {}", args.shader.display()))?;
 
-    let width = (BASE_CANVAS_PIXELS * args.dpi).round() as u32;
+    let scale = args.cap_height / DEFAULT_CAP_HEIGHT_PIXELS;
+    let width = (BASE_CANVAS_PIXELS * scale * args.dpi).round() as u32;
     let height = width;
-    let em_pixels = BASE_EM_PIXELS * args.dpi;
-    let padding = BASE_PADDING_PIXELS * args.dpi;
-    ensure!(width > 0 && height > 0, "DPI produced an empty target");
+    let em_pixels = args.cap_height * args.dpi;
+    let padding = BASE_PADDING_PIXELS * scale * args.dpi;
+    ensure!(
+        width > 0 && height > 0,
+        "cap height and DPI produced an empty target"
+    );
 
     pollster::block_on(render_async(
         args,
@@ -1180,8 +1201,9 @@ async fn render_async(
         .context("writing PNG data")?;
     writer.finish().context("finishing PNG")?;
     println!(
-        "rendered glyph={} dpi={} size={}x{} shader={} output={}",
+        "rendered glyph={} cap_height={}px dpi={} size={}x{} shader={} output={}",
         args.glyph,
+        args.cap_height,
         args.dpi,
         width,
         height,

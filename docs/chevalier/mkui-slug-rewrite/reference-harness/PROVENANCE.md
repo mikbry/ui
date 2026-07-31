@@ -149,6 +149,84 @@ The preselected mutation changes only the first horizontal root contribution:
 The mutant was executed once after the full known-good capture and passed on
 that first execution. It was not adjusted or hand-tuned after observing output.
 
+## Extended size support (2026-07-31, `mikbry/ui#165` Part A)
+
+The harness now accepts the optional `--cap-height <px>` render argument. It
+defaults to `96`, so commands that omit it retain the original adapter
+behavior. The camera is scaled by `cap-height / 96`: the emission scale is
+`cap-height * dpi`, while the canvas and padding retain the original
+`128:16:96` relationship and are converted to device pixels by `dpi`. This is
+only a camera, viewport, and emission-scale parameterization; neither
+`src/reference.wgsl` nor the seeded-mutant WGSL was modified. Their SHA-256
+values remain `319cad1d9c76818a925c832029dc928fb2273b3cb8229076112b9ea74337283f`
+and `09c750f33078559f21119f788be111f9031ba486729ebcea543fd1efe47e5b4d`,
+respectively.
+
+All 72 size-qualified known-good captures below and the three extended mutant
+captures were produced in the same pinned ARM64 Docker/Lavapipe environment
+recorded above. Every render identified llvmpipe 15.0.6, Vulkan, CPU device
+type, and Mesa 22.3.6.
+
+### 12px known-good manifest
+
+| Glyph | 1x SHA-256 | 1.5x SHA-256 | 2x SHA-256 |
+| --- | --- | --- | --- |
+| A | `3bbb6fbaf5116ebb010ea317bcfaafa9ed0ae675ca82d4836403137ae0724b7d` | `84e49ca5c03606156199e465b9afa8b55e337319c4b3cce826873a96b1eedd44` | `28d4e2f1bfb0f656c19b03e52c7dbe67bdaf5fca2e72bc0c7065d80d0fad8dc6` |
+| H | `52ea1f02f18cd591dba375d0557718959eeb986c69406a291c04e5fa1a37d0dd` | `048ba1f46cfddd161c2aa6e339bccf5d386de3d838a457c5bdaec396b00dbf22` | `ad562a28733be4ef4a3836c76ca9059cdc0a015649bdce23b8e0a0fd351a7ebe` |
+| M | `2e734853d886b33ae50c0232dfcf9c02d14a33f049544d5d54a4afa752c5ddae` | `4ad10ec050cf73ac280240ac4a8d9eceeb749832a91b82a215a3c83a23a74a3b` | `1e060a5446f8607a8a5f344d74566b9d131765716a932c880dabb04a4dbf98fd` |
+| V | `f8eb3eb9e69e80d9f2cb56b0b3e9894479b5790f9f2063598946899574f5dfc0` | `b40d7cd28bab2ea94e6ab83e7c3512430a521980b5bd795cd015dd3928f78cce` | `7d6a28b8b7890c0f2e251b549538661fbb29f217528f38fbd4d3b178476f2e7d` |
+| g | `da7dee86e5f695849f23fa1e416d1bcee20313135ad21e99f8dde73d5faaccc4` | `17cb88fa84fc9757cde8bacf6be853700533586884a2ec6b3f2ef7c1b22682e3` | `6b575f6a2cd8ed0101f7a6fe2afced1c70827a59890be09053d316a5b78d9d2a` |
+| o | `373da472e18c6ff3bb66db1734c59bc5f6b64b5af60ed69481fd471e0f20237d` | `34937496021de58adcb07069c181709026504dfcfba173557213dce327bb5349` | `8ce017ff5e33c0141defe15e698733342837bd31d2d46c89c885b120138721c8` |
+| pipe | `e78b7a1ce8a206d638fee79ca62e7bc6b57c57f4067329d782adda9d5c98c413` | `1f4b627f5c995e020a088a57a8fa2c33581eddec7f749c76bdd0f71e56b43697` | `4c9fee0022b5dba19d5f100518de57d7a397b737b1adef42407e63821bb1670e` |
+| plus | `0c8581cfa48eb0f5bac1168d5c6513bb966ca949b33dd849a81f2ba14a6330b1` | `98ef76d770ec72d4ed26963c52b7797ab817452f5b1a05cc2e5ea1814e4d72f2` | `64bba22bb37119051976de0fa3aea654e913111577c4d5f0e1260444b24ea1e6` |
+
+### 16px known-good manifest
+
+| Glyph | 1x SHA-256 | 1.5x SHA-256 | 2x SHA-256 |
+| --- | --- | --- | --- |
+| A | `aa5f2e831d2c77e45c3bee56b525f31f837663503d82d51612dc6e9b9226cfcb` | `28d4e2f1bfb0f656c19b03e52c7dbe67bdaf5fca2e72bc0c7065d80d0fad8dc6` | `6cae31cb6b7e472b5dac02c9527dbfd23cafabd3fce71765584926a367a73ddd` |
+| H | `18ebe14798dee8796ef4c86db558431fe48b91e1e8cc92cb57f0c2359f3aba9f` | `ad562a28733be4ef4a3836c76ca9059cdc0a015649bdce23b8e0a0fd351a7ebe` | `4172488a2f3a139990fe98b751ada601934aff3be07c0f8979ee3bc712a822ec` |
+| M | `4e36689e4e42830ebaca8ad6b0609e58fc32be33229b29f776e6b28392003931` | `1e060a5446f8607a8a5f344d74566b9d131765716a932c880dabb04a4dbf98fd` | `a2407ef41d6ead229747d22c4d27235fadb08f3ec6989445538db4c573b0f711` |
+| V | `f5adef426c8a4173a1297a5c924b5e465f89f4d0931b504100707fe3f65493e0` | `7d6a28b8b7890c0f2e251b549538661fbb29f217528f38fbd4d3b178476f2e7d` | `71340a3121eb59016a734f4075a9095be8f274d42a80c5000ff1606a57927834` |
+| g | `246edc9595ff1b69134db1a717dd9aa772ee5e280a49a63a26a8e77d48e87d29` | `6b575f6a2cd8ed0101f7a6fe2afced1c70827a59890be09053d316a5b78d9d2a` | `ea28481ee6c776ef74bdd0187ade0d0b587a2818f5aa7556d45323737efb9d06` |
+| o | `ccf88efefad889f3f4870d46a5017906185f58ef0ba8d9efa72137afee323712` | `8ce017ff5e33c0141defe15e698733342837bd31d2d46c89c885b120138721c8` | `6946f5c1ddf7c81d0df01c2e012d8e96d7b1e6b3fe872530d741d2147827aa44` |
+| pipe | `7b0a659085b08bc04d313c1c116b32d7163c99f9eb6f115f2e99f6b9e80a8696` | `4c9fee0022b5dba19d5f100518de57d7a397b737b1adef42407e63821bb1670e` | `bb35f7db2eb384c2bd64050bae87dc7dfd84e74362f8e6c676620c30b49da024` |
+| plus | `19f2c3b46d3b72d01a58efe987366d531a37f47c486e27c15e074d466461e0e0` | `64bba22bb37119051976de0fa3aea654e913111577c4d5f0e1260444b24ea1e6` | `087b57a99b55fe9c08b71181bd048c7071769b6d4b4af57ac149b7f2107a4a4c` |
+
+### 48px known-good manifest
+
+| Glyph | 1x SHA-256 | 1.5x SHA-256 | 2x SHA-256 |
+| --- | --- | --- | --- |
+| A | `c9a9924402ec762f504e98db12c461ad0e2a8fba695ac79d4e3b2adeb8e3238e` | `472e24f6a003e0185c391b34351cfcfe45fa16ec63d31171b52dd7a3f0d6af9d` | `117a8e3a18d93f7413b9b9e87546471dc1b213eb2c53d0d2da235cb5c5dff90a` |
+| H | `c2de7703c4e6c371edceae010b8ce751cda50c20e967631bc795acfd42fe241f` | `2fa2a18f08076e744c457037822b33a0798505bebf545585386d59a66a446616` | `cf76a82cdad190fadf9c61218899f8687522aff21d5f8300e8b854034369e50c` |
+| M | `75a97342cad5a55b28dd3c2b3bedf346970e9207505dc6af6db16907ed11b788` | `e745eae648da25855d394aaef18a0564241d65de59aedd1450ccc118de1ca967` | `7cc1d4852b8d60516625b0d1e49bf2463a6150550670c9b8c862d4eece300834` |
+| V | `1011eb8c6ef62d8b09802922d5796cede98cccbfd411ef44b06b07f480c9d120` | `8b60766aa3aec9d365307a689ea4a7b3a4736032668f887f40c7283469a2e7b1` | `55b416b080ed0b802ee2cf577a78c46e618703e8efaf6198d672f69c33bc1eaf` |
+| g | `6d080b940c8239a4f32977f41e44fafc1cd7d7e65e20f1d4f6a393d2015364c3` | `3867dec6b1ec490b1a417364ba68225dd7d9705800233a8aa91d1390ee488b9c` | `549e041dedd7992d362329791e77a8d7a89ea500af4a000b33d9cb11aa2208d3` |
+| o | `858460553c9c8ed576a2aebfecdf5e62ac0e20fc246f1c219a81305ad418ce10` | `9979565b60aef4ed67420b55b5ae717c3cf985e804ebd01d28a247e75cdf7ecd` | `0aa1a1d3cad93521b1718eb9e68938f62b364fcfa3e6ba67967530609b136e62` |
+| pipe | `59d152e92e7b50ceed5be631583cabab201ebebe1997127b1324fea9472d8ae7` | `172f2f31a9c7bac416f77fd4aa09906d650e88e6ab421953d8f26d1204a029e4` | `9d40b2d8623178cd6193291ee2e24b6fa5a489848c28b822b4e45f1abdaf438d` |
+| plus | `936bcf685f509af872501793c332606b339b4d1bab3cb8e4f08590c0fa69eacb` | `acf4fe8579c31277ca027a596454f340a2b25befac0dee87508408aa59ee0fef` | `e9f2a43cb9480517c21b25a93336018fa7a2e3b18ddcd824bb9d915329b852f9` |
+
+### Extended sensitivity proof
+
+The same H-root sign-flip mutant was captured once at each new size after the
+known-good set, without changing or tuning the mutation. The comparator uses
+the original criterion: a pixel differs only when its maximum absolute RGBA
+channel delta is strictly greater than `8` on the 0-255 scale.
+
+| Cap height | Pixel-column difference | Maximum channel delta | Mutant SHA-256 |
+| ---: | --- | ---: | --- |
+| 12px | 10 differing pixels in 1/16 columns; `x=3` has 10/16 | 51 | `3071c992db947273c321a676a69f3ad35e972a59f77efe94c1ded3f03cab3d64` |
+| 16px | 36 differing pixels in 3/21 columns; `x=4` has 13/21 | 170 | `8b1d860b35ebb5ae652e99cd46fb1d8921dc64ac945ecaa7c125336baac7f788` |
+| 48px | 38 differing pixels in 1/64 columns; `x=12` has 38/64 | 204 | `4715861babbb3c4b271159f18ac1c8a1c8cd6cb6afb6f423fad35294c9406662` |
+
+### 96px backward-compatibility proof
+
+All 24 legacy commands were rerun with explicit `--cap-height 96` in the
+pinned capture environment. Each regenerated PNG passed byte-for-byte `cmp`
+against its committed counterpart, and recomputing SHA-256 produced exactly
+the unchanged 24-entry manifest under "Known-good Lavapipe captures" above.
+The existing 96px files and filenames were not modified.
+
 ## Toolchain
 
 | Component | Captured version |
