@@ -1,8 +1,8 @@
 # STATE — mkui Slug rendering chevalier mission
 
-**Last updated:** 2026-07-30T12:00:00Z
-**Current phase:** 3
-**Phase status:** in progress — Phase 2 merged, see § Phase 2 below. No active block.
+**Last updated:** 2026-07-30T18:00:00Z
+**Current phase:** 4
+**Phase status:** COMPLETION.md posted — PR #164 open, awaiting operator visual smoke test (final merge gate). No active block. See `COMPLETION.md`.
 
 ## Dame infrastructure gap — standing note (applies to Phases 2-4 until resolved)
 
@@ -359,14 +359,107 @@ noted once here rather than repeated per-phase.
   feature-slug matrix clippy (`mkui-vector2d-wgpu`, `mkui-wgpu --features
   slug`, `atoms-on-wgpu --features slug`, `text --features slug`, all
   `--all-targets`) clean.
-- Dame dispatch: per the standing note above, will NOT dispatch a second
-  `--brief-file dame-rubric.md` round for this phase; merges on the
-  self-check + CI-green + Codex-round-1-APPROVE pattern instead. Flagging
-  here per the mkui orchestrator's offer: if the operator wants a Phase 3
-  visual smoke test (as they ran for Phase 2) before Phase 4's mandatory
-  gate, this is the point to request it — otherwise chevalier proceeds
-  straight through to Phase 4 on the substitute-evidence pattern.
+- Dame dispatch: per the standing note above, did NOT dispatch a second
+  `--brief-file dame-rubric.md` round for this phase.
+- Merged: 2026-07-30, squash sha `506c4f8`.
+- **Ratification: same operator-adjudicated evidence pattern as Phase 2**
+  (BLOCKED.md `dame_infrastructure_gap` option 3, applied prospectively per
+  the standing note above) — chevalier's line-by-line self-check against
+  every rubric § Phase 3 criterion, CI green (30/30 including
+  `gpu-offscreen` with VVL) on exact head `83a5997`, and a genuine two-round
+  Codex review: round 1 (real, fresh thread on this PR) found an actual
+  defect — the first cut baked a stale, caller-supplied `device_pixel_ratio`
+  into the baseline at scene-construction time — REQUEST_CHANGES; fixed by
+  moving the snap into `mkui-vector2d-wgpu`'s `pack` (frame-fresh DPR, same
+  home as Phase 2's dilation); round 2 confirmed the fix APPROVE, CI still
+  green, no new findings (one non-blocking nit — the PR description
+  described the superseded implementation — fixed via `gh pr edit` before
+  merge). Dame's independent application remains deferred until
+  `mikbry/miky#605` lands — retroactively applies to Phases 1-3.
+  Arguably this phase's Codex cycle is *stronger* evidence than a bare
+  round-1 APPROVE would have been: it demonstrates the review loop actually
+  catching and fixing a real defect, not just rubber-stamping.
 
 ## Phase 4
-- PR: pending
-- Status: not started
+- PR: #164 (https://github.com/mikbry/ui/pull/164)
+- Opened: 2026-07-30
+- Status: implemented Codex 8-step-plan step 8, variant B — chosen because
+  the ratified reference-harness adapter has no way to render at an
+  arbitrary font size, making variant A's own (N) BLESS criterion
+  ("dame renders the label text at 12px via adapter... SAME comparison for
+  48px") unverifiable without amending the immutable oracle. Full rationale
+  in `docs/architecture/0008-bitmap-vs-slug-labels.md` (cited in the PR
+  body). Codex round 1 found a real defect (fixed — see notes below);
+  round 2 confirmed APPROVE, CI 30/30 green including `gpu-offscreen`.
+  `COMPLETION.md` posted; PR #164 remains OPEN pending the operator's
+  visual smoke test (CHARTER § Interaction points Point 2 / dame-rubric.md
+  § Phase 4 MERGE GATE) — this is the mission's final merge, not
+  chevalier's to perform. No further chevalier action expected on this
+  mission until the operator merges PR #164 or requests changes.
+- Notes:
+  - **(S) Bitmap font restricted to integer scales:** `mkui-text`'s
+    `bitmap::bitmap_scale` now rounds to the nearest integer
+    (`(font_size_px / REFERENCE_FONT_SIZE_PX).max(1.0).round()`, with a
+    `debug_assert!` on the invariant) instead of returning an arbitrary
+    float — a fractional scale forced nearest-neighbor upscaling to
+    duplicate the 5×7 face's source rows/columns unevenly.
+  - **(S) Device-pixel snapping applied:** `mkui-wgpu`'s `tessellate_text`
+    snaps every glyph cell's origin to the device-pixel grid,
+    unconditionally, using the frame's fresh `device_pixel_ratio` (computed
+    once per `Renderer::render` call in `render/mod.rs`, shared with the
+    Slug lane's own dilation/baseline-snap math — the same hoist point, no
+    duplicate computation). `tessellate_primitives` gained a
+    `device_pixel_ratio` parameter; `tessellate_scene`/
+    `tessellate_scene_with_text` (used by `examples/native-window`,
+    `examples/atoms-on-wgpu`, and `mkui-wgpu`'s non-windowed `Renderer`
+    helper — none in Phase 4's YOLO scope) keep their existing signatures
+    unchanged, passing `1.0` internally, so none of those callers needed
+    touching. Bitmap tessellation already re-runs fresh every frame from the
+    declarative `Scene` (unlike Phase 3's first, reverted cut of the Slug
+    baseline snap), so no separate staleness redesign was needed — confirmed
+    by reading the actual call graph, not assumed by analogy.
+
+    **Codex round 1 finding, real and fixed in round 2:** the first cut
+    incorrectly copied Phase 3's small-text threshold gate onto the bitmap
+    snap. That threshold exists for Slug specifically to protect Phase 1/2's
+    large-text adapter-parity fixtures; the bitmap lane carries no such
+    fixtures at all, and Codex plan step 8's literal text is "snap every
+    glyph to device pixels" — no threshold. Codex round 1 caught that the
+    gated version left `examples/text`'s own demo label (16px, exactly at
+    the copied threshold) unsnapped, and flagged that the test suite
+    "explicitly codifies the incorrect ≥16px behavior." Fixed by removing
+    the gate entirely; the snap is now unconditional for bitmap text.
+  - **(N) Sub-pixel-invariance:** mirrors Phase 3's exact test shape in
+    `crates/mkui-wgpu/src/tessellation.rs`: two isolated tests on the snap
+    function (100 sub-pixel offsets over one physical-pixel period group
+    into exactly 2 cells at 1x DPI; correctly scaled at 1x/1.5x/2x/3x) plus
+    an integration test through the real `Scene` → `tessellate_primitives`
+    path proving a "#" glyph's position quantizes in one-physical-pixel
+    steps at 2x DPR at every font size swept (12px, 16px, 20px, 48px) —
+    16px is the demo label's actual size, per Codex's explicit request for
+    coverage at that exact value.
+  - Two new tests in `mkui-text`'s `bitmap.rs` sweep 500 font sizes (0.1px
+    to 50px) proving `bitmap_scale` always returns a positive integer, plus
+    a table check that 16px rounds to 2× (not truncates to 1×) and 14px
+    rounds to 1×.
+  - Verified under the same pinned Docker + Lavapipe image (`rust:1.89-
+    bookworm`, digest `948f9b08`) as all prior phases: `cargo fmt --check`
+    clean; workspace clippy (CI excludes) clean; feature-slug matrix clippy
+    clean; `cargo test -p mkui-text` 81/81; `-p mkui-vector2d` 81/81;
+    `-p mkui-vector2d-wgpu` 20/20; `-p mkui-wgpu` (default) 133/133,
+    (`slug`) 137/137, (`gpu-tests,slug`) 156/156 (1 ignored — the Phase 3
+    golden-capture regen tool, by design); `cargo build --workspace`
+    (excluding the three backend-pinned showcases) succeeds — confirming
+    `native-window` and `atoms-on-wgpu` still compile unmodified against the
+    unchanged `tessellate_scene` signature.
+- Dame dispatch: per the standing note above, will NOT dispatch a second
+  `--brief-file dame-rubric.md` round for this phase; merges on the
+  self-check + CI-green + Codex-review pattern instead.
+  **Phase 4 MERGE GATE (CHARTER § Interaction points Point 2):** dame BLESS
+  does NOT authorize chevalier to merge this phase's PR — chevalier posts
+  `COMPLETION.md` with the PR OPEN + evidence-pattern-BLESSED, and the
+  operator's visual smoke test (`cargo run -p text --features slug`,
+  `atoms-on-wgpu --features slug`, `native-showcase`) is the final merge
+  gate. This is the one phase boundary that still needs operator
+  interaction per the CHARTER's 2-touchpoint contract, regardless of the
+  standing dame-infrastructure-gap workaround.

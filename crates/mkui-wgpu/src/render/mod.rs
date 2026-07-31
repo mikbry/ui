@@ -418,10 +418,22 @@ impl Renderer {
         let commands = build_render_commands(&scene.primitives, classify_primitive);
         let mut lane_draws: Vec<LaneDraw> = Vec::new();
 
+        // The frame's physical-pixels-per-logical-pixel ratio, derived from
+        // the physical surface config vs. the logical scene viewport (#97,
+        // ADR 0006) rather than threading `winit::Window::scale_factor`
+        // through — both describe the same ratio, and this stays entirely
+        // local to the render call. Computed fresh every frame (not cached
+        // from scene-construction time), so both the Slug dilation/baseline
+        // snap (#157 Phase 2/3) and the bitmap device-pixel snap (#157
+        // Phase 4 variant B) self-correct on a DPI change with no separate
+        // invalidation path.
+        let device_pixel_ratio = self.config.width as f32 / scene.viewport.width.max(1.0);
+
         // Tessellate a contiguous triangle-lane primitive range into one vertex
         // buffer, or `None` when it yields no geometry.
         let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
-            let triangles = tessellate_primitives(&scene.primitives[range], text_system);
+            let triangles =
+                tessellate_primitives(&scene.primitives[range], text_system, device_pixel_ratio);
             let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
             if vertices.is_empty() {
                 return None;
@@ -462,15 +474,11 @@ impl Renderer {
                         let glyphs = scene_slug_glyphs(&scene.primitives[range]);
                         // Slug glyphs are placed in the same logical-pixel
                         // viewport as everything else (#97, ADR 0006), but
-                        // dilation (#157 Phase 2 step 4) needs to be exactly
-                        // half a *physical* pixel: derive the frame's
-                        // physical-pixels-per-logical-pixel ratio from the
-                        // physical surface config vs. the logical viewport
-                        // rather than threading `winit::Window::scale_factor`
-                        // through — both describe the same ratio, and this
-                        // stays entirely local to the render call.
-                        let device_pixel_ratio =
-                            self.config.width as f32 / scene.viewport.width.max(1.0);
+                        // dilation (#157 Phase 2 step 4) and the small-text
+                        // baseline snap (#157 Phase 3) need the frame's
+                        // physical-pixels-per-logical-pixel ratio, computed
+                        // once above (shared with the bitmap lane's own
+                        // device-pixel snap, #157 Phase 4).
                         if let Some(prepared) = self.slug_adapter.prepare(
                             &self.device,
                             &self.queue,
