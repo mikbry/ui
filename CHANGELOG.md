@@ -8,6 +8,48 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Slug rendering completion, Phase 4 — bitmap text restricted to integer
+  scales + device-pixel snap (mkui-slug-rewrite mission, `mikbry/ui#157`
+  step 8, variant B).** See ADR
+  [0008](docs/architecture/0008-bitmap-vs-slug-labels.md) for the full
+  variant-A-vs-B rationale (the ratified reference-harness adapter has no
+  way to render at an arbitrary font size, making variant A's own BLESS
+  criterion unverifiable without amending an immutable oracle).
+  - **Integer-only bitmap scale.** `mkui-text`'s `bitmap::bitmap_scale` now
+    rounds to the nearest integer instead of returning an arbitrary float
+    (e.g. a 16px request previously scaled `1.6`×, now `2`×) — the 5×7
+    bitmap face has no intermediate representation, so a fractional scale
+    forced nearest-neighbor upscaling to duplicate source rows/columns
+    unevenly. A `debug_assert!` documents the always-integer invariant.
+  - **Device-pixel position snap.** `mkui-wgpu`'s `tessellate_text` snaps
+    every glyph cell's screen position to the device-pixel grid,
+    unconditionally, using the frame's fresh `device_pixel_ratio` — computed
+    once per `Renderer::render` call and shared with the Slug lane's
+    dilation/baseline-snap math. Deliberately unconditional, unlike Phase
+    3's Slug baseline snap, which gates on a small-text threshold to protect
+    Phase 1/2's large-text adapter-parity fixtures — the bitmap lane has no
+    such fixtures to protect. (An earlier revision incorrectly copied
+    Phase 3's threshold onto bitmap; Codex round 1 of this PR's review
+    caught that it left the demo's own 16px label unsnapped — see Codex
+    plan step 8's literal text, "snap every glyph to device pixels" — and it
+    was removed.) `tessellate_primitives` gained a `device_pixel_ratio`
+    parameter; `tessellate_scene`/`tessellate_scene_with_text` (used by
+    `native-window`, `atoms-on-wgpu`, and `mkui-wgpu`'s non-windowed
+    `Renderer` helper) keep their existing signatures, passing `1.0`
+    internally — unaffected in behavior. Bitmap tessellation already re-runs
+    fresh every frame from the declarative `Scene`, unlike Phase 3's first
+    cut of the Slug baseline snap, so no Phase-3-style staleness redesign
+    was needed.
+  - Piecewise-constancy self-check tests mirror Phase 3's exact pattern:
+    isolated tests on the snap function (100 sub-pixel offsets -> exactly 2
+    cells at 1x DPI, correctly scaled at 1x/1.5x/2x/3x) plus an integration
+    test through the real `Scene` -> `tessellate_primitives` path proving a
+    "#" glyph's position quantizes in one-physical-pixel steps at 2x DPR at
+    every font size tested, including the demo's actual 16px label size.
+  - Verified: `cargo fmt --check`, workspace clippy, and feature-slug matrix
+    clippy (all `-D warnings`) clean; `cargo test -p mkui-text` 81/81;
+    `cargo test -p mkui-wgpu` (default, `slug`, `gpu-tests,slug`) all pass.
+
 - **Slug rendering completion, Phase 2 — bounded dilation + band overlap
   epsilon (mkui-slug-rewrite mission, `mikbry/ui#157` steps 4-5).**
   - **Half-physical-pixel dilation (bounded 2D case).** `crates/mkui-vector2d-wgpu`'s
