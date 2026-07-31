@@ -2,8 +2,8 @@
 //!
 //! Renders mkui's `SlugAdapter` output for the eight ratified glyph fixtures
 //! at three DPIs and diffs against the ratified reference adapter's committed
-//! known-good goldens (`docs/chevalier/mkui-slug-rewrite/reference-harness/`,
-//! read-only — this module never writes there). This is the chevalier's own
+//! known-good goldens (`docs/reference-harness/`,
+//! read-only — this module never writes there). This is the mission's own
 //! pre-dispatch numeric gate mirroring dame-rubric.md § Phase 1 (N) criteria;
 //! it is not itself the ratified adapter and does not replace dame's own
 //! Lavapipe-side regeneration.
@@ -39,8 +39,7 @@ const MAX_DIFFERING_PIXELS: usize = 10;
 const MIN_SSIM: f64 = 0.995;
 
 fn harness_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/chevalier/mkui-slug-rewrite/reference-harness")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference-harness")
 }
 
 fn read_u32(bytes: &[u8], cursor: &mut usize) -> u32 {
@@ -486,7 +485,7 @@ fn capture_phase3_golden_images() {
 #[test]
 fn phase3_golden_images_match_committed_baseline_at_all_dpis() {
     // dame-rubric.md § Phase 3: (S) golden-image tests exist for 3 DPI scales
-    // — the files under `crate_goldens_dir()` themselves; (N) chevalier's
+    // — the files under `crate_goldens_dir()` themselves; (N) mission's
     // committed goldens match adapter-regenerated goldens at Phase 1's
     // thresholds — checked here by re-rendering through mkui and diffing
     // against the committed files (this session's self-check standing in for
