@@ -8,6 +8,34 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **SFNT outline → `SlugGlyph` extraction bridge (`mikbry/ui#169`, Part B.1 of
+  `#165`'s Sprint 8 tail).** `mkui-vector2d::sfnt_bridge::extract_slug_glyph`
+  is the first fallible, reusable bridge from `mkui-text`'s narrow SFNT
+  decoder (`SfntFace`) to the Slug encoder — replacing the hand-assembled,
+  `.expect()`-laden call chain `tests/slug_slice.rs` (#67) used per call site.
+  It lives in `mkui-vector2d`, not `mkui-text`, because #64's layering is
+  one-directional (`mkui-vector2d` depends on `mkui-text`, never the
+  reverse) and `SlugGlyph`/`SlugBlobCache` are owned by `mkui-vector2d`.
+  - Resolves a glyph's outline via `SfntFace::glyph_outline`, converts it to
+    a `VectorPath`, and encodes it through
+    `SlugBlobCache::encode_with_units_per_em` using the face's own
+    `units_per_em` — the pre-#169 slice used the cache's default (`1.0`)
+    instead, leaving the #157 Phase 2 step 5 band-overlap epsilon
+    unnormalized to the font's real design-unit scale.
+  - Returns `Result<Arc<SlugGlyph>, TextExtractionError>`; `TextExtractionError`
+    is a typed, `#[non_exhaustive]` enum with `CompositeGlyph`,
+    `NonQuadraticCurve`, and `MissingOutlineData(&'static str)` variants, so a
+    caller can degrade to the bitmap lane by reason instead of panicking.
+  - Unit + integration tests exercise the licensed Abel-Regular fixture
+    (`crates/mkui-vector2d/tests/sfnt_bridge_abel.rs`): calibrated-bounds
+    parity for glyph `M`, five ASCII glyphs, cache hit/miss reuse, a real
+    out-of-range-glyph-id fallible branch, `units_per_em` plumbing, and
+    cross-font key non-collision.
+  - **Scope decision**: composite-glyph decomposition and CFF/cubic-Bézier
+    support are explicitly out of scope (typed rejection only, per #169);
+    component call-site routing (B.2), example integration (B.3), and
+    golden-image regression tests (B.4) are follow-up phases of `#165`.
+
 - **Slug rendering completion, Phase 4 — bitmap text restricted to integer
   scales + device-pixel snap (mkui-slug-rewrite mission, `mikbry/ui#157`
   step 8, variant B).** See ADR
