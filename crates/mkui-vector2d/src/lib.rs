@@ -41,6 +41,12 @@
 //! - [`slug`] — the deterministic [`slug::encode_slug_glyph`] encoder and the
 //!   [`slug::SlugBlobCache`], keyed by the collision-free
 //!   [`slug::SlugGlyphKey`].
+//! - [`sfnt_bridge`] — the fallible SFNT → [`slug::SlugGlyph`] extraction
+//!   bridge ([`sfnt_bridge::extract_slug_glyph`], #169): resolves an
+//!   `mkui-text` [`SfntFace`] glyph outline, converts it, and encodes it
+//!   through [`slug::SlugBlobCache::encode_with_units_per_em`], with a typed
+//!   [`sfnt_bridge::TextExtractionError`] for composite glyphs, non-quadratic
+//!   curves, and missing outline data.
 //!
 //! The canonical fixed-point identity values the key is built from
 //! ([`VariationSettings`], [`Affine2Fixed`]) and the outline request/data
@@ -76,6 +82,7 @@ pub mod bezier;
 pub mod encode;
 pub mod outline;
 pub mod path;
+pub mod sfnt_bridge;
 pub mod slug;
 pub mod stroke;
 pub mod stroke_expand;
@@ -84,6 +91,7 @@ pub use bezier::{subdivide_cubic, SubdivisionError, CUBIC_SUBDIVISION_TOLERANCE_
 pub use encode::{encode_vector_path, VectorPathBlobCache, VectorPathEncodeError, VectorPathKey};
 pub use outline::glyph_outline_to_path;
 pub use path::{Affine2, Bounds, FillRule, PathCommand, Vec2, VectorPath};
+pub use sfnt_bridge::{extract_slug_glyph, TextExtractionError};
 pub use slug::{
     encode_slug_glyph, BandRange, GlyphBounds, SlugBlobCache, SlugConfig, SlugCurve,
     SlugEncodeError, SlugGlyph, SlugGlyphKey,
@@ -96,6 +104,6 @@ pub use stroke_expand::stroke_to_fill;
 // these types. `mkui-text` remains their single source of truth (#61).
 pub use mkui_text::{
     Affine2Fixed, Fixed16_16, FontId, FontIdAllocator, GlyphOutline, LayoutGlyph, LayoutRun,
-    OpenTypeTag, OutlineBounds, OutlineCommand, OutlineKey, TextRenderClass, VariationAxis,
-    VariationSettings,
+    OpenTypeTag, OutlineBounds, OutlineCommand, OutlineKey, SfntError, SfntFace, SfntMetrics,
+    TextRenderClass, VariationAxis, VariationSettings,
 };
