@@ -41,7 +41,7 @@ fn glyph_m_matches_the_calibrated_font_unit_bounds() {
     let gid = face.glyph_index('M').unwrap();
     let mut cache = cache();
 
-    let glyph = extract_slug_glyph(&mut cache, key_for(font_id, gid as u32), &face, gid).unwrap();
+    let glyph = extract_slug_glyph(&mut cache, key_for(font_id, gid as u32), &face).unwrap();
 
     // Same calibrated bounds `mkui-text`'s sfnt_abel.rs oracle asserts.
     assert_eq!(
@@ -67,8 +67,7 @@ fn five_ascii_glyphs_extract_to_nonempty_slug_blobs() {
         let gid = face
             .glyph_index(ch)
             .unwrap_or_else(|| panic!("Abel should map {ch:?}"));
-        let glyph =
-            extract_slug_glyph(&mut cache, key_for(font_id, gid as u32), &face, gid).unwrap();
+        let glyph = extract_slug_glyph(&mut cache, key_for(font_id, gid as u32), &face).unwrap();
         assert!(
             !glyph.curves.is_empty(),
             "{ch:?} should produce drawable curves"
@@ -85,8 +84,8 @@ fn repeated_key_hits_the_cache_and_reuses_one_blob() {
     let mut cache = cache();
     let key = key_for(font_id, gid as u32);
 
-    let first = extract_slug_glyph(&mut cache, key.clone(), &face, gid).unwrap();
-    let second = extract_slug_glyph(&mut cache, key, &face, gid).unwrap();
+    let first = extract_slug_glyph(&mut cache, key.clone(), &face).unwrap();
+    let second = extract_slug_glyph(&mut cache, key, &face).unwrap();
 
     assert!(
         Arc::ptr_eq(&first, &second),
@@ -103,13 +102,8 @@ fn out_of_range_glyph_id_is_a_typed_rejection_that_does_not_poison_the_cache() {
     let bogus_gid = face.num_glyphs(); // one past the last valid id
     let mut cache = cache();
 
-    let err = extract_slug_glyph(
-        &mut cache,
-        key_for(font_id, bogus_gid as u32),
-        &face,
-        bogus_gid,
-    )
-    .unwrap_err();
+    let err =
+        extract_slug_glyph(&mut cache, key_for(font_id, bogus_gid as u32), &face).unwrap_err();
 
     assert!(matches!(err, TextExtractionError::MissingOutlineData(_)));
     assert!(
@@ -117,6 +111,22 @@ fn out_of_range_glyph_id_is_a_typed_rejection_that_does_not_poison_the_cache() {
         "an errored extraction must not poison the cache"
     );
     assert_eq!(cache.misses(), 0);
+}
+
+#[test]
+fn glyph_id_beyond_u16_range_is_a_typed_rejection_and_never_touches_the_face() {
+    // `SlugGlyphKey::glyph_id` is `u32` for generality; SFNT glyph ids are
+    // always `u16`. A key whose glyph_id doesn't fit must be rejected before
+    // any SFNT decode is attempted, not silently truncated.
+    let face = abel_face();
+    let font_id = FontIdAllocator::new().allocate().unwrap();
+    let mut cache = cache();
+
+    let err =
+        extract_slug_glyph(&mut cache, key_for(font_id, u16::MAX as u32 + 1), &face).unwrap_err();
+
+    assert!(matches!(err, TextExtractionError::MissingOutlineData(_)));
+    assert!(cache.is_empty());
 }
 
 #[test]
@@ -138,7 +148,7 @@ fn extraction_uses_the_faces_units_per_em_without_mutating_the_cache_default() {
     let mut cache = SlugBlobCache::new(SlugConfig::new(4, 4, 1));
     assert_eq!(cache.config().units_per_em(), 1.0);
 
-    extract_slug_glyph(&mut cache, key_for(font_id, gid_m as u32), &face, gid_m).unwrap();
+    extract_slug_glyph(&mut cache, key_for(font_id, gid_m as u32), &face).unwrap();
 
     assert_eq!(
         cache.config().units_per_em(),
@@ -159,8 +169,8 @@ fn distinct_font_ids_never_alias_blobs_even_at_the_same_glyph_id() {
     let font_b = FontIdAllocator::new().allocate().unwrap();
     let mut cache = cache();
 
-    let blob_a = extract_slug_glyph(&mut cache, key_for(font_a, gid as u32), &face, gid).unwrap();
-    let blob_b = extract_slug_glyph(&mut cache, key_for(font_b, gid as u32), &face, gid).unwrap();
+    let blob_a = extract_slug_glyph(&mut cache, key_for(font_a, gid as u32), &face).unwrap();
+    let blob_b = extract_slug_glyph(&mut cache, key_for(font_b, gid as u32), &face).unwrap();
 
     assert!(!Arc::ptr_eq(&blob_a, &blob_b));
     assert_eq!(cache.len(), 2);

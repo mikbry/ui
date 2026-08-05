@@ -559,6 +559,33 @@ impl SlugBlobCache {
         Ok(blob)
     }
 
+    /// Encode under `key` as [`Self::encode_with_units_per_em`] does, but the
+    /// path is produced **lazily** by `build_path` — invoked only on an
+    /// actual cache miss. Lets an expensive upstream step (e.g. decoding a
+    /// glyph outline from a font file) be skipped entirely on a hit, while
+    /// still recording that hit through [`Self::hits`]. `E` must convert from
+    /// [`SlugEncodeError`] so a miss's encode failure and `build_path`'s own
+    /// failure share one error type; on either failure nothing is cached, as
+    /// with every other `encode*` method here.
+    pub fn get_or_try_encode_with_units_per_em<E: From<SlugEncodeError>>(
+        &mut self,
+        key: SlugGlyphKey,
+        units_per_em: f32,
+        build_path: impl FnOnce() -> Result<VectorPath, E>,
+    ) -> Result<Arc<SlugGlyph>, E> {
+        if let Some(blob) = self.blobs.get(&key) {
+            self.hits += 1;
+            return Ok(Arc::clone(blob));
+        }
+        let path = build_path()?;
+        let config = self.config.with_units_per_em(units_per_em);
+        let glyph = encode_slug_glyph(&path, &config)?;
+        let blob = Arc::new(glyph);
+        self.blobs.insert(key, Arc::clone(&blob));
+        self.misses += 1;
+        Ok(blob)
+    }
+
     /// Look up an already-encoded blob without encoding or touching counters.
     pub fn get(&self, key: &SlugGlyphKey) -> Option<Arc<SlugGlyph>> {
         self.blobs.get(key).map(Arc::clone)
@@ -919,6 +946,47 @@ mod tests {
             Arc::ptr_eq(&first, &second),
             "blob is reused, not re-encoded"
         );
+    }
+
+    #[test]
+    fn get_or_try_encode_skips_build_path_on_a_cache_hit() {
+        let mut cache = SlugBlobCache::new(golden_config());
+        let path = golden_path();
+        let key = golden_key(font_id());
+
+        let calls = std::cell::Cell::new(0);
+        let build = || {
+            calls.set(calls.get() + 1);
+            Ok::<_, SlugEncodeError>(path.clone())
+        };
+
+        let first = cache
+            .get_or_try_encode_with_units_per_em(key.clone(), 1.0, build)
+            .unwrap();
+        let second = cache
+            .get_or_try_encode_with_units_per_em(key, 1.0, build)
+            .unwrap();
+
+        assert_eq!(calls.get(), 1, "build_path must not run again on a hit");
+        assert_eq!(cache.hits(), 1);
+        assert_eq!(cache.misses(), 1);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn get_or_try_encode_propagates_build_path_error_without_caching() {
+        let mut cache = SlugBlobCache::new(golden_config());
+        let key = golden_key(font_id());
+
+        let err = cache
+            .get_or_try_encode_with_units_per_em(key, 1.0, || {
+                Err::<VectorPath, SlugEncodeError>(SlugEncodeError::EmptyOutline)
+            })
+            .unwrap_err();
+
+        assert_eq!(err, SlugEncodeError::EmptyOutline);
+        assert!(cache.is_empty());
+        assert_eq!(cache.misses(), 0);
     }
 
     #[test]

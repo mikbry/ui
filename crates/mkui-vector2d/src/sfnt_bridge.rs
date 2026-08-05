@@ -29,15 +29,18 @@
 //!
 //! ## Cache-aware
 //!
-//! Extraction slots into [`SlugBlobCache::encode_with_units_per_em`] using
-//! `face`'s own [`SfntFace::units_per_em`], so the band-overlap epsilon
-//! (#157 Phase 2 step 5) normalizes to the font's real design-unit scale
-//! instead of the cache's default. A cache hit on `key` returns the stored
-//! blob without touching the SFNT decoder or the encoder — no work happens
-//! twice. `units_per_em` is not folded into [`SlugGlyphKey`] itself: it is a
-//! property of the font a given `font_id` names (one font, one
-//! units-per-em), so `key.font_id` already keeps two fonts' blobs from
-//! aliasing even when they share a `glyph_id` — see
+//! Extraction slots into
+//! [`SlugBlobCache::get_or_try_encode_with_units_per_em`] using `face`'s own
+//! [`SfntFace::units_per_em`], so the band-overlap epsilon (#157 Phase 2 step
+//! 5) normalizes to the font's real design-unit scale instead of the cache's
+//! default. The cache is consulted for `key` **before** the SFNT decoder ever
+//! runs: on a hit, neither the decoder nor the encoder does any work — a
+//! naive "decode, then hand the path to the cache" ordering would still pay
+//! the full outline-decode cost on every hit, defeating the point of caching
+//! an expensive glyph decode. `units_per_em` is not folded into
+//! [`SlugGlyphKey`] itself: it is a property of the font a given `font_id`
+//! names (one font, one units-per-em), so `key.font_id` already keeps two
+//! fonts' blobs from aliasing even when they share a `glyph_id` — see
 //! [`SlugBlobCache::encode_with_units_per_em`]'s own docs for the identical
 //! argument.
 
@@ -82,37 +85,45 @@ pub enum TextExtractionError {
     MissingOutlineData(&'static str),
 }
 
-/// Extract glyph `glyph_id` from `face` into a cached [`SlugGlyph`] blob.
+impl From<SlugEncodeError> for TextExtractionError {
+    fn from(err: SlugEncodeError) -> Self {
+        match err {
+            SlugEncodeError::EmptyOutline => {
+                TextExtractionError::MissingOutlineData("outline is empty: no drawable curves")
+            }
+            SlugEncodeError::UnsupportedSegment => TextExtractionError::NonQuadraticCurve,
+        }
+    }
+}
+
+/// Extract `key.glyph_id` from `face` into a cached [`SlugGlyph`] blob.
 ///
-/// Resolves the glyph's outline via [`SfntFace::glyph_outline`], converts it
-/// to a [`VectorPath`], and encodes it through
-/// [`SlugBlobCache::encode_with_units_per_em`] using `face`'s own
-/// [`units_per_em`](SfntFace::units_per_em). On a cache hit for `key` neither
-/// the decoder nor the encoder runs again. On any error nothing is cached —
-/// mirrors [`SlugBlobCache::encode_with_units_per_em`]'s own "never poisons
-/// the cache on error" contract.
+/// Checks the cache for `key` **first**, via
+/// [`SlugBlobCache::get_or_try_encode_with_units_per_em`] — only on an actual
+/// miss does it resolve the glyph's outline via [`SfntFace::glyph_outline`]
+/// and convert it to a [`VectorPath`], which is then encoded using `face`'s
+/// own [`units_per_em`](SfntFace::units_per_em). On a hit for `key` neither
+/// the decoder nor the encoder runs. On any error nothing is cached — mirrors
+/// [`SlugBlobCache`]'s own "never poisons the cache on error" contract.
 ///
-/// `key.glyph_id` and `glyph_id` must name the same glyph (debug-checked);
-/// callers assemble `key` themselves (typically via
-/// [`SlugGlyphKey::from_run`]) the same way every other `SlugBlobCache` call
-/// site in this crate does — this function does not reconstruct a key from
-/// `glyph_id` alone.
+/// The raw SFNT glyph id is derived from `key.glyph_id` (SFNT glyph ids are
+/// always `u16`; [`SlugGlyphKey::glyph_id`] is a wider `u32` for generality)
+/// rather than taken as a separate parameter, so there is exactly one source
+/// of truth and no way for a caller to pass a `glyph_id` that disagrees with
+/// `key` — out-of-`u16`-range values are a typed
+/// [`TextExtractionError::MissingOutlineData`], not undefined behavior.
 pub fn extract_slug_glyph(
     cache: &mut SlugBlobCache,
     key: SlugGlyphKey,
     face: &SfntFace,
-    glyph_id: u16,
 ) -> Result<Arc<SlugGlyph>, TextExtractionError> {
-    debug_assert_eq!(
-        key.glyph_id, glyph_id as u32,
-        "SlugGlyphKey.glyph_id must match the glyph_id used to resolve the outline"
-    );
+    let glyph_id = u16::try_from(key.glyph_id)
+        .map_err(|_| TextExtractionError::MissingOutlineData("glyph id exceeds u16 range"))?;
 
-    let outline = face.glyph_outline(glyph_id).map_err(map_sfnt_error)?;
-    let path = outline_to_vector_path(&outline)?;
-    cache
-        .encode_with_units_per_em(key, &path, face.units_per_em() as f32)
-        .map_err(map_encode_error)
+    cache.get_or_try_encode_with_units_per_em(key, face.units_per_em() as f32, || {
+        let outline = face.glyph_outline(glyph_id).map_err(map_sfnt_error)?;
+        outline_to_vector_path(&outline)
+    })
 }
 
 /// Map the narrow SFNT decoder's typed error onto the bridge's error surface.
@@ -130,16 +141,6 @@ fn map_sfnt_error(err: SfntError) -> TextExtractionError {
             TextExtractionError::MissingOutlineData("malformed glyf/loca data")
         }
         _ => TextExtractionError::MissingOutlineData("SFNT glyph decode failed"),
-    }
-}
-
-/// Map the Slug encoder's typed error onto the bridge's error surface.
-fn map_encode_error(err: SlugEncodeError) -> TextExtractionError {
-    match err {
-        SlugEncodeError::EmptyOutline => {
-            TextExtractionError::MissingOutlineData("outline is empty: no drawable curves")
-        }
-        SlugEncodeError::UnsupportedSegment => TextExtractionError::NonQuadraticCurve,
     }
 }
 
@@ -251,13 +252,13 @@ mod tests {
     }
 
     #[test]
-    fn map_encode_error_maps_unsupported_segment_to_non_quadratic() {
+    fn slug_encode_error_converts_unsupported_segment_to_non_quadratic() {
         assert_eq!(
-            map_encode_error(SlugEncodeError::UnsupportedSegment),
+            TextExtractionError::from(SlugEncodeError::UnsupportedSegment),
             TextExtractionError::NonQuadraticCurve
         );
         assert_eq!(
-            map_encode_error(SlugEncodeError::EmptyOutline),
+            TextExtractionError::from(SlugEncodeError::EmptyOutline),
             TextExtractionError::MissingOutlineData("outline is empty: no drawable curves")
         );
     }
