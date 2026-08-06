@@ -225,14 +225,18 @@ fn expand_text_primitive(
     let line_height = text.style.line_height_px.max(1.0);
     let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
     // The Slug-lane provider (`SfntProvider`) lays out a single unwrapped,
-    // Start-aligned line per call — it ignores both `spec.align` and
-    // `max_width_px` (see its `layout_local` doc). A primitive whose box
-    // allows more than one line, or that asks for non-Start alignment, would
-    // silently lose that behavior if routed through Slug (centered/end-aligned
-    // text would render flush-left; a wrappable box would overflow instead of
-    // wrapping) — leave both on the untouched bitmap lane, which implements
-    // both correctly.
-    if max_lines > 1 || text.style.align != TextAlign::Start {
+    // Start-aligned line per call — it ignores `spec.align`, `max_width_px`,
+    // and hard line breaks alike (see its `layout_local` doc). A primitive
+    // whose box allows more than one line, that asks for non-Start alignment,
+    // or whose content contains `\n` would silently lose that behavior if
+    // routed through Slug: centered/end-aligned text would render flush-left;
+    // a wrappable box would overflow instead of wrapping; a hard break (e.g.
+    // `"M\nA"`) would route the `\n` itself into a one-character bitmap
+    // fallback run and draw both lines side by side on one line instead of
+    // respecting `max_lines`, unlike the bitmap lane's `wrap_text_lines`
+    // (Codex round 2 of this PR). Leave all three on the untouched bitmap
+    // lane, which implements them correctly.
+    if max_lines > 1 || text.style.align != TextAlign::Start || text.content.contains('\n') {
         return vec![Primitive::Text(text.clone())];
     }
 
@@ -645,6 +649,33 @@ mod tests {
         let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
         let (mut text, _) = text_primitive("Mag", 16.0);
         text.rect.size.height *= 3.0;
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn content_with_a_hard_line_break_stays_on_the_bitmap_lane() {
+        // Codex round 2 of this PR: `SfntProvider::layout_local` has no line
+        // breaking at all, so a hard break like "M\nA" would otherwise route
+        // the `\n` into a one-character bitmap-fallback run and draw both
+        // letters side by side on a single line — silently discarding the
+        // bitmap lane's `wrap_text_lines`/`max_lines` hard-break handling.
+        // A tall (multi-line-capable) box would already bail via the
+        // `max_lines` guard, so size the box to exactly one line to prove
+        // the `\n` check is independently load-bearing.
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (text, _) = text_primitive("M\nA", 16.0);
+        assert_eq!(
+            ((text.rect.size.height / text.style.line_height_px.max(1.0)).floor() as usize).max(1),
+            1,
+            "the box must allow exactly one line, so only the \\n check can be gating"
+        );
         let primitives = vec![Primitive::Text(text.clone())];
 
         let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);

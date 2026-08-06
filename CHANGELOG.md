@@ -54,7 +54,12 @@ breaking changes can land on minor bumps).
     `BitmapTextSystem`'s internal vertical-centering doesn't double-apply on
     top of the already baseline-corrected position (same review round: a
     naive first cut visibly misaligned fallback glyphs whenever the line
-    height exceeded the bitmap glyph height).
+    height exceeded the bitmap glyph height). It also bails on content
+    containing a hard line break (`\n`), which `SfntProvider` has no line
+    breaking to honor at all (Codex round 2: `"M\nA"` would otherwise route
+    the `\n` into a one-character bitmap fallback and draw both letters side
+    by side on one line instead of respecting the bitmap lane's
+    `wrap_text_lines`/`max_lines` hard-break handling).
   - **`Renderer`**: gained `set_slug_font(Option<FontId>)` (`slug` feature
     only) and a persistent `SlugBlobCache`; `render()` runs `expand_slug_text`
     over the scene's primitives before command classification when a font is
