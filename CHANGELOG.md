@@ -42,6 +42,19 @@ breaking changes can land on minor bumps).
     selected, or every character falls back) is pushed through **unchanged**,
     so the no-font-selected/no-`slug`-feature path stays byte-identical to the
     pre-#171 bitmap-only renderer.
+  - Because the Slug-lane provider (`SfntProvider`) only ever lays out a
+    single unwrapped, Start-aligned line, `expand_slug_text` bails to the
+    untouched bitmap primitive (rather than silently losing behavior) when
+    the box allows more than one line, the primitive isn't Start-aligned, or
+    the laid-out line overflows the box width (Codex round 1 of `#172`: a
+    naive first cut ignored all three, which would have rendered
+    centered/end-aligned or multi-line component text incorrectly). The
+    bitmap-fallback primitive's synthesized `line_height_px` is the bitmap
+    glyph cell's own height (not the original, larger line height), so
+    `BitmapTextSystem`'s internal vertical-centering doesn't double-apply on
+    top of the already baseline-corrected position (same review round: a
+    naive first cut visibly misaligned fallback glyphs whenever the line
+    height exceeded the bitmap glyph height).
   - **`Renderer`**: gained `set_slug_font(Option<FontId>)` (`slug` feature
     only) and a persistent `SlugBlobCache`; `render()` runs `expand_slug_text`
     over the scene's primitives before command classification when a font is

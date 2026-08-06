@@ -223,15 +223,25 @@ fn expand_text_primitive(
     }
 
     let line_height = text.style.line_height_px.max(1.0);
+    let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
+    // The Slug-lane provider (`SfntProvider`) lays out a single unwrapped,
+    // Start-aligned line per call — it ignores both `spec.align` and
+    // `max_width_px` (see its `layout_local` doc). A primitive whose box
+    // allows more than one line, or that asks for non-Start alignment, would
+    // silently lose that behavior if routed through Slug (centered/end-aligned
+    // text would render flush-left; a wrappable box would overflow instead of
+    // wrapping) — leave both on the untouched bitmap lane, which implements
+    // both correctly.
+    if max_lines > 1 || text.style.align != TextAlign::Start {
+        return vec![Primitive::Text(text.clone())];
+    }
+
     let spec = LayoutSpec {
         font_id: slug_font_id,
         font_generation: 0,
         font_size_px: text.style.font_size_px,
         line_height_px: line_height,
         align: map_align(text.style.align),
-        // The Slug-lane provider (`SfntProvider`) lays out a single unwrapped
-        // line per call — see its `layout_local` doc — so there is exactly
-        // one line's worth of runs to expand here regardless of this value.
         max_lines: Some(1),
         hinting: HintingMode::None,
         variations: VariationSettings::empty(),
@@ -246,9 +256,40 @@ fn expand_text_primitive(
         return vec![Primitive::Text(text.clone())];
     }
 
+    // The provider ignores `max_width_px` too, so a line that doesn't fit
+    // would silently overflow the box instead of wrapping or clipping (the
+    // bitmap lane's tested contract) — bail to bitmap rather than draw past
+    // the primitive's bounds.
+    let total_width = runs
+        .iter()
+        .filter_map(|run| {
+            run.glyphs
+                .last()
+                .map(|g| run.origin_x_px + g.x_px + g.x_advance_px)
+        })
+        .fold(0.0_f32, f32::max);
+    if total_width > text.rect.size.width {
+        return vec![Primitive::Text(text.clone())];
+    }
+
+    // The bitmap glyph cell's natural height at this font size — every
+    // synthesized bitmap-fallback primitive below uses this as its
+    // `line_height_px` so `BitmapTextSystem`'s own vertical centering
+    // (`(line_height - glyph_height) / 2`, see `bitmap.rs::wrap`) collapses to
+    // zero. Using the *original* `text.style.line_height_px` here instead
+    // would double-apply a vertical offset on top of the baseline placement
+    // below.
+    let bmp_height =
+        mkui_text::GLYPH_CELL_HEIGHT_PX * mkui_text::bitmap_scale(text.style.font_size_px);
+
     let chars: Vec<char> = text.content.chars().collect();
     let mut out = Vec::new();
     for run in &runs {
+        // Every run in this line — Slug or Bitmap class — shares the same
+        // `line_y_baseline_px` (`SfntProvider` stamps it uniformly), so this
+        // is the correct "top of the bitmap cell" position regardless of
+        // which run triggered the fallback.
+        let origin_y = text.rect.origin.y + (run.line_y_baseline_px - bmp_height).max(0.0);
         if run.render_class == TextRenderClass::Slug {
             let result = place_slug_run(
                 text_system,
@@ -258,13 +299,13 @@ fn expand_text_primitive(
                 text.style.color,
             );
             out.extend(result.glyphs.into_iter().map(Primitive::SlugGlyph));
-            let origin_y = text.rect.origin.y + run.origin_y_px;
             for fallback in result.bitmap_fallback {
                 if let Some(&ch) = chars.get(fallback.cluster as usize) {
                     out.push(bitmap_text_primitive(
                         text,
                         fallback.pen_x_px,
                         origin_y,
+                        bmp_height,
                         ch.to_string(),
                     ));
                 }
@@ -281,7 +322,8 @@ fn expand_text_primitive(
                 out.push(bitmap_text_primitive(
                     text,
                     text.rect.origin.x + run.origin_x_px,
-                    text.rect.origin.y + run.origin_y_px,
+                    origin_y,
+                    bmp_height,
                     span,
                 ));
             }
@@ -292,23 +334,28 @@ fn expand_text_primitive(
 
 /// Build a narrowed, `Start`-aligned bitmap [`Primitive::Text`] at
 /// `(origin_x_px, origin_y_px)` (already-resolved absolute positions, so no
-/// re-alignment should happen) with `content`, reusing `text`'s font size,
-/// line height, and color.
+/// re-alignment should happen) with `content`, reusing `text`'s font size and
+/// color but overriding `line_height_px` — see the `bmp_height` doc comment
+/// at the call site for why this must be the bitmap glyph cell's own height,
+/// not the original primitive's line height.
 fn bitmap_text_primitive(
     text: &Text,
     origin_x_px: f32,
     origin_y_px: f32,
+    line_height_px: f32,
     content: String,
 ) -> Primitive {
     let width = (text.rect.width_end() - origin_x_px).max(1.0);
+    let line_height_px = line_height_px.max(1.0);
     Primitive::Text(Text {
         rect: Rect::new(
             Point::new(origin_x_px, origin_y_px),
-            Size::new(width, text.style.line_height_px.max(1.0)),
+            Size::new(width, line_height_px),
         ),
         content,
         style: TextStyle {
             align: TextAlign::Start,
+            line_height_px,
             ..text.style
         },
     })
@@ -464,14 +511,21 @@ mod tests {
 
     // ---- `expand_slug_text` — #171 Part B.2's component call site ---------
 
+    /// Builds a `Text` primitive sized to exactly one line — matching how
+    /// `walker.rs::render_text`/`render_button` actually box every
+    /// mkui-core widget's text today (`Size::new(content_width, line_height)`).
+    /// A box tall enough for more than one line intentionally bails
+    /// `expand_slug_text` to the bitmap lane; see
+    /// `a_multiline_capable_box_stays_on_the_bitmap_lane`.
     fn text_primitive(content: &str, font_size_px: f32) -> (Text, Vec<Primitive>) {
+        let line_height_px = font_size_px * 1.25;
         let text = Text {
-            rect: Rect::new(Point::new(4.0, 8.0), Size::new(400.0, 40.0)),
+            rect: Rect::new(Point::new(4.0, 8.0), Size::new(400.0, line_height_px)),
             content: content.to_string(),
             style: TextStyle {
                 font: crate::types::FontFaceId(0),
                 font_size_px,
-                line_height_px: font_size_px * 1.25,
+                line_height_px,
                 color: Color::rgb(1.0, 1.0, 1.0),
                 align: TextAlign::Start,
             },
@@ -557,6 +611,136 @@ mod tests {
 
         let expanded = expand_slug_text(&primitives, FontId::BITMAP, &sys, &mut cache);
         assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn non_start_alignment_stays_on_the_bitmap_lane() {
+        // `SfntProvider::layout_local` ignores `spec.align` entirely, so a
+        // Center/End-aligned primitive routed through Slug would silently
+        // render flush-left. `expand_slug_text` must recognize it cannot
+        // honor that alignment and leave the primitive untouched instead.
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (mut text, _) = text_primitive("Mag", 16.0);
+        text.style.align = TextAlign::Center;
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn a_multiline_capable_box_stays_on_the_bitmap_lane() {
+        // `SfntProvider::layout_local` lays out a single unwrapped line; a
+        // box tall enough for more than one line could genuinely wrap under
+        // the bitmap lane, which Slug has no way to replicate — must bail to
+        // bitmap rather than silently collapse to one line.
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (mut text, _) = text_primitive("Mag", 16.0);
+        text.rect.size.height *= 3.0;
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn a_line_that_overflows_the_box_width_stays_on_the_bitmap_lane() {
+        // `SfntProvider::layout_local` ignores `max_width_px`; a line that
+        // doesn't fit the box must not be routed through Slug (which would
+        // draw straight past the primitive's bounds with no wrap/clip).
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (mut text, _) = text_primitive("Mag", 16.0);
+        text.rect.size.width = 1.0; // far narrower than "Mag" at 16px
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn bitmap_fallback_lands_at_the_same_baseline_as_a_pure_bitmap_render() {
+        // Codex round 1 of this PR: the bitmap-fallback primitive's
+        // `line_height_px` must be the bitmap glyph cell's own height, not
+        // the original (larger) line height — otherwise `BitmapTextSystem`'s
+        // internal vertical-centering re-offsets a position that was already
+        // baseline-corrected, and the fallback glyph visibly floats away from
+        // the rest of the line. Assert the *tessellated* fallback triangles'
+        // vertical extent lands within one bitmap glyph cell of a pure-bitmap
+        // render of the same character at the same nominal box.
+        use crate::tessellation::tessellate_scene_with_text;
+        use crate::types::Scene;
+
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        // "M中": 中 is not in Abel's cmap, so it is the composite router's own
+        // layout-time bitmap-fallback run — the same code path a per-glyph
+        // extraction failure also flows through (both go through the same
+        // `bitmap_text_primitive` helper with the same `bmp_height`).
+        let (text, primitives) = text_primitive("M中", 16.0);
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        let fallback_text = expanded
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .expect("the bitmap-fallback span must be a Primitive::Text");
+
+        let mut fallback_scene = Scene::new(Size::new(800.0, 600.0));
+        fallback_scene.push(Primitive::Text(fallback_text));
+        let fallback_triangles = tessellate_scene_with_text(&fallback_scene, &sys);
+        assert!(
+            !fallback_triangles.is_empty(),
+            "中 must still tessellate to visible triangles"
+        );
+        let fallback_min_y = fallback_triangles
+            .iter()
+            .flat_map(|t| t.points.iter().map(|p| p.y))
+            .fold(f32::INFINITY, f32::min);
+
+        // Reference: render "中" alone, at the box's own top, through the
+        // plain (untouched) bitmap lane — this is what a correctly-aligned
+        // fallback must match, within one glyph cell's height.
+        let mut reference_scene = Scene::new(Size::new(800.0, 600.0));
+        reference_scene.push(Primitive::Text(Text {
+            rect: text.rect,
+            content: "中".to_string(),
+            style: text.style,
+        }));
+        let reference_triangles = tessellate_scene_with_text(&reference_scene, &sys);
+        let reference_min_y = reference_triangles
+            .iter()
+            .flat_map(|t| t.points.iter().map(|p| p.y))
+            .fold(f32::INFINITY, f32::min);
+
+        // A tight tolerance, not `bmp_height` itself: the pre-fix bug (using
+        // the original `line_height_px` for the fallback's synthesized
+        // style instead of the bitmap cell's own height) only over-offset by
+        // `(line_height_px - bmp_height) / 2` — for this 16px/Abel case that
+        // is 3px, comfortably inside `bmp_height` (14px) but well outside a
+        // tight tolerance. 2px covers float/rounding slack without hiding
+        // that regression.
+        assert!(
+            (fallback_min_y - reference_min_y).abs() <= 2.0,
+            "fallback glyph top {fallback_min_y} does not match the plain-bitmap \
+             reference {reference_min_y} within 2px"
+        );
     }
 
     #[test]
