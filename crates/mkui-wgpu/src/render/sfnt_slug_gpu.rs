@@ -242,26 +242,27 @@ fn font_backed_glyph_m_meets_calibrated_threshold_at_all_sizes() {
         assert_eq!(runs[0].render_class, TextRenderClass::Slug);
 
         let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
-        let glyphs = place_slug_run(
+        let result = place_slug_run(
             &sys,
             &mut cache,
             &runs[0],
             box_origin,
             Color::rgb(0.0, 1.0, 0.0),
         );
+        assert!(result.bitmap_fallback.is_empty(), "M must extract cleanly");
         assert_eq!(
-            glyphs.len(),
+            result.glyphs.len(),
             1,
             "M is a single drawable Slug glyph at {px}px"
         );
 
-        let drawn = render_slug(&renderer, &adapter, &glyphs);
+        let drawn = render_slug(&renderer, &adapter, &result.glyphs);
 
         // Outward-rounded ink rectangle in screen space. Derived from the glyph's
         // ACTUAL placed pen origin (`origin_px`) + per-unit scale, so the rect
         // tracks exactly where the adapter drew it (y-down: font y_max maps to
         // the smaller/top screen y).
-        let placed = &glyphs[0];
+        let placed = &result.glyphs[0];
         let scale = placed.scale_px_per_unit as f64;
         let pen_x = placed.origin_px[0] as f64;
         let baseline_y = placed.origin_px[1] as f64;
@@ -320,17 +321,17 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
     // a bitmap text primitive (中) at the fallback run's position.
     let box_origin = [8.0f32, 70.0f32];
     let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
-    let slug_glyphs = place_slug_run(
+    let slug_result = place_slug_run(
         &sys,
         &mut cache,
         &runs[0],
         box_origin,
         Color::rgb(0.0, 1.0, 0.0),
     );
-    assert_eq!(slug_glyphs.len(), 1);
+    assert_eq!(slug_result.glyphs.len(), 1);
 
     let mut scene = Scene::new(Size::new(W as f32, H as f32));
-    for glyph in &slug_glyphs {
+    for glyph in &slug_result.glyphs {
         scene.slug_glyph(glyph.clone());
     }
     scene.text(Text {
@@ -395,7 +396,7 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
     };
     let collected = super::scene_slug_glyphs(&scene.primitives[slug_range]);
     assert_eq!(
-        collected, slug_glyphs,
+        collected, slug_result.glyphs,
         "scene_slug_glyphs round-trips the placed glyphs"
     );
     let prepared = adapter
@@ -485,7 +486,7 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
     let face = sys.sfnt_face(id).unwrap();
     let gid = face.glyph_index('M').unwrap();
     let ink = face.glyph_outline(gid).unwrap().ink_bounds;
-    let placed = &slug_glyphs[0];
+    let placed = &slug_result.glyphs[0];
     let scale = placed.scale_px_per_unit as f64;
     let pen_x = placed.origin_px[0] as f64;
     let baseline_y = placed.origin_px[1] as f64;

@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use crate::canonical::{Affine2Fixed, OpenTypeTag, VariationSettings};
 use crate::outline::{GlyphOutline, OutlineKey};
+use crate::sfnt::SfntFace;
 
 pub use crate::font_id::{FontId, FontIdAllocator};
 
@@ -406,6 +407,18 @@ pub trait TextSystem: Send + Sync + 'static {
     fn glyph_outline(&self, key: &OutlineKey) -> Result<GlyphOutline, TextError> {
         let _ = key;
         Err(TextError::UnsupportedOutline)
+    }
+
+    /// Borrow the decoded [`SfntFace`] backing `font_id`, if this
+    /// implementation has one registered for it. The compatibility default
+    /// returns `None` — raster-only implementations (the bitmap path) have no
+    /// SFNT face to expose. [`CompositeTextSystem`](crate::CompositeTextSystem)
+    /// overrides this so a `&dyn TextSystem` caller (a renderer's component
+    /// call site, #171 Part B.2) can obtain a concrete face to drive
+    /// `mkui-vector2d`'s SFNT-to-Slug extraction bridge without downcasting.
+    fn sfnt_face(&self, font_id: FontId) -> Option<&SfntFace> {
+        let _ = font_id;
+        None
     }
 
     /// List the human-readable family names this implementation exposes.

@@ -79,13 +79,14 @@ fn build_scene() -> mkui_wgpu::Scene {
     let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
     // Place the Slug line with its baseline near the top of the window.
     for run in &runs {
-        for glyph in place_slug_run(
+        let result = place_slug_run(
             &sys,
             &mut cache,
             run,
             [48.0, 140.0],
             Color::rgb(0.2, 0.9, 0.5),
-        ) {
+        );
+        for glyph in result.glyphs {
             scene.slug_glyph(glyph);
         }
     }

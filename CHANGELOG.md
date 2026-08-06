@@ -8,6 +8,56 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Component Slug-lane rendering path (`mikbry/ui#171`, Part B.2 of `#165`'s
+  Sprint 8 tail).** `mkui-wgpu`'s component call site — `slug_text::place_slug_run`
+  plus a new `slug_text::expand_slug_text` — now consumes Part B.1's
+  `extract_slug_glyph` bridge, and `Renderer` can route real `mkui-core`/
+  `mkui-wgpu` widget text (Button/Card/Label/Heading/View-Text — every widget
+  that renders text lowers to exactly one `Primitive::Text` seam, so this one
+  call site covers the whole set) through the Slug lane instead of the bitmap
+  lane.
+  - **`mkui-text`**: `TextSystem` gained a default-`None` `sfnt_face(&self,
+    FontId) -> Option<&SfntFace>` method (mirroring the existing crate-private
+    `FontProvider::as_sfnt_face` pattern) so a `&dyn TextSystem` caller can
+    obtain a concrete `SfntFace` for Part B.1's bridge without downcasting;
+    `CompositeTextSystem` overrides it (replacing its prior inherent method of
+    the same name).
+  - **`mkui-wgpu::slug_text::place_slug_run`**: now extracts each glyph
+    through `extract_slug_glyph` when the text system exposes an `SfntFace`
+    for the run's font — cache-aware via `SlugBlobCache::encode_with_units_per_em`
+    (through the bridge), so a warm cache never re-decodes. A glyph whose
+    extraction fails with a typed `TextExtractionError` (composite glyph,
+    non-quadratic curve, missing outline data) is now returned as a
+    `BitmapFallbackGlyph` instead of being silently dropped — the return type
+    changed from `Vec<PlacedSlugGlyph>` to `SlugRunResult { glyphs,
+    bitmap_fallback }` to carry both.
+  - **`mkui-wgpu::slug_text::expand_slug_text`**: the new component call site.
+    Rewrites a `Scene`'s primitives, laying out each `Primitive::Text` against
+    a caller-selected `FontId` and expanding any `TextRenderClass::Slug` run
+    into `Primitive::SlugGlyph`s. Both the composite router's own layout-time
+    bitmap fallback (e.g. a character the face doesn't map) and any per-glyph
+    extraction failure degrade to a narrowed, repositioned bitmap
+    `Primitive::Text` — the widget as a whole always renders, no user-facing
+    failure. A `Primitive::Text` that resolves to no Slug run at all (no font
+    selected, or every character falls back) is pushed through **unchanged**,
+    so the no-font-selected/no-`slug`-feature path stays byte-identical to the
+    pre-#171 bitmap-only renderer.
+  - **`Renderer`**: gained `set_slug_font(Option<FontId>)` (`slug` feature
+    only) and a persistent `SlugBlobCache`; `render()` runs `expand_slug_text`
+    over the scene's primitives before command classification when a font is
+    selected. Defaults to `None` — every existing wgpu-with-`slug` render pass
+    is unaffected until a caller opts a registered font in (B.3's example
+    integration).
+  - **Scope decision**: `mkui-core` itself is unchanged and gained no new
+    tests — it is backend-neutral by design (#64's one-directional layering,
+    ADR 0006's one-backend invariant), so giving it `mkui-vector2d`/`mkui-wgpu`
+    dependencies to route text would violate the architecture the rest of
+    `#165` depends on. The routing lives in `mkui-wgpu`, the crate that already
+    owns the wgpu-backend + `slug`-feature boundary. Example integration
+    (`atoms-on-wgpu`, `native-showcase` opting a font in via `set_slug_font`)
+    and golden-image regression tests against the extended reference adapter
+    are Part B.3 / B.4, per `#171`'s own non-goals.
+
 - **SFNT outline → `SlugGlyph` extraction bridge (`mikbry/ui#169`, Part B.1 of
   `#165`'s Sprint 8 tail).** `mkui-vector2d::sfnt_bridge::extract_slug_glyph`
   is the first fallible, reusable bridge from `mkui-text`'s narrow SFNT
