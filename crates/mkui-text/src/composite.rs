@@ -733,15 +733,6 @@ impl CompositeTextSystem {
             .map_err(|_| SfntRegisterError::FontIdExhausted)
     }
 
-    /// Resolved face metrics + decoded glyph count for a registered SFNT face,
-    /// or `None` if `font_id` is unknown or not an SFNT provider. Lets a caller
-    /// inspect the decoded face (units-per-em, glyph count, family) without
-    /// re-parsing the bytes.
-    pub fn sfnt_face(&self, font_id: FontId) -> Option<&SfntFace> {
-        let record = self.registry.reverse.get(&font_id)?;
-        self.providers[record.provider_id.0].as_sfnt_face()
-    }
-
     /// Render lane selected for a registered face, or `None` if `font_id` is
     /// unknown. Render class is a property of font/style resolution — not a
     /// renderer-global switch.
@@ -889,6 +880,15 @@ impl TextSystem for CompositeTextSystem {
             .get(&key.font_id)
             .ok_or(TextError::UnknownFont(key.font_id))?;
         self.providers[record.provider_id.0].outline_local(record.local, key)
+    }
+
+    /// Resolved face metrics + decoded glyph count for a registered SFNT face,
+    /// or `None` if `font_id` is unknown or not an SFNT provider. Lets a caller
+    /// inspect the decoded face (units-per-em, glyph count, family) without
+    /// re-parsing the bytes.
+    fn sfnt_face(&self, font_id: FontId) -> Option<&SfntFace> {
+        let record = self.registry.reverse.get(&font_id)?;
+        self.providers[record.provider_id.0].as_sfnt_face()
     }
 
     fn families(&self) -> Vec<String> {

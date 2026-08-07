@@ -68,6 +68,10 @@ use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
 
 #[cfg(feature = "slug")]
+use mkui_text::FontId;
+#[cfg(feature = "slug")]
+use mkui_vector2d::{SlugBlobCache, SlugConfig};
+#[cfg(feature = "slug")]
 use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
 
 /// One frame's per-command GPU draw resource, built before the render pass so
@@ -216,6 +220,19 @@ pub struct Renderer {
     /// builds never construct it (v0.9.3 bitmap-only behavior).
     #[cfg(feature = "slug")]
     slug_adapter: SlugAdapter,
+    /// The registered face component text routes through the Slug lane
+    /// against, or `None` to keep every component render pass on the bitmap
+    /// lane (#171 Part B.2). Set via [`Renderer::set_slug_font`]; `None` by
+    /// default, so the wgpu-with-`slug` build stays byte-identical to the
+    /// pre-#171 bitmap-only renderer until a caller opts a font in.
+    #[cfg(feature = "slug")]
+    slug_font_id: Option<FontId>,
+    /// Persistent Slug blob cache backing #171 Part B.2's component call site
+    /// ([`crate::slug_text::expand_slug_text`]). Held across frames so a warm
+    /// cache never re-decodes or re-encodes an already-seen glyph (#171
+    /// acceptance: "cache-hit path preserved").
+    #[cfg(feature = "slug")]
+    slug_text_cache: SlugBlobCache,
 }
 
 impl Renderer {
@@ -332,7 +349,23 @@ impl Renderer {
             msaa_color_view,
             #[cfg(feature = "slug")]
             slug_adapter,
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
+            #[cfg(feature = "slug")]
+            slug_text_cache: SlugBlobCache::new(SlugConfig::new(16, 16, 1)),
         })
+    }
+
+    /// Select the registered [`FontId`] component text (every widget renders
+    /// through exactly one [`Primitive::Text`](crate::Primitive::Text) seam)
+    /// should route through the Slug lane against, or `None` to keep the
+    /// bitmap lane as the sole path (#171 Part B.2's feature-gated
+    /// selection). Per glyph/run that still can't be drawn as Slug — the
+    /// font has no outline for it, or extraction fails — falls back to the
+    /// bitmap lane automatically; the widget as a whole always renders.
+    #[cfg(feature = "slug")]
+    pub fn set_slug_font(&mut self, font_id: Option<FontId>) {
+        self.slug_font_id = font_id;
     }
 
     /// Effective MSAA sample count picked at adapter probe time. `1` when
@@ -415,7 +448,30 @@ impl Renderer {
         // to a single buffer + draw — byte-identical to the v0.9.3 path.
         // Triangles are projected against the logical-pixel viewport, NOT the
         // physical surface config (#97, ADR 0006 §"Viewport units").
-        let commands = build_render_commands(&scene.primitives, classify_primitive);
+        //
+        // #171 Part B.2: when a Slug font is selected, expand every
+        // component's `Primitive::Text` into Slug + (per-run/per-glyph
+        // fallback) bitmap primitives *before* command classification, so
+        // the ordered render path below sees the same primitive shapes it
+        // already knows how to draw. With no font selected (the default) or
+        // the `slug` feature off, `primitives` is exactly `scene.primitives`
+        // — byte-identical to the pre-#171 bitmap-only renderer.
+        #[cfg(feature = "slug")]
+        let expanded_primitives = self.slug_font_id.map(|font_id| {
+            crate::slug_text::expand_slug_text(
+                &scene.primitives,
+                font_id,
+                text_system,
+                &mut self.slug_text_cache,
+            )
+        });
+        #[cfg(feature = "slug")]
+        let primitives: &[crate::types::Primitive] =
+            expanded_primitives.as_deref().unwrap_or(&scene.primitives);
+        #[cfg(not(feature = "slug"))]
+        let primitives: &[crate::types::Primitive] = &scene.primitives;
+
+        let commands = build_render_commands(primitives, classify_primitive);
         let mut lane_draws: Vec<LaneDraw> = Vec::new();
 
         // The frame's physical-pixels-per-logical-pixel ratio, derived from
@@ -433,7 +489,7 @@ impl Renderer {
         // buffer, or `None` when it yields no geometry.
         let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
             let triangles =
-                tessellate_primitives(&scene.primitives[range], text_system, device_pixel_ratio);
+                tessellate_primitives(&primitives[range], text_system, device_pixel_ratio);
             let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
             if vertices.is_empty() {
                 return None;
@@ -471,7 +527,7 @@ impl Renderer {
                     // emits a SlugGlyphs command, so this arm cannot run.
                     #[cfg(feature = "slug")]
                     {
-                        let glyphs = scene_slug_glyphs(&scene.primitives[range]);
+                        let glyphs = scene_slug_glyphs(&primitives[range]);
                         // Slug glyphs are placed in the same logical-pixel
                         // viewport as everything else (#97, ADR 0006), but
                         // dilation (#157 Phase 2 step 4) and the small-text

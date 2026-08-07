@@ -191,7 +191,7 @@ fn tessellate_icon(triangles: &mut Vec<GuiTriangle>, icon: &Icon) {
     push_rect(triangles, inset, tint);
 }
 
-fn map_align(align: TextAlign) -> MkuiTextAlign {
+pub(crate) fn map_align(align: TextAlign) -> MkuiTextAlign {
     match align {
         TextAlign::Start => MkuiTextAlign::Start,
         TextAlign::Center => MkuiTextAlign::Center,
