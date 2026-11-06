@@ -112,6 +112,12 @@ pub use types::{
     Scene, Shadow, Size, StackCursor, StackStyle, Stroke, Text, TextAlign, TextBuffer, TextStyle,
 };
 
+// #139: the scene-level VectorPath primitive's placement struct. Gated the
+// same as the `Primitive::VectorPath` variant itself (it's the only
+// consumer-facing way to construct one).
+#[cfg(feature = "slug")]
+pub use types::PlacedVectorPath;
+
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,

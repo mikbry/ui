@@ -72,7 +72,10 @@ use mkui_text::FontId;
 #[cfg(feature = "slug")]
 use mkui_vector2d::{SlugBlobCache, SlugConfig};
 #[cfg(feature = "slug")]
-use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
+use mkui_vector2d_wgpu::{
+    PathPaint, PlacedSlugGlyph, PlacedStroke as AdapterPlacedStroke,
+    PlacedVectorPath as AdapterPlacedVectorPath, PreparedSlug, SlugAdapter,
+};
 
 /// One frame's per-command GPU draw resource, built before the render pass so
 /// it outlives the borrow. The renderer walks these in `Scene::primitives`
@@ -546,6 +549,30 @@ impl Renderer {
                         }
                     }
                 }
+                RenderCommand::VectorPath(_) => {
+                    // Flush any open triangle run so the vector paths
+                    // composite over exactly the primitives that preceded
+                    // them — same invariant as the Slug glyph arm above.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    // Without the `slug` feature `classify_primitive` never
+                    // emits a VectorPath command, so this arm cannot run.
+                    #[cfg(feature = "slug")]
+                    {
+                        let paths = scene_vector_paths(&primitives[range]);
+                        let paints = vector_path_paints(&paths);
+                        if let Some(prepared) = self.slug_adapter.prepare_path_paints(
+                            &self.device,
+                            &self.queue,
+                            [scene.viewport.width, scene.viewport.height],
+                            device_pixel_ratio,
+                            &paints,
+                        ) {
+                            lane_draws.push(LaneDraw::Slug(prepared));
+                        }
+                    }
+                }
             }
         }
         if let Some(open) = pending_triangles.take() {
@@ -681,6 +708,72 @@ fn scene_slug_glyphs(primitives: &[crate::Primitive]) -> Vec<PlacedSlugGlyph> {
             _ => None,
         })
         .collect()
+}
+
+/// Collect the [`crate::types::PlacedVectorPath`]s carried by a primitive
+/// slice, in order (#139). This is the scene-level seam between the renderer
+/// and `Primitive::VectorPath` — parallel to [`scene_slug_glyphs`] above.
+/// Pure collection: unlike `scene_slug_glyphs` (whose `PlacedSlugGlyph::color`
+/// is already a raw `[f32; 4]` with no further type to lower), color
+/// linearization and the local-[`Stroke`](crate::types::Stroke)-to-adapter
+/// lowering happen downstream in [`vector_path_paints`], since this
+/// function's return type is the scene primitive's own `Color`-typed struct
+/// (keeping it a true round-trip: primitive slice → collected paths, with no
+/// transformation, mirroring Sprint 7's `scene_slug_glyphs` test shape).
+#[cfg(feature = "slug")]
+fn scene_vector_paths(primitives: &[crate::Primitive]) -> Vec<crate::types::PlacedVectorPath> {
+    primitives
+        .iter()
+        .filter_map(|p| match p {
+            crate::Primitive::VectorPath(placed) => Some(placed.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Lower scene-level [`crate::types::PlacedVectorPath`]s to the adapter's
+/// ordered [`PathPaint`] list (#139), preserving scene order: each
+/// primitive's fill (if any) is pushed before its own stroke (if any), so a
+/// primitive's stroke never paints over a *later* primitive's fill when
+/// several vector paths coalesce into one `VectorPath` command — see
+/// [`SlugAdapter::prepare_path_paints`]'s ordering contract, which this
+/// function exists to satisfy (`prepare_paths`'s fills-then-strokes grouping
+/// would reorder an interleaved run otherwise).
+///
+/// Colors are **linearized here**, at the render boundary, exactly as
+/// [`scene_slug_glyphs`] does for Slug glyphs — `fill_color`/`stroke_color`
+/// are authored sRGB-perceptual and the Slug lane composites into the linear
+/// intermediate (ADR 0006). `stroke`'s width/caps/joins/dash pass straight
+/// through unchanged to [`AdapterPlacedStroke`] — no local reinterpretation of
+/// stroke units; `width_px` is already in the path's own unit space, scaled
+/// to screen pixels by `scale_px_per_unit` downstream exactly as the fill
+/// geometry is (see `mkui_vector2d_wgpu::PlacedStroke`'s own docs). An item
+/// with neither `fill_color` nor `stroke` set paints nothing and contributes
+/// no paint to the result (checked here, not deferred to
+/// `encode_fill`/`encode_stroke`, though those would also skip it).
+#[cfg(feature = "slug")]
+fn vector_path_paints(paths: &[crate::types::PlacedVectorPath]) -> Vec<PathPaint> {
+    let mut paints = Vec::with_capacity(paths.len() * 2);
+    for placed in paths {
+        if let Some(fill_color) = placed.fill_color {
+            paints.push(PathPaint::Fill(AdapterPlacedVectorPath {
+                path: (*placed.path).clone(),
+                origin_px: placed.origin_px,
+                scale_px_per_unit: placed.scale_px_per_unit,
+                color: fill_color.to_linear_rgba(),
+            }));
+        }
+        if let Some(stroke) = &placed.stroke {
+            paints.push(PathPaint::Stroke(AdapterPlacedStroke {
+                path: (*placed.path).clone(),
+                stroke: stroke.clone(),
+                origin_px: placed.origin_px,
+                scale_px_per_unit: placed.scale_px_per_unit,
+                color: placed.stroke_color.to_linear_rgba(),
+            }));
+        }
+    }
+    paints
 }
 
 /// Switch the `CAMetalLayer` backing `surface` into synchronous-present mode
@@ -1157,6 +1250,123 @@ mod tests {
             crate::Primitive::SlugGlyph(g1.clone()),
         ];
         assert_eq!(scene_slug_glyphs(&prims), vec![g0, g1]);
+    }
+
+    #[cfg(feature = "slug")]
+    fn test_vector_path(fill_color: f32) -> crate::PlacedVectorPath {
+        use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, Vec2, VectorPath};
+        use std::sync::Arc;
+
+        crate::PlacedVectorPath {
+            path: Arc::new(VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+                    PathCommand::Close,
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            )),
+            stroke: None,
+            stroke_color: crate::Color::rgba(0.0, 0.0, 0.0, 1.0),
+            fill_color: Some(crate::Color::rgba(fill_color, fill_color, fill_color, 1.0)),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+        }
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn scene_vector_paths_collects_only_vector_path_primitives_in_order() {
+        // Interleaved with a non-VectorPath primitive: the seam returns
+        // exactly the vector paths, in scene order, and nothing else — the
+        // same regression guard `scene_slug_glyphs`'s test above provides,
+        // parallel for the #139 lane. A pure round-trip: no color conversion
+        // happens here (that's `vector_path_paints`'s job).
+        let p0 = test_vector_path(0.0);
+        let p1 = test_vector_path(1.0);
+        let quad = crate::Primitive::Quad(crate::Quad {
+            rect: crate::Rect::new(crate::Point::new(0.0, 0.0), crate::Size::new(1.0, 1.0)),
+            fill: crate::Color::rgba(1.0, 1.0, 1.0, 1.0),
+            corner_radii: crate::CornerRadii::all(0.0),
+            stroke: None,
+        });
+        let prims = vec![
+            crate::Primitive::VectorPath(p0.clone()),
+            quad,
+            crate::Primitive::VectorPath(p1.clone()),
+        ];
+        assert_eq!(scene_vector_paths(&prims), vec![p0, p1]);
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn vector_path_paints_orders_fill_before_stroke_per_primitive_and_linearizes_color() {
+        use mkui_vector2d_wgpu::{LineCap, LineJoin, Stroke};
+
+        // Primitive A carries both a fill and a stroke; primitive B is
+        // fill-only. The ordered output must be [A.fill, A.stroke, B.fill] —
+        // fill-before-stroke within a primitive, primitives in scene order —
+        // never [A.fill, B.fill, A.stroke] (`prepare_paths`'s
+        // fills-then-strokes grouping, which this function exists to avoid).
+        let fill_and_stroke = crate::PlacedVectorPath {
+            stroke: Some(Stroke {
+                width_px: 4.0,
+                cap: LineCap::Round,
+                join: LineJoin::Round,
+                dash: None,
+            }),
+            stroke_color: crate::Color::rgba(0.5, 0.5, 0.5, 1.0),
+            ..test_vector_path(0.5)
+        };
+        let fill_only = test_vector_path(1.0);
+
+        let paints = vector_path_paints(&[fill_and_stroke, fill_only]);
+        assert_eq!(
+            paints.len(),
+            3,
+            "fill+stroke primitive emits 2 paints, fill-only emits 1"
+        );
+        assert!(
+            matches!(paints[0], PathPaint::Fill(_)),
+            "primitive A's fill must come first"
+        );
+        assert!(
+            matches!(paints[1], PathPaint::Stroke(_)),
+            "primitive A's stroke must come right after its own fill"
+        );
+        assert!(
+            matches!(paints[2], PathPaint::Fill(_)),
+            "primitive B's fill must come last, not grouped with A's fill"
+        );
+
+        // sRGB 0.5 linearizes to ~0.214 (the canonical mid-gray value, same
+        // constant `Color::to_linear_rgba`'s own unit test asserts) — proves
+        // the render boundary actually converts, not just passes through.
+        let PathPaint::Fill(fill) = &paints[0] else {
+            unreachable!()
+        };
+        assert!((fill.color[0] - 0.214_041_14).abs() < 1e-5);
+        let PathPaint::Stroke(stroke) = &paints[1] else {
+            unreachable!()
+        };
+        assert!((stroke.color[0] - 0.214_041_14).abs() < 1e-5);
+        // `stroke` passes through unchanged — width/caps/joins are not
+        // reinterpreted at this seam.
+        assert_eq!(stroke.stroke.width_px, 4.0);
+        assert_eq!(stroke.stroke.cap, LineCap::Round);
+        assert_eq!(stroke.stroke.join, LineJoin::Round);
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn vector_path_paints_skips_items_with_neither_fill_nor_stroke() {
+        let nothing = crate::PlacedVectorPath {
+            fill_color: None,
+            stroke: None,
+            ..test_vector_path(1.0)
+        };
+        assert!(vector_path_paints(&[nothing]).is_empty());
     }
 
     #[test]
