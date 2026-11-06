@@ -405,9 +405,8 @@ breaking changes can land on minor bumps).
   `cargo-deny`+`cargo-audit`). Fixed every broken intra-doc link the new gate
   surfaced on current `main`:
   - Private items referenced from public docs, rewritten as plain code spans
-    instead of link syntax: `mkui-text` (`sfnt.rs`'s `RegistryError`
-    reference folded into `composite.rs`'s `SfntRegisterError` doc, plus
-    `SfntProvider`), `mkui-vector2d::bezier` (`general_sin_bound`, `DVec2`,
+    instead of link syntax: `mkui-text` (`RegistryError` in `composite.rs`,
+    `SfntProvider` in `sfnt.rs`), `mkui-vector2d::bezier` (`general_sin_bound`, `DVec2`,
     `MAX_SUBDIVISION_DEPTH`, `tangent_intersection_control`,
     `stationary_sin_bound`, `subdivide_pieces`), `mkui-vector2d-wgpu::lib`
     (`pack`, `half_pixel_dilation_units`), and `mkui-wgpu::app`
