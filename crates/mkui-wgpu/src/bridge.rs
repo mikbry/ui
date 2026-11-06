@@ -4,7 +4,7 @@
 //! Built-in node kinds (`View` / `Text` / `Button`) render through the
 //! fixed paths in [`crate::walker`]; only `Custom` dispatches through the
 //! registry, keyed by `type_name`. The shape mirrors
-//! [`mkui_web::render::WebRendererRegistry`] — backend-local trait
+//! `mkui_web::render::WebRendererRegistry` — backend-local trait
 //! placement per ADR 0006 + Codex round-7 Q1 ratification (the wgpu
 //! renderer trait stays in `mkui-wgpu`, not in `mkui-runtime` or
 //! `mkui-core`).

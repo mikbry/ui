@@ -27,10 +27,11 @@
 //!
 //! ## Identity boundary
 //!
-//! [`SfntFace`] is a pure decoder — it never mints a [`FontId`]. The provider
-//! adapter ([`SfntProvider`]) plugs into #62's registry, which owns the shared
-//! [`FontIdAllocator`](crate::FontIdAllocator) and is the single authority for
-//! the public [`FontId`] / [`TextRenderClass`] of a face. Glyphs the face lacks
+//! [`SfntFace`] is a pure decoder — it never mints a [`FontId`](crate::FontId).
+//! The provider adapter (`SfntProvider`) plugs into #62's registry, which owns
+//! the shared [`FontIdAllocator`](crate::FontIdAllocator) and is the single
+//! authority for the public [`FontId`](crate::FontId) /
+//! [`TextRenderClass`](crate::TextRenderClass) of a face. Glyphs the face lacks
 //! are split out at **layout time** into registry-validated bitmap-fallback
 //! runs — never dropped, never silently substituted after layout.
 

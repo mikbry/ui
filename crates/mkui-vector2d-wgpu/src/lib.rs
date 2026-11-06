@@ -139,7 +139,7 @@ pub struct PlacedSlugGlyph {
     /// Straight-alpha RGBA fill colour in `[0, 1]`.
     pub color: [f32; 4],
     /// #157 Phase 3: the text-layout caller's cap-height proxy for this
-    /// glyph (its run's nominal font size), used by [`pack`] to gate the
+    /// glyph (its run's nominal font size), used by `pack` to gate the
     /// below-`SMALL_TEXT_CAP_HEIGHT_PX` baseline snap. Producers with no
     /// natural cap-height concept (hand-authored fixtures, arbitrary
     /// [`PlacedVectorPath`]/[`PlacedStroke`] fills) pass `f32::INFINITY` to
@@ -474,7 +474,7 @@ impl SlugAdapter {
     /// `device_pixel_ratio` is the frame's physical-pixels-per-logical-pixel
     /// ratio (`1.0` for a caller with no logical/physical split, e.g. an
     /// offscreen render whose `viewport_px` already is the physical target) —
-    /// see [`half_pixel_dilation_units`]. Returns `None` when there is
+    /// see `half_pixel_dilation_units`. Returns `None` when there is
     /// nothing drawable (no glyph carried any curves) so the caller can skip
     /// the draw entirely. Borrows device + queue only.
     pub fn prepare(

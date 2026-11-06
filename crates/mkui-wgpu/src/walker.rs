@@ -3,7 +3,7 @@
 //! collects hit-test data for pointer routing.
 //!
 //! The walker is the wgpu-side equivalent of
-//! [`mkui_web::render::render_tree`] (per ADR 0006): it consumes the
+//! `mkui_web::render::render_tree` (per ADR 0006): it consumes the
 //! runtime tree directly, emits [`crate::Primitive`]s through the
 //! tessellation pipeline already wired up by the v0.4.x tessellator port
 //! (ADR 0004), and collects a per-frame `Vec<HitTestEntry>` for the

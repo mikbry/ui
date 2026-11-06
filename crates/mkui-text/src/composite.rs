@@ -262,7 +262,7 @@ pub(crate) trait FontProvider: Send + Sync + 'static {
 
 /// Public error from [`CompositeTextSystem::register_sfnt_face`].
 ///
-/// Keeps the crate-private [`RegistryError`] off the public surface: the only
+/// Keeps the crate-private `RegistryError` off the public surface: the only
 /// registry failure reachable during SFNT registration is allocator exhaustion
 /// (the bitmap fallback target is always registered and generation is never
 /// bumped here), surfaced as [`FontIdExhausted`](Self::FontIdExhausted).

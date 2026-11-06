@@ -28,11 +28,11 @@
 //! cubic's derivative `B′(t)` is a quadratic Bézier, a quadratic candidate's
 //! derivative `Q′(t)` is linear, and `cross(B′, Q′)` / `dot(B′, Q′)` are each
 //! an *exact* cubic polynomial (product of a quadratic and a linear Bézier
-//! function). [`general_sin_bound`] finds their global extrema exactly, via
+//! function). `general_sin_bound` finds their global extrema exactly, via
 //! the cubic's (quadratic) derivative roots — not a loose coefficient-hull
 //! bound, which Codex round-5's investigation showed is too weak to certify
 //! near a genuine high-curvature feature. Subdivision runs entirely in `f64`
-//! ([`DVec2`]) — Codex round-2 showed `f32` de Casteljau collapses control
+//! (`DVec2`) — Codex round-2 showed `f32` de Casteljau collapses control
 //! deltas into rounding noise before certification can succeed.
 //!
 //! # Certification targets the *emitted* `f32` quadratic
@@ -49,7 +49,7 @@
 //! # Control-point selection, not just depth
 //!
 //! `PrecisionUnderflow` is returned iff no `f32` chain within
-//! [`MAX_SUBDIVISION_DEPTH`] can honor the 1° bound — this depth cap is the
+//! `MAX_SUBDIVISION_DEPTH` can honor the 1° bound — this depth cap is the
 //! *only* trigger for that error; there is no heuristic pre-check that could
 //! false-positive (an earlier revision had one, and Codex round-5 found it
 //! over-rejected ordinary, well-resolved curves). But removing the pre-check
@@ -64,13 +64,13 @@
 //! amount of depth alone fixes it.
 //!
 //! The fix is a second, independent control-point candidate: the
-//! **tangent-line intersection** ([`tangent_intersection_control`]) —
+//! **tangent-line intersection** (`tangent_intersection_control`) —
 //! intersecting the ray from `p0` along `c1 − p0` with the ray from `p3`
 //! along `c2 − p3` — matches *both* endpoint tangent directions exactly (zero
 //! angular error at `u = 0` and `u = 1` by construction), leaving only the
 //! interior curvature mismatch to bound, typically far smaller than the
 //! averaged formula's error. `flatten` evaluates every viable candidate with
-//! [`general_sin_bound`] and keeps the tightest; a piece is emitted once
+//! `general_sin_bound` and keeps the tightest; a piece is emitted once
 //! *any* candidate certifies. This resolves the round-5 reproducer at depth
 //! 7 with true error ~0.02° (down from the averaged formula's 1.2°) — see
 //! `codex_r5_normal_scale_cubic_certifies_not_underflow`. `PrecisionUnderflow`
@@ -85,13 +85,13 @@
 //! A cubic with `c1 == p0` (or `c2 == p3`) has `B′ = 0` at that endpoint —
 //! common in real paths and *not* a tangent-flip cusp (Codex round-4's
 //! counterexample `(0,0), (0,0), (50,100), (100,0)` is a perfectly smooth
-//! arch). [`general_sin_bound`]'s denominator floor collapses for such pieces
+//! arch). `general_sin_bound`'s denominator floor collapses for such pieces
 //! (nothing on the `B′` side partially cancels the `Q′` hull term at the
 //! vanishing endpoint), but the derivative factors exactly: with `c1 == p0`,
 //! `B′(u) = u·ψ(u)` where `ψ(u) = 6(1−u)(c2−c1) + 3u(p3−c2)` is **linear**,
 //! so for `u > 0` the tangent direction is ψ's direction and the limit
 //! tangent at the stationary endpoint is `ψ(0)` — well-defined geometry, the
-//! direction toward the next distinct control point. [`stationary_sin_bound`]
+//! direction toward the next distinct control point. `stationary_sin_bound`
 //! dispatches on exact endpoint-stationarity and bounds `angle(ψ, Q′)`
 //! (linear vs linear: exact extrema of the resulting quadratic cross and dot
 //! polynomials) instead of `angle(B′, Q′)`. Stationary pieces use only the
@@ -137,7 +137,7 @@ pub const CUBIC_SUBDIVISION_TOLERANCE_DEG: f32 = 1.0;
 /// that. The cap bounds the work spent proving that.
 const MAX_SUBDIVISION_DEPTH: u32 = 48;
 
-/// Typed failure of [`subdivide_cubic`] / [`subdivide_pieces`].
+/// Typed failure of [`subdivide_cubic`] / `subdivide_pieces`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SubdivisionError {
     /// The emitted `f32` quadratic chain cannot honor the 1° tangent bound.

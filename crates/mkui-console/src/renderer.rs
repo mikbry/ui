@@ -1,7 +1,7 @@
 //! Terminal renderer used by the console backend.
 //!
-//! [`ConsoleRenderer`] is the console counterpart of [`mkui_web::renderer::WebRenderer`]
-//! and [`mkui_wgpu::renderer::WgpuRenderer`]: it owns the output surface
+//! [`ConsoleRenderer`] is the console counterpart of `mkui_web::renderer::WebRenderer`
+//! and `mkui_wgpu::renderer::WgpuRenderer`: it owns the output surface
 //! (`stdout` here) and exposes a small set of operations the higher-level
 //! [`crate::high_level::Mkui`] composes against.
 //!

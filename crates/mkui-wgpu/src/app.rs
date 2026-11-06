@@ -823,7 +823,7 @@ impl ApplicationHandler for WgpuApp {
     /// see ADR 0006 §"Resize-active redraw pump".
     ///
     /// This tick also advances `frame_counter` (#101), the monotonic clock the
-    /// active-resize-window guard ([`WgpuApp::in_active_resize_window`]) reads
+    /// active-resize-window guard (`WgpuApp::in_active_resize_window`) reads
     /// to expire the `CursorMoved` M2 bridge a fixed number of frames after the
     /// last `Resized` — keeping that bridge live across a fast gesture without
     /// redrawing on idle pointer motion afterward.

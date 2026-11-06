@@ -75,7 +75,7 @@ impl ColorTheme {
     }
 }
 
-/// Error returned by [`<ColorTheme as FromStr>::from_str`] when the input does
+/// Error returned by [`ColorTheme::from_str`] when the input does
 /// not match any known [`ColorTheme`] variant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParseColorThemeError {
