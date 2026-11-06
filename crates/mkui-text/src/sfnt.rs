@@ -358,11 +358,15 @@ impl SfntFace {
             match platform {
                 // Windows: UTF-16BE.
                 3 => {
+                    // `as_chunks` stabilized in Rust 1.88, below the workspace's
+                    // 1.87 MSRV — `chunks_exact` stays the MSRV-compatible choice.
+                    // `unknown_lints` keeps this buildable on clippy versions that
+                    // predate the `chunks_exact_to_as_chunks` lint (e.g. local dev
+                    // toolchains older than CI's floating `stable`).
+                    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
                     let units: Vec<u16> = raw
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|c| u16::from_be_bytes(*c))
+                        .chunks_exact(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
                         .collect();
                     if let Ok(s) = String::from_utf16(&units) {
                         return Ok(s);
