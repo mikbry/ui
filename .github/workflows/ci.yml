@@ -723,6 +723,9 @@ jobs:
   cargo-audit:
     name: cargo-audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       # `rustsec/audit-check` is the maintained successor to the archived
