@@ -6,6 +6,8 @@
 //! between native, web, and future backend shells.
 
 use std::fmt;
+#[cfg(feature = "slug")]
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
@@ -129,6 +131,61 @@ pub enum Primitive {
     /// stream (see [`crate::render_command`]).
     #[cfg(feature = "slug")]
     SlugGlyph(mkui_vector2d_wgpu::PlacedSlugGlyph),
+    /// An arbitrary vector path fill and/or stroke (#139), the Sprint 8 Wave 1
+    /// scene-level seam parallel to [`Primitive::SlugGlyph`]: consumer
+    /// components (button/card/dot, Wave 2 #140-#142) emit this instead of a
+    /// triangulated approximation. Drawn through the same `slug` coverage
+    /// pipeline, on the ordered command stream (see [`crate::render_command`]).
+    #[cfg(feature = "slug")]
+    VectorPath(PlacedVectorPath),
+}
+
+/// An arbitrary [`mkui_vector2d_wgpu::VectorPath`] fill and/or stroke, placed
+/// on screen (#139). Parallels [`PlacedSlugGlyph`](mkui_vector2d_wgpu::PlacedSlugGlyph) ---
+/// `path` is `Arc`-shared so re-pushing the same primitive across frames (a
+/// component's steady-state scene) only bumps a refcount at the *scene*
+/// level, never re-clones the path geometry there; the renderer still copies
+/// the geometry once per frame when lowering to the adapter's own
+/// `PlacedVectorPath`/`PlacedStroke` (#138's public types, which own their
+/// geometry rather than sharing it). The placement (`origin_px` /
+/// `scale_px_per_unit`) matches the Slug glyph lane so a path scales with
+/// zoom exactly like a glyph.
+///
+/// `stroke` and `fill_color` combine independently:
+/// - `stroke: None` --- fill only, painted with `fill_color` (must be `Some`).
+/// - `stroke: Some`, `fill_color: None` --- stroke only, painted with
+///   `stroke_color`.
+/// - `stroke: Some`, `fill_color: Some` --- fill *and* stroke, each with its
+///   own color (`fill_color` for the fill, `stroke_color` for the outline).
+/// - Both `stroke` and `fill_color` `None` paints nothing; the renderer skips
+///   it rather than treating it as an error.
+///
+/// Scope decision (#139): the issue's original sketch of this struct had no
+/// stroke color field, but Sprint 8 plan v2 §2.2 is explicit that `Stroke` is
+/// `mkui_vector2d::Stroke`'s cap/join/dash descriptor (held "alongside"
+/// `VectorPath`, not embedding a color) and that Sprint 8 "ships solid-color
+/// fill + solid-color stroke" --- a stroke needs a paint color independent of
+/// `fill_color` to satisfy that. `stroke_color` is the one field this struct
+/// adds beyond the issue's sketch to close that gap; it is read only when
+/// `stroke` is `Some`. `stroke.width_px` and the adapter's `scale_px_per_unit`
+/// placement scaling are unchanged from `mkui_vector2d_wgpu::PlacedStroke` ---
+/// no local reinterpretation of stroke units here.
+#[cfg(feature = "slug")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedVectorPath {
+    /// The backend-neutral fill/stroke-centreline geometry.
+    pub path: Arc<mkui_vector2d_wgpu::VectorPath>,
+    /// How to paint the path's outline (width, caps, joins, dash), or `None`
+    /// for fill-only.
+    pub stroke: Option<mkui_vector2d_wgpu::Stroke>,
+    /// The stroke's paint color. Ignored when `stroke` is `None`.
+    pub stroke_color: Color,
+    /// The fill color, or `None` for stroke-only.
+    pub fill_color: Option<Color>,
+    /// Screen-pixel position (y-down) of the path's origin `(0, 0)`.
+    pub origin_px: [f32; 2],
+    /// Pixels per path unit (placement scale).
+    pub scale_px_per_unit: f32,
 }
 
 /// Generic motion primitive emitted by atoms like `dot`. The renderer
@@ -498,6 +555,15 @@ impl Scene {
     #[cfg(feature = "slug")]
     pub fn slug_glyph(&mut self, glyph: mkui_vector2d_wgpu::PlacedSlugGlyph) {
         self.push(Primitive::SlugGlyph(glyph));
+    }
+
+    /// Record an arbitrary vector path fill/stroke (#139) at its scene
+    /// position. Draws on the same Slug lane as [`Scene::slug_glyph`], in the
+    /// order it was pushed relative to other primitives. Available only under
+    /// the `slug` feature.
+    #[cfg(feature = "slug")]
+    pub fn vector_path(&mut self, path: PlacedVectorPath) {
+        self.push(Primitive::VectorPath(path));
     }
 
     /// Record a non-`None` animation. Atoms emit at most one instance per

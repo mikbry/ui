@@ -41,6 +41,9 @@ pub enum RenderLane {
     BitmapText,
     /// Slug vector glyphs on the `mkui-vector2d-wgpu` coverage pipeline.
     SlugGlyphs,
+    /// Arbitrary vector path fills/strokes (#139) on the same
+    /// `mkui-vector2d-wgpu` coverage pipeline as [`RenderLane::SlugGlyphs`].
+    VectorPath,
 }
 
 /// One ordered draw command: a lane plus the contiguous `Scene::primitives`
@@ -54,6 +57,8 @@ pub enum RenderCommand {
     BitmapText(Range<usize>),
     /// Slug glyphs for `primitives[range]`.
     SlugGlyphs(Range<usize>),
+    /// Vector path fills/strokes (#139) for `primitives[range]`.
+    VectorPath(Range<usize>),
 }
 
 impl RenderCommand {
@@ -63,6 +68,7 @@ impl RenderCommand {
             RenderCommand::UiTriangles(_) => RenderLane::UiTriangles,
             RenderCommand::BitmapText(_) => RenderLane::BitmapText,
             RenderCommand::SlugGlyphs(_) => RenderLane::SlugGlyphs,
+            RenderCommand::VectorPath(_) => RenderLane::VectorPath,
         }
     }
 
@@ -71,7 +77,8 @@ impl RenderCommand {
         match self {
             RenderCommand::UiTriangles(r)
             | RenderCommand::BitmapText(r)
-            | RenderCommand::SlugGlyphs(r) => r.clone(),
+            | RenderCommand::SlugGlyphs(r)
+            | RenderCommand::VectorPath(r) => r.clone(),
         }
     }
 
@@ -80,6 +87,7 @@ impl RenderCommand {
             RenderLane::UiTriangles => RenderCommand::UiTriangles(range),
             RenderLane::BitmapText => RenderCommand::BitmapText(range),
             RenderLane::SlugGlyphs => RenderCommand::SlugGlyphs(range),
+            RenderLane::VectorPath => RenderCommand::VectorPath(range),
         }
     }
 }
@@ -96,7 +104,14 @@ pub fn classify_primitive(primitive: &Primitive) -> RenderLane {
         Primitive::Text(_) => RenderLane::BitmapText,
         #[cfg(feature = "slug")]
         Primitive::SlugGlyph(_) => RenderLane::SlugGlyphs,
-        _ => RenderLane::UiTriangles,
+        #[cfg(feature = "slug")]
+        Primitive::VectorPath(_) => RenderLane::VectorPath,
+        // Tessellated UI geometry — listed explicitly (not a wildcard) so a
+        // future `Primitive` variant that forgets a match arm here fails to
+        // compile instead of silently tessellating as a triangle (the #119
+        // stubbed-seam bug class this issue's exhaustive-match discipline
+        // guards against).
+        Primitive::Shadow(_) | Primitive::Quad(_) | Primitive::Icon(_) => RenderLane::UiTriangles,
     }
 }
 
@@ -231,6 +246,10 @@ mod tests {
         let cmd = RenderCommand::SlugGlyphs(2..5);
         assert_eq!(cmd.lane(), RenderLane::SlugGlyphs);
         assert_eq!(cmd.primitives(), 2..5);
+
+        let cmd = RenderCommand::VectorPath(3..7);
+        assert_eq!(cmd.lane(), RenderLane::VectorPath);
+        assert_eq!(cmd.primitives(), 3..7);
     }
 
     #[test]
@@ -284,6 +303,112 @@ mod tests {
                 RenderCommand::UiTriangles(0..1),
                 RenderCommand::SlugGlyphs(1..2),
                 RenderCommand::UiTriangles(2..3),
+            ]
+        );
+    }
+
+    #[cfg(feature = "slug")]
+    fn vector_path() -> Primitive {
+        use crate::types::PlacedVectorPath;
+        use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, Vec2, VectorPath};
+        use std::sync::Arc;
+
+        Primitive::VectorPath(PlacedVectorPath {
+            path: Arc::new(VectorPath::new(
+                vec![
+                    PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+                    PathCommand::LineTo(Vec2::new(0.0, 1.0)),
+                    PathCommand::Close,
+                ],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            )),
+            stroke: None,
+            stroke_color: Color::rgba(0.0, 0.0, 0.0, 1.0),
+            fill_color: Some(Color::rgba(1.0, 1.0, 1.0, 1.0)),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+        })
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn vector_path_primitive_routes_to_vector_path_lane_preserving_paint_order() {
+        // UI, VectorPath, UI — same no-global-regroup invariant as the Slug
+        // glyph test above, proven for the #139 lane.
+        let prims = vec![quad(), vector_path(), quad()];
+        let cmds = build_render_commands(&prims, classify_primitive);
+        assert_eq!(
+            cmds,
+            vec![
+                RenderCommand::UiTriangles(0..1),
+                RenderCommand::VectorPath(1..2),
+                RenderCommand::UiTriangles(2..3),
+            ]
+        );
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn vector_path_and_slug_glyph_are_distinct_adjacent_lanes() {
+        use mkui_vector2d::Vec2;
+        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use std::sync::Arc;
+
+        let slug = Primitive::SlugGlyph(PlacedSlugGlyph {
+            blob: Arc::new(SlugGlyph {
+                revision: 1,
+                bounds: GlyphBounds {
+                    x_min: 0.0,
+                    y_min: 0.0,
+                    x_max: 1.0,
+                    y_max: 1.0,
+                },
+                curves: vec![SlugCurve {
+                    p0: Vec2::new(0.0, 0.0),
+                    p1: Vec2::new(1.0, 1.0),
+                    p2: Vec2::new(1.0, 1.0),
+                }],
+                horizontal_bands: Vec::new(),
+                horizontal_curve_indices: Vec::new(),
+                vertical_bands: Vec::new(),
+                vertical_curve_indices: Vec::new(),
+            }),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+            color: [1.0, 1.0, 1.0, 1.0],
+            cap_height_px: f32::INFINITY,
+        });
+
+        // UI, VectorPath, SlugGlyph, VectorPath, UI — five ordered commands on
+        // three distinct lanes. Two different Slug-pipeline lanes (VectorPath,
+        // SlugGlyphs) sitting adjacent to each other must still split into
+        // separate commands — same pipeline is not a reason to coalesce
+        // across a lane boundary (only *identical* adjacent lanes coalesce).
+        let prims = vec![quad(), vector_path(), slug.clone(), vector_path(), quad()];
+        let cmds = build_render_commands(&prims, classify_primitive);
+        assert_eq!(
+            cmds,
+            vec![
+                RenderCommand::UiTriangles(0..1),
+                RenderCommand::VectorPath(1..2),
+                RenderCommand::SlugGlyphs(2..3),
+                RenderCommand::VectorPath(3..4),
+                RenderCommand::UiTriangles(4..5),
+            ]
+        );
+
+        // Non-adjacent same-lane runs (VectorPath, Slug, VectorPath) must not
+        // be globally regrouped into one VectorPath command either.
+        let prims_ab_a = vec![vector_path(), slug, vector_path()];
+        let cmds_ab_a = build_render_commands(&prims_ab_a, classify_primitive);
+        assert_eq!(
+            cmds_ab_a,
+            vec![
+                RenderCommand::VectorPath(0..1),
+                RenderCommand::SlugGlyphs(1..2),
+                RenderCommand::VectorPath(2..3),
             ]
         );
     }

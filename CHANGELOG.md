@@ -8,6 +8,66 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
+  substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
+  consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
+  parallel to Sprint 7 #66's `Primitive::SlugGlyph` seam:
+  - **`Primitive::VectorPath(PlacedVectorPath)`** (`types.rs`, `slug` feature) —
+    an arbitrary vector path fill and/or stroke placed on screen. `path` is
+    `Arc`-shared so re-pushing the same primitive across frames only bumps a
+    refcount at the scene level (the renderer still copies the geometry once
+    per frame into the adapter's own, non-shared `PlacedVectorPath`/
+    `PlacedStroke`); `stroke` is `mkui_vector2d::Stroke` (width/caps/joins/
+    dash, per `sprint-8-plan.md` §2.2), paired with its own `stroke_color`.
+    `fill_color`/`stroke` combine independently (fill only, stroke only, or
+    both, each with its own color) and `stroke: None, fill_color: None` paints
+    nothing (skipped, not an error). `Scene::vector_path` is the push helper,
+    mirroring `Scene::slug_glyph`.
+  - **`RenderCommand::VectorPath(Range<usize>)` + `RenderLane::VectorPath`**
+    (`render_command.rs`) — extends the ordered command stream from #66/#119;
+    `classify_primitive` routes `Primitive::VectorPath` here explicitly (not
+    through the UI-triangle wildcard fallback).
+  - **`scene_vector_paths` collection function** (`render/mod.rs`) — collects
+    the `PlacedVectorPath`s carried by a primitive slice, in order; round-trips
+    exactly (parallel to #66's `scene_slug_glyphs`).
+  - **`Renderer::render`** consumes `VectorPath` commands through the same
+    single ordered render pass that draws UI/BitmapText/SlugGlyph commands —
+    no "draw all vectors then all glyphs" bypass. Fill and stroke colors are
+    linearized at the render boundary (ADR 0006), matching the Slug glyph lane.
+  - **`mkui-vector2d-wgpu::SlugAdapter::prepare_path_paints` + `PathPaint`**
+    (new, #138's crate) — an order-preserving sibling to `prepare_paths`: the
+    existing `prepare_paths` packs all fills then all strokes, which would
+    silently reorder an interleaved fill/stroke run when several `VectorPath`
+    primitives coalesce into one command (primitive A's stroke painting over
+    primitive B's fill even though B is later in scene order). `prepare_paths`
+    was kept unchanged for its existing non-interleaved callers;
+    `prepare_path_paints` is the #139 render lane's entry point.
+  - **Exhaustive `RenderCommand` match** updated at every dispatch site:
+    `RenderCommand::lane`/`primitives`/`from_lane`, `tessellate_primitives`
+    (no-op arm — vector paths never tessellate to triangles), the production
+    `Renderer::render` loop, and the #67 GPU acceptance harness's defensive
+    exhaustive match (`sfnt_slug_gpu.rs`) — grep-verifiable, no `_ => {}`
+    catch-all on `RenderCommand` anywhere. `classify_primitive` (the one
+    `Primitive`-level, not `RenderCommand`-level, site) is also now exhaustive
+    over every variant (`Shadow`/`Quad`/`Icon` listed explicitly) instead of a
+    trailing `_ => UiTriangles` wildcard, closing the one spot where a future
+    primitive variant could have silently fallen through to the triangle lane
+    with no compile error (the #119 stubbed-seam bug class).
+  - **Cross-lane GPU test** (`render/slug_gpu.rs`) — a real `Scene` carrying
+    both a `Primitive::VectorPath` and a `Primitive::SlugGlyph` over the same
+    screen region, routed through the real `build_render_commands` +
+    `scene_slug_glyphs`/`scene_vector_paths` seam, asserts the later primitive
+    wins the overlap in both scene orders (Sprint 7 #67/#120 cross-provider
+    pattern applied to the two Slug-pipeline lanes).
+  - **Scope decision:** the issue's original sketch of `PlacedVectorPath` had
+    no stroke color field, but `sprint-8-plan.md` §2.2 requires `Stroke` to be
+    `mkui_vector2d::Stroke`'s cap/join/dash descriptor held *alongside*
+    `VectorPath` (not embedding a color) and requires Sprint 8 to ship
+    "solid-color fill + solid-color stroke." `stroke_color` is the one field
+    this struct adds beyond the issue's sketch to satisfy that — it is read
+    only when `stroke` is `Some`. Everything else (width/caps/joins/dash
+    units, placement scale) passes straight through to the adapter unchanged;
+    no local reinterpretation of stroke units.
 - **Component Slug-lane rendering path (`mikbry/ui#171`, Part B.2 of `#165`'s
   Sprint 8 tail).** `mkui-wgpu`'s component call site — `slug_text::place_slug_run`
   plus a new `slug_text::expand_slug_text` — now consumes Part B.1's

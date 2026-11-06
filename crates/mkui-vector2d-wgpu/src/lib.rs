@@ -189,6 +189,15 @@ pub struct PlacedStroke {
     pub color: [f32; 4],
 }
 
+/// One scene-ordered paint operation for [`SlugAdapter::prepare_path_paints`]
+/// (#139): either a fill or a stroke, carried as an owned item so a caller can
+/// build an order-preserving list across several placed paths.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathPaint {
+    Fill(PlacedVectorPath),
+    Stroke(PlacedStroke),
+}
+
 /// Band counts for encoding arbitrary paths/strokes. Glyphs carry a caller-tuned
 /// [`SlugConfig`]; a general path has no such context, so the adapter fixes a
 /// balanced default (finer than the 2×2 glyph golden, coarse enough to keep the
@@ -227,6 +236,20 @@ fn encode_stroke(placed: &PlacedStroke) -> Option<PlacedSlugGlyph> {
         // Stroked outlines have no cap-height concept either; opt out.
         cap_height_px: f32::INFINITY,
     })
+}
+
+/// Encode an ordered list of [`PathPaint`]s into drawable glyph records,
+/// preserving `paints`' order exactly (items that paint nothing are dropped,
+/// not reordered). Factored out of [`SlugAdapter::prepare_path_paints`] so
+/// the ordering contract is unit-testable without a `wgpu::Device`.
+fn encode_path_paints(paints: &[PathPaint]) -> Vec<PlacedSlugGlyph> {
+    paints
+        .iter()
+        .filter_map(|paint| match paint {
+            PathPaint::Fill(fill) => encode_fill(fill),
+            PathPaint::Stroke(stroke) => encode_stroke(stroke),
+        })
+        .collect()
 }
 
 /// GPU curve record matching the WGSL `Curve` struct (std430): three `vec2`s,
@@ -496,6 +519,18 @@ impl SlugAdapter {
     /// [`Self::prepare`]. Items that paint nothing (empty, non-finite, or a
     /// non-positive stroke width) are skipped; returns `None` when nothing is
     /// drawable. Borrows device + queue only.
+    ///
+    /// **Ordering note:** this draws every fill, then every stroke — `fills`
+    /// and `strokes` are each packed as one contiguous instanced batch, in
+    /// their own list order, not interleaved by caller-supplied order across
+    /// the two lists. That is fine when every fill and every stroke is
+    /// mutually non-overlapping (the common case: Wave 2's button/card/dot
+    /// draw ONE path per primitive). A caller that needs strict scene-order
+    /// compositing of interleaved fills and strokes across *several*
+    /// primitives in one draw (e.g. #139's `RenderCommand::VectorPath` lane
+    /// run, where primitive A's stroke must not paint over primitive B's fill
+    /// when B comes later in the scene) must use
+    /// [`Self::prepare_path_paints`] instead.
     pub fn prepare_paths(
         &self,
         device: &wgpu::Device,
@@ -515,6 +550,30 @@ impl SlugAdapter {
             queue,
             viewport_px,
             pack(&placed, device_pixel_ratio),
+        )
+    }
+
+    /// Encode and prepare an ordered mix of [`PlacedVectorPath`] fills and
+    /// [`PlacedStroke`]s (#139), preserving `paints`' exact order — unlike
+    /// [`Self::prepare_paths`], which groups all fills before all strokes.
+    /// Each item encodes to the shared [`SlugGlyph`] records exactly as
+    /// [`Self::prepare_paths`] does; only the instance ordering within the
+    /// packed batch differs, so a caller composing several scene primitives'
+    /// fill(s)/stroke(s) into one draw (the `mkui-wgpu` `VectorPath` render
+    /// lane) can interleave them to match scene paint order.
+    pub fn prepare_path_paints(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        viewport_px: [f32; 2],
+        device_pixel_ratio: f32,
+        paints: &[PathPaint],
+    ) -> Option<PreparedSlug> {
+        self.prepare_packed(
+            device,
+            queue,
+            viewport_px,
+            pack(&encode_path_paints(paints), device_pixel_ratio),
         )
     }
 
@@ -1137,6 +1196,63 @@ mod tests {
             encode_stroke(&stroke).is_none(),
             "a zero-width stroke paints nothing"
         );
+    }
+
+    // ---- Ordered fill/stroke paints (#139) ----------------------------------
+
+    #[test]
+    fn encode_path_paints_preserves_caller_order_across_fill_and_stroke() {
+        // A, B's fill, A's stroke, B — interleaved on purpose so a naive
+        // "all fills then all strokes" grouping (as `prepare_paths` does)
+        // would reorder this. `encode_path_paints` must not.
+        let a_fill = PlacedVectorPath {
+            color: [1.0, 0.0, 0.0, 1.0],
+            ..fill_triangle()
+        };
+        let b_fill = PlacedVectorPath {
+            color: [0.0, 1.0, 0.0, 1.0],
+            ..fill_triangle()
+        };
+        let a_stroke = PlacedStroke {
+            path: fill_triangle().path,
+            stroke: Stroke::new(2.0),
+            origin_px: [0.0, 0.0],
+            scale_px_per_unit: 1.0,
+            color: [0.0, 0.0, 1.0, 1.0],
+        };
+
+        let paints = vec![
+            PathPaint::Fill(a_fill.clone()),
+            PathPaint::Fill(b_fill.clone()),
+            PathPaint::Stroke(a_stroke.clone()),
+        ];
+        let glyphs = encode_path_paints(&paints);
+        let colors: Vec<[f32; 4]> = glyphs.iter().map(|g| g.color).collect();
+        assert_eq!(
+            colors,
+            vec![a_fill.color, b_fill.color, a_stroke.color],
+            "encoded glyph order must match the caller's paint order"
+        );
+    }
+
+    #[test]
+    fn encode_path_paints_skips_undrawable_items_without_reordering() {
+        let drawable = PlacedVectorPath {
+            color: [1.0, 1.0, 1.0, 1.0],
+            ..fill_triangle()
+        };
+        let empty = PlacedVectorPath {
+            path: VectorPath::new(
+                vec![PathCommand::MoveTo(Vec2::ZERO), PathCommand::Close],
+                FillRule::NonZero,
+                Bounds::new(Vec2::ZERO, Vec2::ZERO),
+            ),
+            ..fill_triangle()
+        };
+        let paints = vec![PathPaint::Fill(empty), PathPaint::Fill(drawable.clone())];
+        let glyphs = encode_path_paints(&paints);
+        assert_eq!(glyphs.len(), 1, "the undrawable empty fill is skipped");
+        assert_eq!(glyphs[0].color, drawable.color);
     }
 
     #[test]
