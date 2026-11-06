@@ -32,7 +32,6 @@
 // it makes the stronger promise and fails the build if any `unsafe` ever
 // appears (audit round 4 §3 Rec 1).
 #![forbid(unsafe_code)]
-
 // `#[pyclass(..., from_py_object)]` (PyNodeId, PyActionId below) expands to a
 // `FromPyObject` impl that calls `Clone::clone` on `&Self` unconditionally —
 // pyo3-macros-backend's own generated code (`extract_pyclass_with_clone` in
