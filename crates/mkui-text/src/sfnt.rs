@@ -359,8 +359,10 @@ impl SfntFace {
                 // Windows: UTF-16BE.
                 3 => {
                     let units: Vec<u16> = raw
-                        .chunks_exact(2)
-                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| u16::from_be_bytes(*c))
                         .collect();
                     if let Ok(s) = String::from_utf16(&units) {
                         return Ok(s);
