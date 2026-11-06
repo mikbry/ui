@@ -17,8 +17,7 @@
 //!   only place that talks to `crossterm` / `stdout`.
 //! - [`components`] — backend-specific projections of the
 //!   [`mkui_core::components`] tree ([`components::ConsoleButton`],
-//!   [`components::Line`], and the [`components::flatten_component`] /
-//!   [`components::collect_buttons_in`] walkers).
+//!   [`components::Line`], and the [`components::walk_tree`] walker).
 //! - [`high_level`] — the [`Mkui`] entry point that composes the three
 //!   above; this is what the bridge crate ([`mkui`]) re-exports.
 //! - [`prelude`] — one-glob import for end users.

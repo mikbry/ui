@@ -44,7 +44,7 @@ use mkui_runtime::{
 /// Marker trait for every renderable component.
 ///
 /// `Component` is `Any` so the [`LoweringRegistry`] can dispatch by
-/// [`TypeId`](std::any::TypeId). User-defined components implement
+/// [`TypeId`]. User-defined components implement
 /// `Component` (the marker) plus [`LowerToTree`] (the lowering) and
 /// register the type in the registry.
 pub trait Component: Any {

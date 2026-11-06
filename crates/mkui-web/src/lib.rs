@@ -30,12 +30,11 @@
 //!
 //! Dispatch goes through the [`render::WebRendererRegistry`] in [`render`].
 //! Downstream crates that ship their own components implement
-//! [`render::WebRenderable`] on their types and call
+//! [`render::CustomWebRenderable`] on their types and call
 //! [`Mkui::register`](high_level::Mkui::register) at app construction; the
 //! built-in [`mkui_core::components::View`] /
 //! [`Text`](mkui_core::components::Text) /
-//! [`Button`](mkui_core::components::Button) plus the in-crate
-//! [`ThemeSelector`](high_level::ThemeSelector) all flow through the same
+//! [`Button`](mkui_core::components::Button) all flow through the same
 //! path. See [`render`] for the full contract.
 //!
 //! ## What does *not* belong here

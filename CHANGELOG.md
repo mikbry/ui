@@ -393,6 +393,37 @@ breaking changes can land on minor bumps).
   bind-group/buffer-size mismatch like this one reaches Lavapipe undetected.
 
 ### Tooling
+- **`cargo doc -D warnings` CI gate closes the rustdoc-link drift gap (#127).**
+  The existing `test-doc` job runs `cargo test --workspace --doc --locked` but
+  never builds docs with `-D warnings`, so broken intra-doc links (links to
+  deleted/private/un-imported items) passed CI undetected — caught twice in
+  Sprint 7 (PR #110, PR #112) only by manual Codex grep. `.github/workflows/ci.yml`
+  adds a dedicated `cargo-doc` job (`RUSTDOCFLAGS: "-D warnings"`,
+  `cargo doc --workspace --no-deps --locked`, the same backend-pinned-example
+  `--exclude` set as `test-doc`/`clippy`/`test` per #102), mirroring the
+  one-job-per-hygiene-gate pattern (`fmt` / `clippy` / `msrv` /
+  `cargo-deny`+`cargo-audit`). Fixed every broken intra-doc link the new gate
+  surfaced on current `main`:
+  - Private items referenced from public docs, rewritten as plain code spans
+    instead of link syntax: `mkui-text` (`RegistryError` in `composite.rs`,
+    `SfntProvider` in `sfnt.rs`), `mkui-vector2d::bezier` (`general_sin_bound`, `DVec2`,
+    `MAX_SUBDIVISION_DEPTH`, `tangent_intersection_control`,
+    `stationary_sin_bound`, `subdivide_pieces`), `mkui-vector2d-wgpu::lib`
+    (`pack`, `half_pixel_dilation_units`), and `mkui-wgpu::app`
+    (`WgpuApp::in_active_resize_window`).
+  - Unresolved links: `mkui-text::sfnt` (`FontId`/`TextRenderClass` needed a
+    `crate::` path), `mkui-core::theme` (unsupported
+    `<ColorTheme as FromStr>::from_str` fully-qualified syntax, rewritten as
+    `ColorTheme::from_str`), `mkui-console::lib` (stale
+    `flatten_component`/`collect_buttons_in` names, now `walk_tree`), and the
+    cross-backend `mkui_web`/`mkui_wgpu` type links with no such dependency in
+    `mkui-console` (`app.rs`, `renderer.rs`) and `mkui-wgpu`
+    (`bridge.rs`, `walker.rs`) de-linked to plain code spans.
+  - `mkui-web::lib`: `render::WebRenderable` → `render::CustomWebRenderable`
+    (renamed since); the Sprint-4-removed `ThemeSelector` link dropped.
+  - Redundant explicit link targets in `mkui-core::components` and
+    `mkui-wgpu::builder`.
+  No new MSRV, no new dependencies.
 - **Vulkan Validation Layers on the Lavapipe `gpu-offscreen` job (#153).**
   PR #149 (gamma-correct alpha blending) shipped with 29 green CI checks and
   immediately panicked on macOS Metal at first UI draw; it was reverted at

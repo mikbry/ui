@@ -9,7 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# All jobs (fmt, clippy, test, test-doc, build-release, msrv, cargo-deny, cargo-audit) are active.
+# All jobs (fmt, clippy, test, test-doc, cargo-doc, build-release, msrv, cargo-deny, cargo-audit) are active.
 #
 # `--locked` is enforced on every build/test/clippy invocation: CI fails loudly
 # if Cargo.lock is stale relative to manifests, instead of silently regenerating
@@ -557,6 +557,44 @@ jobs:
             ${{ runner.os }}-cargo-test-doc-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
       - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --doc --locked
+
+  cargo-doc:
+    # Closes the rustdoc-link drift gap (#127): `test-doc` above runs doctests
+    # but does not build docs with `-D warnings`, so broken intra-doc links
+    # (links to deleted/private/un-imported items) pass CI undetected — caught
+    # twice in Sprint 7 (#110, #112) only by manual Codex grep. This job is a
+    # dedicated build-warnings gate, separate from doctest execution, mirroring
+    # the one-job-per-hygiene-gate pattern (`fmt` / `clippy` / `msrv` / the
+    # cargo-deny|audit pair).
+    #
+    # `RUSTDOCFLAGS` is job-scoped (not set in `Cargo.toml [build]`), so it
+    # never affects a developer's local `cargo doc`. `--no-deps` keeps doc
+    # warnings scoped to this workspace's own crates. `--all-features` is
+    # deliberately not used — see the clippy/test jobs' #102 one-backend
+    # `compile_error!` note; the three backend-pinned showcase examples are
+    # excluded for the same reason.
+    name: cargo-doc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-doc-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-doc-
+      # Backend-pinned examples excluded — see the clippy/test jobs (#102).
+      - run: cargo doc --workspace --no-deps --locked --exclude console-showcase --exclude web-showcase --exclude native-showcase
 
   build-release:
     name: build-release
