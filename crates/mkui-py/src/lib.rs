@@ -33,6 +33,15 @@
 // appears (audit round 4 §3 Rec 1).
 #![forbid(unsafe_code)]
 
+// `#[pyclass(..., from_py_object)]` (PyNodeId, PyActionId below) expands to a
+// `FromPyObject` impl that calls `Clone::clone` on `&Self` unconditionally —
+// pyo3-macros-backend's own generated code (`extract_pyclass_with_clone` in
+// `pyclass.rs`), spanned back onto the `from_py_object` keyword so clippy
+// attributes the `clone_on_copy` lint to our attribute site even though we
+// never write the call ourselves. Crate-wide allow since the lint is on
+// macro-generated code, not any hand-written `.clone()` in this crate.
+#![allow(clippy::clone_on_copy)]
+
 use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeId, StyleClass, TextVariant};
 use pyo3::prelude::*;
 use std::cell::RefCell;
