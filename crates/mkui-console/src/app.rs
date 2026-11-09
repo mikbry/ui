@@ -2,8 +2,8 @@
 //!
 //! [`ConsoleApp`] owns the long-lived terminal state — last observed
 //! terminal size, selected button index — that survives between frames.
-//! It is the console counterpart of [`mkui_web::app::WebApp`] and
-//! [`mkui_wgpu::app::WgpuApp`].
+//! It is the console counterpart of `mkui_web::app::WebApp` and
+//! `mkui_wgpu::app::WgpuApp`.
 //!
 //! The high-level [`crate::high_level::Mkui`] composes [`ConsoleApp`] with a
 //! [`crate::renderer::ConsoleRenderer`] and the [`crate::components`]

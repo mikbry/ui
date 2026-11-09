@@ -1,6 +1,6 @@
 //! Declarative scene builder.
 //!
-//! `UiBuilder<T>` sits one layer above [`components`](crate::components) and
+//! `UiBuilder<T>` sits one layer above [`components`] and
 //! gives scene-based panels a stack-based layout over a [`Scene`] +
 //! [`PanelLayout<T>`]. The builder owns the cursor, the content rect, and the
 //! theme, so hosts stop hand-rolling row math and per-row drawing helpers.
