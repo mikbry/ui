@@ -418,6 +418,23 @@ breaking changes can land on minor bumps).
   `mkui_core`), compile under `cargo test --doc -p mkui`, and cross-reference
   the relevant `mkui-core` component types. Documentation-only; no public API
   change.
+- **Bare `#[allow(dead_code)]` rationale — audit round-7 Phase 1 task #4
+  (#145).** The 8 sites audit round-7 flagged across `mkui-text` (6) and
+  `mkui-wgpu` (2) are resolved:
+  - `crates/mkui-text/src/composite.rs` (`fallback::validate`, `RoutedRun`,
+    `add_provider`, `register_face`, `validated_fallback`): the `#[allow]`
+    had gone stale — `pub fn register_sfnt_face` (#67) now reaches all five
+    transitively, so the lint no longer fires without the attribute. Removed.
+  - `crates/mkui-text/src/composite.rs::reload_face`: genuinely has no
+    shipping caller yet (only the generation-bump tests exercise it, and it's
+    the sole writer of the `font_generation()` accessor's counter). Given a
+    `// allow: <reason>` comment per the Sprint 7 #104 pattern.
+  - `crates/mkui-wgpu/src/theme.rs::ZERO_SIZE`: genuinely unused (its "keeps
+    doc examples compiling" rationale didn't hold — doctests can't see a
+    `pub(crate)` item). Deleted, along with the now-unused `Size` import.
+  - `crates/mkui-wgpu/src/walker.rs::map_text_variant`: already carried the
+    `// allow:` rationale from an earlier pass; no change needed.
+  No public API change; zero net clippy warnings.
 - **Gamma-correct alpha blending in linear color space (#135).** The wgpu
   backend now renders every lane (UI triangles, bitmap text, Slug curves) into
   a **linear-space intermediate framebuffer** (`Rgba8Unorm`) and encodes
