@@ -148,8 +148,9 @@ const ROUNDED_CORNER_SEGMENTS: usize = 3;
 /// Append one rounded corner's sample points (`segments + 1` points,
 /// standard math angle convention: `0` points `+x`, increasing angle
 /// rotates toward `+y`, i.e. "down" in this file's y-down pixel space — no
-/// adapter y-flip here, unlike [`rounded_rect_commands`]) to `verts`, as
-/// straight chords between points on the circle of `radius` centred at
+/// adapter y-flip here, unlike the `slug`-only `rounded_rect_commands`) to
+/// `verts`, as straight chords between points on the circle of `radius`
+/// centred at
 /// `(cx, cy)`. `radius <= 0` degenerates to the single literal corner point
 /// `(cx, cy)` — a sharp corner needs no arc.
 fn push_corner_points(
