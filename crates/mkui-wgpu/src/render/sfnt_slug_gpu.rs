@@ -474,6 +474,11 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
                 RenderCommand::UiTriangles(_) => {
                     panic!("test scene has no UI primitives; UiTriangles command unexpected");
                 }
+                RenderCommand::VectorPath(_) => {
+                    panic!(
+                        "test scene has no VectorPath primitives; VectorPath command unexpected"
+                    );
+                }
             }
         }
     }

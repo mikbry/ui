@@ -77,6 +77,10 @@ pub fn tessellate_primitives(
             // there directly, so the triangle tessellator skips them.
             #[cfg(feature = "slug")]
             Primitive::SlugGlyph(_) => {}
+            // Vector paths (#139) draw on the same Slug coverage lane, not
+            // tessellated to triangles either.
+            #[cfg(feature = "slug")]
+            Primitive::VectorPath(_) => {}
         }
     }
     triangles

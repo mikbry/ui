@@ -371,6 +371,154 @@ fn overlapping_ui_and_slug_respect_command_order_both_ways() {
     );
 }
 
+/// Cross-lane integration test (#139, Sprint 7 #67/#120 pattern applied to the
+/// VectorPath lane): a real `Scene` carrying both a `Primitive::VectorPath`
+/// and a `Primitive::SlugGlyph`, routed through the real
+/// `build_render_commands`/`classify_primitive` seam and the production
+/// `scene_slug_glyphs`/`scene_vector_paths`/`vector_path_paints` collectors —
+/// not the raw adapter calls the other tests in this file use. Both
+/// primitives paint the identical screen-space square so the overlap region
+/// unambiguously shows which one composited last, exercising the same
+/// later-wins invariant `overlapping_ui_and_slug_respect_command_order_both_ways`
+/// proves for the UI/Slug pair, now proven across two distinct Slug-pipeline
+/// lanes (`SlugGlyphs`, `VectorPath`) in both scene orders.
+#[test]
+fn vector_path_and_slug_glyph_compose_in_scene_order_through_render_commands() {
+    use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
+    use crate::types::{Color, Primitive, Scene, Size};
+    use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, VectorPath};
+
+    let square_path = || crate::types::PlacedVectorPath {
+        path: Arc::new(VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(100.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(100.0, 100.0)),
+                PathCommand::LineTo(Vec2::new(0.0, 100.0)),
+                PathCommand::Close,
+            ],
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        )),
+        stroke: None,
+        stroke_color: Color::rgba(0.0, 0.0, 0.0, 1.0),
+        fill_color: Some(Color::rgba(0.0, 0.0, 1.0, 1.0)),
+        // Same placement as `placed_square` so the two shapes fully overlap.
+        origin_px: [7.0, 57.0],
+        scale_px_per_unit: 0.5,
+    };
+
+    let renderer = harness();
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+
+    let render_scene = |primitives: [Primitive; 2]| -> Vec<u8> {
+        let mut scene = Scene::new(Size::new(W as f32, H as f32));
+        for primitive in primitives {
+            scene.push(primitive);
+        }
+        let commands = build_render_commands(&scene.primitives, classify_primitive);
+        assert_eq!(
+            commands.len(),
+            2,
+            "two adjacent distinct lanes must not coalesce"
+        );
+
+        let mut prepared_in_order = Vec::new();
+        for command in &commands {
+            let range = command.primitives();
+            match command {
+                RenderCommand::SlugGlyphs(_) => {
+                    let glyphs = super::scene_slug_glyphs(&scene.primitives[range]);
+                    if let Some(prepared) = adapter.prepare(
+                        renderer.device(),
+                        renderer.queue(),
+                        [W as f32, H as f32],
+                        1.0,
+                        &glyphs,
+                    ) {
+                        prepared_in_order.push(prepared);
+                    }
+                }
+                RenderCommand::VectorPath(_) => {
+                    let paths = super::scene_vector_paths(&scene.primitives[range]);
+                    let paints = super::vector_path_paints(&paths);
+                    if let Some(prepared) = adapter.prepare_path_paints(
+                        renderer.device(),
+                        renderer.queue(),
+                        [W as f32, H as f32],
+                        1.0,
+                        &paints,
+                    ) {
+                        prepared_in_order.push(prepared);
+                    }
+                }
+                RenderCommand::UiTriangles(_) | RenderCommand::BitmapText(_) => {
+                    panic!("test scene carries only Slug-pipeline primitives");
+                }
+            }
+        }
+
+        let mut encoder =
+            renderer
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("cross-lane test encoder"),
+                });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cross-lane test pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: renderer.view(),
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // Draw each prepared command in scene order within one pass — the
+            // same invariant `Renderer::render` relies on.
+            for prepared in &prepared_in_order {
+                adapter.draw(&mut pass, prepared);
+            }
+        }
+        renderer.queue().submit(Some(encoder.finish()));
+        renderer.read_rgba().expect("readback must succeed")
+    };
+
+    // Order A: VectorPath (blue) first, SlugGlyph (green) second → green wins.
+    let vp_then_slug = render_scene([
+        Primitive::VectorPath(square_path()),
+        Primitive::SlugGlyph(placed_square([0.0, 1.0, 0.0, 1.0])),
+    ]);
+    // Order B: SlugGlyph (green) first, VectorPath (blue) second → blue wins.
+    let slug_then_vp = render_scene([
+        Primitive::SlugGlyph(placed_square([0.0, 1.0, 0.0, 1.0])),
+        Primitive::VectorPath(square_path()),
+    ]);
+
+    assert_eq!(
+        texel(&vp_then_slug, 32, 32),
+        [0, 255, 0, 255],
+        "VectorPath-then-SlugGlyph: the glyph (drawn later) must win the overlap"
+    );
+    assert_eq!(
+        texel(&slug_then_vp, 32, 32),
+        [0, 0, 255, 255],
+        "SlugGlyph-then-VectorPath: the vector path (drawn later) must win the overlap"
+    );
+    assert_ne!(
+        texel(&vp_then_slug, 32, 32),
+        texel(&slug_then_vp, 32, 32),
+        "scene order must change the overlap winner"
+    );
+}
+
 #[test]
 fn slug_adapter_builds_on_the_vulkan_cpu_contract() {
     // The harness asserts the #106 Vulkan + CPU contract; building the Slug
