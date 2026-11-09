@@ -213,6 +213,29 @@ fn polygon_x_range_at_y(polygon: &[(f32, f32)], y: f32) -> Option<(f32, f32)> {
     found.then_some((min_x, max_x))
 }
 
+/// Scanline sampling resolution for every faceted-polygon rasterizer below —
+/// the height of one emitted `Quad` row. Lower only changes how finely the
+/// polygon's already-fixed straight edges are sampled, never the shape.
+const ROW_HEIGHT: f32 = 1.0;
+
+/// Push one row's `Quad`, in `rect`'s screen-space placement, spanning local
+/// x `[x0, x1)` at local y `y`. No-op for a zero/negative-width span (a
+/// corner's dead band, or two rings whose bounds already touch).
+fn push_row_quad(scene: &mut Scene, rect: Rect, y: f32, x0: f32, x1: f32, color: Color) {
+    if x1 <= x0 {
+        return;
+    }
+    scene.quad(Quad {
+        rect: Rect::new(
+            Point::new(rect.origin.x + x0, rect.origin.y + y),
+            Size::new(x1 - x0, ROW_HEIGHT),
+        ),
+        fill: color,
+        corner_radii: CornerRadii::all(0.0),
+        stroke: None,
+    });
+}
+
 /// Rasterize `polygon` (in `rect`'s local `0..w, 0..h` space) into a stack of
 /// 1px-tall `Quad` rows — real, inspectable facet geometry built only from
 /// the one primitive (`Quad`) guaranteed to tessellate exactly as drawn
@@ -220,22 +243,63 @@ fn polygon_x_range_at_y(polygon: &[(f32, f32)], y: f32) -> Option<(f32, f32)> {
 /// and corner vertices are still exactly where they are; row height only
 /// sets the scanline sampling resolution, not the shape's geometry.
 fn push_faceted_polygon_fill(scene: &mut Scene, rect: Rect, polygon: &[(f32, f32)], fill: Color) {
-    const ROW_HEIGHT: f32 = 1.0;
     let mut y = 0.0;
     while y < rect.size.height {
         let sample_y = (y + ROW_HEIGHT * 0.5).min(rect.size.height - f32::EPSILON);
         if let Some((x0, x1)) = polygon_x_range_at_y(polygon, sample_y) {
-            if x1 > x0 {
-                scene.quad(Quad {
-                    rect: Rect::new(
-                        Point::new(rect.origin.x + x0, rect.origin.y + y),
-                        Size::new(x1 - x0, ROW_HEIGHT),
-                    ),
-                    fill,
-                    corner_radii: CornerRadii::all(0.0),
-                    stroke: None,
-                });
+            push_row_quad(scene, rect, y, x0, x1, fill);
+        }
+        y += ROW_HEIGHT;
+    }
+}
+
+/// Rasterize a stroked rounded rect as a true ring (ring color) around a
+/// disjoint interior (fill color) — never a full stroke-color underlay with
+/// fill painted on top of it. A round review caught that the naive
+/// "outer polygon in stroke color, inner polygon in fill color on top"
+/// approach composites both translucent colors together across the whole
+/// interior (both `BORDER` and `FILL`/`CARD_FILL` are `< 1.0` alpha), so the
+/// triangulated column's interior visibly lightened relative to the vector
+/// column's — the vector lane's fill and stroke are disjoint regions
+/// (`stroke_to_fill` expands a centreline, it doesn't underlay the whole
+/// fill), so there was nothing to match. Per row: a `[outer_x0, inner_x0)`
+/// ring segment, an `[inner_x0, inner_x1)` fill segment, an
+/// `[inner_x1, outer_x1)` ring segment — zero overlap by construction. Rows
+/// above/below the inner rect's y-range (the corners' pure-ring band) get a
+/// single full-width ring segment.
+#[allow(clippy::too_many_arguments)]
+fn push_faceted_ring_and_fill(
+    scene: &mut Scene,
+    rect: Rect,
+    outer: &[(f32, f32)],
+    inner: &[(f32, f32)],
+    inset: f32,
+    inner_height: f32,
+    ring_color: Color,
+    fill_color: Color,
+) {
+    let mut y = 0.0;
+    while y < rect.size.height {
+        let sample_y = (y + ROW_HEIGHT * 0.5).min(rect.size.height - f32::EPSILON);
+        let Some((outer_x0, outer_x1)) = polygon_x_range_at_y(outer, sample_y) else {
+            y += ROW_HEIGHT;
+            continue;
+        };
+
+        let inner_sample_y = sample_y - inset;
+        let inner_range = (inner_sample_y >= 0.0 && inner_sample_y < inner_height)
+            .then(|| polygon_x_range_at_y(inner, inner_sample_y))
+            .flatten();
+
+        match inner_range {
+            Some((inner_x0, inner_x1)) => {
+                let abs_inner_x0 = inner_x0 + inset;
+                let abs_inner_x1 = inner_x1 + inset;
+                push_row_quad(scene, rect, y, outer_x0, abs_inner_x0, ring_color);
+                push_row_quad(scene, rect, y, abs_inner_x0, abs_inner_x1, fill_color);
+                push_row_quad(scene, rect, y, abs_inner_x1, outer_x1, ring_color);
             }
+            None => push_row_quad(scene, rect, y, outer_x0, outer_x1, ring_color),
         }
         y += ROW_HEIGHT;
     }
@@ -244,11 +308,10 @@ fn push_faceted_polygon_fill(scene: &mut Scene, rect: Rect, polygon: &[(f32, f32
 /// The showcase's local "triangulated" baseline: a faceted-polygon
 /// approximation of the same rounded-rect `vector_rounded_rect` draws
 /// smoothly, rasterized entirely from `Quad` rows (see the module docs for
-/// why this doesn't touch `mkui-wgpu`'s shared tessellator). A `stroke` is
-/// faked by rasterizing the full polygon in the stroke color first, then a
-/// `stroke.width`-inset polygon in `fill` on top — the same two-layer idea
-/// the real triangulated `Quad` path's 4 edge-strips approximate, just
-/// following the rounded corner instead of cutting across it.
+/// why this doesn't touch `mkui-wgpu`'s shared tessellator). A `stroke` is a
+/// true ring around the fill (see [`push_faceted_ring_and_fill`]) — not an
+/// underlay — so a translucent fill composites against the same background
+/// in both columns.
 fn faceted_rounded_rect(
     scene: &mut Scene,
     rect: Rect,
@@ -256,23 +319,31 @@ fn faceted_rounded_rect(
     fill: Color,
     stroke: Option<Stroke>,
 ) {
-    if let Some(stroke) = stroke {
-        let outer = rounded_rect_polygon(rect.size.width, rect.size.height, radius);
-        push_faceted_polygon_fill(scene, rect, &outer, stroke.color);
+    match stroke {
+        Some(stroke) => {
+            let outer = rounded_rect_polygon(rect.size.width, rect.size.height, radius);
 
-        let inset = stroke.width.max(1.0);
-        let inner_w = (rect.size.width - 2.0 * inset).max(0.0);
-        let inner_h = (rect.size.height - 2.0 * inset).max(0.0);
-        let inner_r = (radius - inset).max(0.0);
-        let inner_rect = Rect::new(
-            Point::new(rect.origin.x + inset, rect.origin.y + inset),
-            Size::new(inner_w, inner_h),
-        );
-        let inner = rounded_rect_polygon(inner_w, inner_h, inner_r);
-        push_faceted_polygon_fill(scene, inner_rect, &inner, fill);
-    } else {
-        let polygon = rounded_rect_polygon(rect.size.width, rect.size.height, radius);
-        push_faceted_polygon_fill(scene, rect, &polygon, fill);
+            let inset = stroke.width.max(1.0);
+            let inner_w = (rect.size.width - 2.0 * inset).max(0.0);
+            let inner_h = (rect.size.height - 2.0 * inset).max(0.0);
+            let inner_r = (radius - inset).max(0.0);
+            let inner = rounded_rect_polygon(inner_w, inner_h, inner_r);
+
+            push_faceted_ring_and_fill(
+                scene,
+                rect,
+                &outer,
+                &inner,
+                inset,
+                inner_h,
+                stroke.color,
+                fill,
+            );
+        }
+        None => {
+            let polygon = rounded_rect_polygon(rect.size.width, rect.size.height, radius);
+            push_faceted_polygon_fill(scene, rect, &polygon, fill);
+        }
     }
 }
 
@@ -505,32 +576,25 @@ mod tests {
     use super::*;
     use mkui_wgpu::Primitive;
 
-    /// Number of 1px scanline rows `push_faceted_polygon_fill` emits for a
-    /// shape of `height`, with no stroke: every row in `0..height` always
-    /// has positive width for this file's concrete rounded-rect shapes (the
-    /// corner radius never exceeds half the shorter side), so this is exact,
-    /// not just a lower bound. `height.round()` handles float step
-    /// accumulation; every height in this file is already a whole number.
-    fn fill_only_row_count(height: f32) -> usize {
+    /// Lower/upper bound on the number of `Quad`s one row of
+    /// `push_faceted_ring_and_fill`/`push_faceted_polygon_fill` can emit: at
+    /// least 1 (full-width ring, or the no-stroke fill), at most 3 (ring,
+    /// fill, ring) for a stroked row with nonzero ring width on both sides.
+    /// `height.round()` handles float step accumulation; every height in
+    /// this file is already a whole number, so this is exact row-count
+    /// (just not exact *quad* count — individual rows can emit 1-3).
+    fn row_count(height: f32) -> usize {
         height.round() as usize
     }
 
-    /// As [`fill_only_row_count`], but for a stroked shape: the outer
-    /// (stroke-color) polygon's full height, plus the inner (fill-color)
-    /// polygon's height after `faceted_rounded_rect`'s `stroke.width.max(1.0)`
-    /// inset on both sides.
-    fn stroked_row_count(height: f32, stroke_width: f32) -> usize {
-        let inset = stroke_width.max(1.0);
-        fill_only_row_count(height) + fill_only_row_count((height - 2.0 * inset).max(0.0))
-    }
-
-    /// Exact expected `Quad` count for one faceted-polygon column (left
-    /// always; right too when `slug` is off) — button + card are stroked
-    /// (2 layered polygons each), dot is fill-only (1 polygon).
-    fn one_column_quad_count() -> usize {
-        stroked_row_count(BUTTON_SIZE.height, BUTTON_STROKE_WIDTH)
-            + stroked_row_count(CARD_SIZE.height, CARD_STROKE_WIDTH)
-            + fill_only_row_count(DOT_SIZE.height)
+    /// `(min, max)` possible `Quad` count for one faceted-polygon column
+    /// (left always; right too when `slug` is off) — button + card are
+    /// stroked rings (1-3 quads/row), dot is fill-only (exactly 1 quad/row).
+    fn one_column_quad_count_bounds() -> (usize, usize) {
+        let button = row_count(BUTTON_SIZE.height);
+        let card = row_count(CARD_SIZE.height);
+        let dot = row_count(DOT_SIZE.height);
+        (button + card + dot, button * 3 + card * 3 + dot)
     }
 
     #[test]
@@ -547,15 +611,16 @@ mod tests {
             .filter(|p| matches!(p, Primitive::Text(_)))
             .count();
 
+        let (min, max) = one_column_quad_count_bounds();
         #[cfg(feature = "slug")]
         {
             // Only the left column rasterizes to Quads when the vector lane
             // is live — exactly one column's worth, not 3 (one per shape):
             // proof this is genuine per-row faceting, not a single Quad.
-            assert_eq!(
-                quads,
-                one_column_quad_count(),
-                "left column should emit exactly one column's worth of faceted-polygon rows"
+            assert!(
+                (min..=max).contains(&quads),
+                "left column should emit one column's worth of faceted-polygon \
+                 rows ({min}..={max}), got {quads}"
             );
             let vector_paths = scene
                 .primitives
@@ -570,10 +635,12 @@ mod tests {
         #[cfg(not(feature = "slug"))]
         {
             // Both columns fall back to the same faceted-polygon rasterizer.
-            assert_eq!(
-                quads,
-                one_column_quad_count() * 2,
-                "both columns should fall back to the same faceted-polygon row count"
+            assert!(
+                (min * 2..=max * 2).contains(&quads),
+                "both columns should fall back to the same faceted-polygon \
+                 row count ({}..={}), got {quads}",
+                min * 2,
+                max * 2
             );
         }
 
@@ -700,6 +767,105 @@ mod tests {
         assert!((max_x - rect.width_end()).abs() < eps, "max_x={max_x}");
         assert!((min_y - rect.origin.y).abs() < eps, "min_y={min_y}");
         assert!((max_y - rect.height_end()).abs() < eps, "max_y={max_y}");
+    }
+
+    /// Round-3 review regression: a card-shaped stroked rect, rasterized by
+    /// `push_faceted_ring_and_fill`. For every row, no two emitted `Quad`s
+    /// may overlap in x — the bug this directly re-tests painted the full
+    /// outer polygon in `stroke.color` first and the inner polygon in `fill`
+    /// *on top of it*, so every interior pixel composited two translucent
+    /// colors (both `BORDER` and `CARD_FILL` are `< 1.0` alpha) instead of
+    /// one, visibly lightening the triangulated column relative to the
+    /// vector column (measured: ~(79,74,69) vs. ~(40,32,27) at the centre).
+    #[test]
+    fn faceted_ring_and_fill_rows_never_overlap() {
+        let mut scene = Scene::new(Size::new(400.0, 200.0));
+        let rect = Rect::new(Point::new(10.0, 10.0), CARD_SIZE);
+        faceted_rounded_rect(
+            &mut scene,
+            rect,
+            CARD_RADIUS,
+            CARD_FILL,
+            Some(Stroke {
+                color: BORDER,
+                width: CARD_STROKE_WIDTH,
+            }),
+        );
+
+        let quads: Vec<&Quad> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Quad(q) => Some(q),
+                _ => None,
+            })
+            .collect();
+        assert!(!quads.is_empty());
+
+        let mut by_row: std::collections::BTreeMap<i64, Vec<&Quad>> =
+            std::collections::BTreeMap::new();
+        for q in &quads {
+            let row_key = (q.rect.origin.y * 1000.0).round() as i64;
+            by_row.entry(row_key).or_default().push(q);
+        }
+        for (row_key, mut row_quads) in by_row {
+            row_quads.sort_by(|a, b| a.rect.origin.x.partial_cmp(&b.rect.origin.x).unwrap());
+            for pair in row_quads.windows(2) {
+                let [a, b] = pair else { unreachable!() };
+                assert!(
+                    a.rect.width_end() <= b.rect.origin.x + 0.01,
+                    "row {row_key}: quad [{}, {}) overlaps quad [{}, {})",
+                    a.rect.origin.x,
+                    a.rect.width_end(),
+                    b.rect.origin.x,
+                    b.rect.width_end()
+                );
+            }
+        }
+    }
+
+    /// Companion to the non-overlap test above: the shape's own centre
+    /// pixel must be covered by exactly one `Quad`, colored `fill` — never
+    /// `stroke.color` underneath it. This is the literal property the round-3
+    /// review's measured-RGB complaint was about.
+    #[test]
+    fn faceted_ring_and_fill_centre_is_pure_fill_color_only() {
+        let mut scene = Scene::new(Size::new(400.0, 200.0));
+        let rect = Rect::new(Point::new(10.0, 10.0), CARD_SIZE);
+        let border = Stroke {
+            color: BORDER,
+            width: CARD_STROKE_WIDTH,
+        };
+        faceted_rounded_rect(&mut scene, rect, CARD_RADIUS, CARD_FILL, Some(border));
+
+        let centre_x = rect.origin.x + rect.size.width * 0.5;
+        let centre_y = rect.origin.y + rect.size.height * 0.5;
+
+        let covering: Vec<&Quad> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Quad(q) => Some(q),
+                _ => None,
+            })
+            .filter(|q| {
+                centre_x >= q.rect.origin.x
+                    && centre_x < q.rect.width_end()
+                    && centre_y >= q.rect.origin.y
+                    && centre_y < q.rect.height_end()
+            })
+            .collect();
+
+        assert_eq!(
+            covering.len(),
+            1,
+            "centre point should be covered by exactly one Quad, got {}",
+            covering.len()
+        );
+        assert_eq!(
+            covering[0].fill, CARD_FILL,
+            "centre Quad must be the pure fill color, not the stroke color underneath it"
+        );
     }
 
     /// The faceting proof Codex's round-2 review asked for, mirroring

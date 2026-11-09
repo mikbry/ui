@@ -39,6 +39,17 @@ breaking changes can land on minor bumps).
     above demonstrates the polygon-vs-smooth-curve contrast without
     touching code #142 depends on. #212 still tracks the production-wide
     gap.
+  - Fixed: the stroked rows (button/card) originally painted the full
+    outer polygon in the stroke color, then the inner polygon in the
+    fill color *on top of it* — since both `BORDER` and `FILL`/`CARD_FILL`
+    are translucent (`< 1.0` alpha), every interior pixel composited two
+    colors instead of one, visibly lightening the triangulated column
+    relative to the vector column (measured center RGB ~(79,74,69) vs.
+    ~(40,32,27)). `push_faceted_ring_and_fill` now rasterizes the stroke
+    as a true ring — disjoint `[outer, inner)` segments per row around a
+    separate `[inner_x0, inner_x1)` fill segment — so the two colors never
+    overlap, matching the vector lane (whose fill and `stroke_to_fill`
+    outline are already disjoint regions).
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
