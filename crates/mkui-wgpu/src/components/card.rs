@@ -62,18 +62,51 @@ fn card_triangulated(scene: &mut Scene, rect: Rect, style: &CardStyle) {
     });
 }
 
-/// #141 vector path: one `PlacedVectorPath` carrying the rounded rect's fill
-/// *and* its border stroke — the substrate corners + border lane, in place of
-/// the triangulated approximation.
+/// #141 vector path: the rounded rect's fill plus its border stroke, pushed
+/// as two separate `PlacedVectorPath`s (fill first, stroke on top, matching
+/// `card_triangulated`'s fill-then-border-rects order) — the substrate
+/// corners + border lane, in place of the triangulated approximation.
+///
+/// Codex round-1 review of #141: `PathStroke` centers the stroke on its
+/// path's centerline, expanding `stroke_width / 2` on *both* sides. A stroke
+/// centered on the fill's own outer boundary therefore painted half the
+/// border outside the card's allocated rect — `card_triangulated`'s border
+/// rects, by contrast, are drawn fully inside the rect (see
+/// `tessellate_quad`). To match that inset footprint, the stroke is centered
+/// on a *second*, smaller rounded rect — inset by `stroke_width / 2` on every
+/// side, with the corner radius shrunk by the same amount (the concentric
+/// offset of a rounded rect) — so the stroke's outer edge lands exactly on
+/// the original rect's boundary and its inner edge lands `stroke_width`
+/// inside it, the same band `card_triangulated`'s border rects cover.
 #[cfg(feature = "slug")]
 fn card_vector(scene: &mut Scene, rect: Rect, style: &CardStyle) {
-    let path = rounded_rect_path(rect.size.width, rect.size.height, style.corner_radius);
+    let fill_path = rounded_rect_path(rect.size.width, rect.size.height, style.corner_radius);
     scene.vector_path(PlacedVectorPath {
-        path,
-        stroke: Some(PathStroke::new(style.stroke_width)),
-        stroke_color: style.stroke,
+        path: fill_path,
+        stroke: None,
+        stroke_color: style.fill,
         fill_color: Some(style.fill),
         origin_px: [rect.origin.x, rect.origin.y],
+        scale_px_per_unit: 1.0,
+    });
+
+    if style.stroke_width <= 0.0 {
+        return;
+    }
+    let inset = style.stroke_width * 0.5;
+    let stroke_rect_width = rect.size.width - style.stroke_width;
+    let stroke_rect_height = rect.size.height - style.stroke_width;
+    if stroke_rect_width <= 0.0 || stroke_rect_height <= 0.0 {
+        return;
+    }
+    let stroke_radius = (style.corner_radius - inset).max(0.0);
+    let stroke_path = rounded_rect_path(stroke_rect_width, stroke_rect_height, stroke_radius);
+    scene.vector_path(PlacedVectorPath {
+        path: stroke_path,
+        stroke: Some(PathStroke::new(style.stroke_width)),
+        stroke_color: style.stroke,
+        fill_color: None,
+        origin_px: [rect.origin.x + inset, rect.origin.y + inset],
         scale_px_per_unit: 1.0,
     });
 }
@@ -202,7 +235,7 @@ mod tests {
 
     #[cfg(feature = "slug")]
     #[test]
-    fn card_emits_a_single_vector_path_with_fill_and_stroke() {
+    fn card_emits_a_fill_path_and_an_inset_stroke_path() {
         let mut scene = Scene::new(Size::new(200.0, 80.0));
         let theme = WgpuTheme::default();
         let style = theme.card();
@@ -219,20 +252,44 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(paths.len(), 1, "card must emit exactly one vector path");
-        let placed = paths[0];
-        assert_eq!(placed.fill_color, Some(style.fill));
-        assert_eq!(placed.stroke_color, style.stroke);
-        let stroke = placed.stroke.as_ref().expect("card border must stroke");
-        assert_eq!(stroke.width_px, style.stroke_width);
-        assert_eq!(placed.origin_px, [10.0, 5.0]);
-        assert_eq!(placed.scale_px_per_unit, 1.0);
+        assert_eq!(
+            paths.len(),
+            2,
+            "card must emit a fill path and a separate inset stroke path"
+        );
+
+        let fill = paths[0];
+        assert_eq!(fill.fill_color, Some(style.fill));
+        assert!(fill.stroke.is_none(), "the fill primitive must not stroke");
+        assert_eq!(fill.origin_px, [10.0, 5.0]);
         // Local path space is y-up (see `build_rounded_rect_path`'s docs):
         // screen top-left is local (0, 0), screen bottom-right is local
-        // (width, -height).
+        // (width, -height). The fill path covers the card's full rect.
         assert_eq!(
-            placed.path.bounds,
+            fill.path.bounds,
             Bounds::new(Vec2::new(0.0, -40.0), Vec2::new(120.0, 0.0))
+        );
+
+        let border = paths[1];
+        assert!(
+            border.fill_color.is_none(),
+            "the stroke primitive must not also fill"
+        );
+        assert_eq!(border.stroke_color, style.stroke);
+        let stroke = border.stroke.as_ref().expect("card border must stroke");
+        assert_eq!(stroke.width_px, style.stroke_width);
+        // Codex round-1 review of #141: a stroke centers on its path, so the
+        // centerline path must be inset by half the stroke width on every
+        // side — the stroke's outer edge then lands exactly on the fill's
+        // outer edge instead of bleeding `stroke_width / 2` past it.
+        let inset = style.stroke_width * 0.5;
+        assert_eq!(border.origin_px, [10.0 + inset, 5.0 + inset]);
+        assert_eq!(
+            border.path.bounds,
+            Bounds::new(
+                Vec2::new(0.0, -(40.0 - style.stroke_width)),
+                Vec2::new(120.0 - style.stroke_width, 0.0)
+            )
         );
     }
 
@@ -256,12 +313,13 @@ mod tests {
     }
 
     /// Paint-data parity between the two lane builders: fill color, stroke
-    /// color/width, and placement must agree between `card_triangulated` and
-    /// `card_vector` for the same `(rect, style)`, so a theme author sees the
-    /// same visual result switching the `slug` feature, modulo "rounded" vs.
-    /// "square" corners (the bug #141 fixes). This is a structural, CPU-only
-    /// check; the real pixel-level cross-consumer test named in the issue
-    /// (Sprint 8 plan v2 §4.3) is
+    /// color/width, and the rect each lane's border stays within must agree
+    /// between `card_triangulated` and `card_vector` for the same
+    /// `(rect, style)`, so a theme author sees the same visual result
+    /// switching the `slug` feature, modulo "rounded" vs. "square" corners
+    /// (the bug #141 fixes). This is a structural, CPU-only check; the real
+    /// pixel-level cross-consumer test named in the issue (Sprint 8 plan v2
+    /// §4.3) is
     /// [`crate::render::card_vector_gpu::card_vector_vs_triangulated`], which
     /// renders both lanes on the Lavapipe GPU harness and reads back pixels —
     /// `cargo test -p mkui-wgpu --features 'gpu-tests slug' card_vector_vs_triangulated`.
@@ -282,27 +340,46 @@ mod tests {
                 _ => None,
             })
             .expect("triangulated lane must emit a Quad");
+        let quad_stroke = quad.stroke.expect("card always strokes a border");
 
         let mut vector_scene = Scene::new(Size::new(200.0, 80.0));
         card_vector(&mut vector_scene, rect, &style);
-        let placed = vector_scene
-            .primitives
-            .iter()
-            .find_map(|p| match p {
-                Primitive::VectorPath(placed) => Some(placed.clone()),
-                _ => None,
-            })
-            .expect("vector lane must emit a PlacedVectorPath");
+        let mut vector_paths = vector_scene.primitives.iter().filter_map(|p| match p {
+            Primitive::VectorPath(placed) => Some(placed.clone()),
+            _ => None,
+        });
+        let fill = vector_paths.next().expect("vector lane must emit a fill");
+        let border = vector_paths.next().expect("vector lane must emit a border");
 
-        assert_eq!(placed.fill_color, Some(quad.fill));
-        assert_eq!(placed.stroke_color, quad.stroke.unwrap().color);
-        assert_eq!(placed.stroke.unwrap().width_px, quad.stroke.unwrap().width);
-        assert_eq!(placed.origin_px, [quad.rect.origin.x, quad.rect.origin.y]);
+        assert_eq!(fill.fill_color, Some(quad.fill));
+        assert_eq!(fill.origin_px, [quad.rect.origin.x, quad.rect.origin.y]);
         assert_eq!(
-            placed.path.bounds,
+            fill.path.bounds,
             Bounds::new(
                 Vec2::new(0.0, -quad.rect.size.height),
                 Vec2::new(quad.rect.size.width, 0.0)
+            )
+        );
+
+        assert_eq!(border.stroke_color, quad_stroke.color);
+        let stroke = border.stroke.clone().expect("border must stroke");
+        assert_eq!(stroke.width_px, quad_stroke.width);
+        // `card_triangulated`'s border rects stay entirely within `quad.rect`
+        // (see `tessellate_quad`); the vector border's stroke band must cover
+        // the same footprint, not extend past it — the exact regression
+        // Codex round-1 review of #141 caught. The border's inset centerline
+        // path, offset by the half-stroke-width inset, achieves that; the
+        // GPU test verifies the painted pixels directly.
+        let inset = quad_stroke.width * 0.5;
+        assert_eq!(
+            border.origin_px,
+            [quad.rect.origin.x + inset, quad.rect.origin.y + inset]
+        );
+        assert_eq!(
+            border.path.bounds,
+            Bounds::new(
+                Vec2::new(0.0, -(quad.rect.size.height - quad_stroke.width)),
+                Vec2::new(quad.rect.size.width - quad_stroke.width, 0.0)
             )
         );
     }

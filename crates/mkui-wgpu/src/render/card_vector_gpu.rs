@@ -2,10 +2,19 @@
 //!
 //! Renders the triangulated and vector lanes of `components::card` through
 //! #106's offscreen Lavapipe harness and reads back pixels, proving the two
-//! lanes differ exactly where #141 says they should: the vector lane's
-//! corners are genuinely rounded; the triangulated lane's are square, because
-//! `tessellate_quad` never reads `Quad::corner_radii` — the pre-#141 "rounded"
-//! card was in fact a square-corner approximation.
+//! lanes agree everywhere they should and differ exactly where #141 says
+//! they should:
+//!
+//! - the vector lane's corners are genuinely rounded; the triangulated
+//!   lane's are square, because `tessellate_quad` never reads
+//!   `Quad::corner_radii` — the pre-#141 "rounded" card was in fact a
+//!   square-corner approximation;
+//! - the vector lane's border stays inset within the card's own rect, same
+//!   as the triangulated lane's border rects — a regression Codex round-1
+//!   review of #141 caught (a stroke centered on the fill's outer boundary
+//!   painted half the border outside the rect) and that the original
+//!   version of this test, using one color for fill+stroke on a
+//!   full-viewport card, could not have caught.
 //!
 //! `card()` itself is a compile-time branch on the `slug` feature, so with
 //! `slug` on (required here for the `SlugAdapter`) the public entry point
@@ -33,6 +42,7 @@ const W: u32 = 64;
 const H: u32 = 64;
 
 const RED: [u8; 4] = [255, 0, 0, 255];
+const GREEN: [u8; 4] = [0, 255, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
 fn harness() -> OffscreenRenderer {
@@ -59,24 +69,36 @@ fn harness() -> OffscreenRenderer {
     renderer
 }
 
-/// Fill and stroke the identical pure-red color: `0.0`/`1.0` channels are
-/// fixed points of the sRGB↔linear conversion (`srgb_to_linear(0.0) == 0.0`,
+/// Fill (red), stroke (green), and background (blue) are three *distinct*
+/// pure primary colors — `0.0`/`1.0` channels are fixed points of the
+/// sRGB↔linear conversion (`srgb_to_linear(0.0) == 0.0`,
 /// `srgb_to_linear(1.0) == 1.0`), so every readback byte is exactly `0` or
-/// `255` regardless of which lane linearizes it — no stroke-vs-fill color
-/// split to reason about, and no float-tolerance window needed on the
-/// assertions below. `corner_radius: 20.0` on a 64×64 card is Sprint 8's
-/// "large radius" characteristic for this component (plan v2 §2.5).
+/// `255` regardless of which lane linearizes it, and no float-tolerance
+/// window is needed on the assertions below.
+///
+/// Codex round-1 review of #141: the original version of this test used the
+/// *same* color for fill and stroke, and a card sized to the whole
+/// viewport — both choices hid the border-bleeds-outside-the-rect
+/// regression the review caught (identical colors make the border
+/// invisible against the fill; a full-viewport card leaves no background
+/// margin to show the border painting past the rect). Distinct colors plus
+/// [`test_rect`]'s margin make both the corner-rounding and the border-inset
+/// behavior directly observable in the readback.
 fn test_style() -> CardStyle {
     CardStyle {
         fill: Color::rgba(1.0, 0.0, 0.0, 1.0),
-        stroke: Color::rgba(1.0, 0.0, 0.0, 1.0),
-        stroke_width: 2.0,
-        corner_radius: 20.0,
+        stroke: Color::rgba(0.0, 1.0, 0.0, 1.0),
+        stroke_width: 4.0,
+        corner_radius: 8.0,
     }
 }
 
+/// A 32×32 card centered in the 64×64 target, leaving a 16px background
+/// margin on every side — room enough to see the border if it bleeds past
+/// the card's own bounds, and room enough for the radius-8 corners to clip a
+/// multi-pixel region.
 fn test_rect() -> Rect {
-    Rect::new(Point::new(0.0, 0.0), Size::new(W as f32, H as f32))
+    Rect::new(Point::new(16.0, 16.0), Size::new(32.0, 32.0))
 }
 
 fn render_to_offscreen(
@@ -152,7 +174,11 @@ fn render_vector() -> Vec<u8> {
     let mut scene = Scene::new(Size::new(W as f32, H as f32));
     components::card(&mut scene, test_rect(), test_style());
     let paths = scene_vector_paths(&scene.primitives);
-    assert_eq!(paths.len(), 1, "card must emit exactly one vector path");
+    assert_eq!(
+        paths.len(),
+        2,
+        "card must emit a fill path and a separate inset-stroke border path"
+    );
     let paints = vector_path_paints(&paths);
 
     render_to_offscreen(|renderer, encoder| {
@@ -199,33 +225,84 @@ fn texel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 /// `cargo test -p mkui-wgpu --features 'gpu-tests slug' card_vector_vs_triangulated`
 /// — the exact name Sprint 8 plan v2 §4.3 and issue #141's acceptance
 /// criteria name.
+///
+/// [`test_rect`] spans x/y `16..48`; [`test_style`]'s border is 4px wide, so
+/// the border band is `16..20` (top/left) and `44..48` (bottom/right) on
+/// each axis, and the radius-8 corners clip a multi-pixel region at each
+/// corner. Every point below is checked on *both* lanes: the triangulated
+/// lane (square corners, border rects fully inside the rect — see
+/// `tessellate_quad`) is the independent reference the vector lane must
+/// match everywhere except the corners themselves.
 #[test]
 fn card_vector_vs_triangulated() {
     let triangulated = render_triangulated();
     let vector = render_vector();
 
-    // The exact corner pixel: squared in the triangulated lane
-    // (`tessellate_quad` ignores `corner_radii`), clipped to the background
-    // in the vector lane (the rounded corner's arc excludes it) — the
-    // precise bug #141 fixes.
+    // The exact corner pixel: squared (and border-colored, since both
+    // adjacent border rects overlap there) in the triangulated lane;
+    // clipped to the background in the vector lane (the rounded corner's
+    // arc excludes it) — the precise corner-squareness bug #141 fixes.
     assert_eq!(
-        texel(&triangulated, 0, 0),
-        RED,
-        "triangulated corner is square: the exact corner pixel must be filled"
+        texel(&triangulated, 16, 16),
+        GREEN,
+        "triangulated corner is square: the exact corner pixel must be border-colored"
     );
     assert_eq!(
-        texel(&vector, 0, 0),
+        texel(&vector, 16, 16),
         BLUE,
         "vector corner is rounded: the exact corner pixel must show the background through it"
     );
 
-    // A point inside the corner's radius (but off the exact corner pixel) is
-    // filled on both lanes — the rounding clips only the true corner, not the
-    // whole corner box.
-    assert_eq!(texel(&triangulated, 18, 18), RED);
-    assert_eq!(texel(&vector, 18, 18), RED);
+    // Well inside the corner's radius (but off the exact corner pixel, and
+    // inside the border's inner edge too): fill on both lanes.
+    assert_eq!(texel(&triangulated, 23, 23), RED);
+    assert_eq!(texel(&vector, 23, 23), RED);
 
-    // The center stays filled on both lanes regardless of corner handling.
-    assert_eq!(texel(&triangulated, W / 2, H / 2), RED);
-    assert_eq!(texel(&vector, W / 2, H / 2), RED);
+    // Border-inset regression (Codex round-1 review of #141): a pixel just
+    // *outside* the card's rect, on each of the four sides, must be
+    // background on both lanes — the border must never paint past the
+    // rect it was given. A stroke centered on the fill's own outer boundary
+    // (the bug) would paint `stroke_width / 2` = 2px past this point.
+    for (x, y, side) in [
+        (32, 13, "top"),
+        (32, 51, "bottom"),
+        (13, 32, "left"),
+        (51, 32, "right"),
+    ] {
+        assert_eq!(
+            texel(&triangulated, x, y),
+            BLUE,
+            "triangulated {side}: 3px outside the rect must be background"
+        );
+        assert_eq!(
+            texel(&vector, x, y),
+            BLUE,
+            "vector {side}: 3px outside the rect must be background — the border must not bleed past the card's bounds"
+        );
+    }
+
+    // Inside the 4px border band, away from any corner: border color on both
+    // lanes, proving the border is actually drawn (not shrunk away from the
+    // edge either).
+    for (x, y, side) in [
+        (32, 18, "top"),
+        (32, 46, "bottom"),
+        (18, 32, "left"),
+        (46, 32, "right"),
+    ] {
+        assert_eq!(
+            texel(&triangulated, x, y),
+            GREEN,
+            "triangulated {side} border band must be border-colored"
+        );
+        assert_eq!(
+            texel(&vector, x, y),
+            GREEN,
+            "vector {side} border band must be border-colored"
+        );
+    }
+
+    // The center, well past the border band, is fill on both lanes.
+    assert_eq!(texel(&triangulated, 32, 32), RED);
+    assert_eq!(texel(&vector, 32, 32), RED);
 }
