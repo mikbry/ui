@@ -15,8 +15,8 @@
 //! [shadcn/ui]: https://ui.shadcn.com/
 //! [`miklabs/ui`]: https://github.com/mikbry/ui
 
+use crate::types::FontFaceId;
 use crate::types::{Color, Insets, Stroke, TextAlign, TextStyle};
-use crate::types::{FontFaceId, Size};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PanelStyle {
@@ -662,11 +662,6 @@ impl WgpuTheme {
         }
     }
 }
-
-/// Identity size used when a widget needs a placeholder constraint. Not
-/// exposed publicly; keeps doc examples compiling without a Size constant.
-#[allow(dead_code)]
-pub(crate) const ZERO_SIZE: Size = Size::new(0.0, 0.0);
 
 #[cfg(test)]
 mod tests {
