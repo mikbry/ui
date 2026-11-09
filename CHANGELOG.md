@@ -10,25 +10,35 @@ breaking changes can land on minor bumps).
 ### Added
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
-  in a 3×2 grid: the left column is the existing triangulated `Primitive::Quad`
-  construction every `mkui-wgpu::components` atom already uses; the right
-  column emits the same rounded-rect geometry through `Primitive::VectorPath`
-  (#139) — one `moveTo` plus a cubic-Bézier arc per corner, with
-  `r == size/2` on a square closing the dot row into a true circle. Sizes
-  (button 18px radius, card 36px radius, dot 55px radius) sit well above the
-  theme-token scale so the comparison reads at 1x window scale with no zoom.
+  in a 3×2 grid: the right column emits a rounded-rect through
+  `Primitive::VectorPath` (#139) — one `moveTo` plus a cubic-Bézier arc per
+  corner, with `r == size/2` on a square closing the dot row into a true
+  circle. The left column is a showcase-local faceted-polygon approximation
+  of the same shape (`rounded_rect_polygon` + `push_faceted_polygon_fill`,
+  3 segments per 90° corner, rasterized as many 1px `Quad` rows) — **not**
+  the shared `Quad`/`tessellate_quad` path real components use, which still
+  renders a rounded `Quad` as a plain square (#212; see the scope note
+  below). Sizes (button 18px radius, card 36px radius, dot 55px radius) sit
+  well above the theme-token scale so the comparison reads at 1x window
+  scale with no zoom.
   - `cargo run -p vector-showcase --release --features slug` — both columns
     live.
   - `cargo run -p vector-showcase --release` (no `slug`) — the vector column
-    falls back to the same triangulated geometry as the left, mirroring the
-    zero-API-break contract #140-#142 commit to for the real atoms.
+    falls back to the same faceted-polygon approximation as the left,
+    mirroring the zero-API-break contract #140-#142 commit to for the real
+    atoms.
   - `HEADLESS=1` (either build) exits after a single walk pass, per
     `mkui_wgpu::Mkui::run`'s existing smoke-test gate.
-  - Scope note: the native wgpu tessellator's triangulated `Quad` fallback
-    renders as a plain square, not a faceted polygon — the same documented,
-    tested baseline #142's own `dot_vector_gpu.rs` GPU acceptance test
-    asserts for the real `dot()` atom's off-`slug` path. Rounding/faceting
-    that fallback is #212, out of scope for both #142 and this showcase.
+  - Scope note: an earlier revision of this showcase tried fixing the
+    shared `tessellate_quad` tessellator directly so the triangulated
+    column would facet for real. That broke #142's merged, reviewed GPU
+    acceptance test (`dot_vector_gpu.rs`), which hand-builds the
+    triangulated dot as `CornerRadii::all(r)` and explicitly asserts it
+    renders as a plain square — a ratified scope decision in #142's own
+    CHANGELOG entry, not a bug. Reverted; the showcase-local rasterizer
+    above demonstrates the polygon-vs-smooth-curve contrast without
+    touching code #142 depends on. #212 still tracks the production-wide
+    gap.
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
