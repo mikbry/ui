@@ -14,9 +14,9 @@
 //! (not quadratic) Bézier arc with the standard circle-approximation handle
 //! length `k = 4/3 * (sqrt(2) - 1) ≈ 0.5523 * r` — a single `quadTo` per 90°
 //! corner overshoots by ~6% of `r` (a visible squircle at the dot's ~55px
-//! radius), while the cubic form is accurate to ~0.03%. `encode_vector_path`
-//! (fills) and `stroke_to_fill` (strokes) both subdivide cubics already, so
-//! this needs no new pipeline support.
+//! radius), while the cubic form is accurate to ~0.03%. Both columns use
+//! inset borders with disjoint border/fill geometry. The vector border is
+//! a filled path with an inner hole, encoded by `encode_vector_path`.
 //!
 //! Sizes are well above the real shadcn-token scale (dot radius ~55px, card
 //! ~150px tall) specifically so the triangulated-vs-vector difference reads
@@ -214,21 +214,29 @@ fn polygon_x_range_at_y(polygon: &[(f32, f32)], y: f32) -> Option<(f32, f32)> {
 }
 
 /// Scanline sampling resolution for every faceted-polygon rasterizer below —
-/// the height of one emitted `Quad` row. Lower only changes how finely the
-/// polygon's already-fixed straight edges are sampled, never the shape.
+/// the maximum height of one emitted `Quad` row. Lower only changes how
+/// finely the polygon's already-fixed straight edges are sampled.
 const ROW_HEIGHT: f32 = 1.0;
 
 /// Push one row's `Quad`, in `rect`'s screen-space placement, spanning local
 /// x `[x0, x1)` at local y `y`. No-op for a zero/negative-width span (a
 /// corner's dead band, or two rings whose bounds already touch).
-fn push_row_quad(scene: &mut Scene, rect: Rect, y: f32, x0: f32, x1: f32, color: Color) {
+fn push_row_quad(
+    scene: &mut Scene,
+    rect: Rect,
+    y: f32,
+    height: f32,
+    x0: f32,
+    x1: f32,
+    color: Color,
+) {
     if x1 <= x0 {
         return;
     }
     scene.quad(Quad {
         rect: Rect::new(
             Point::new(rect.origin.x + x0, rect.origin.y + y),
-            Size::new(x1 - x0, ROW_HEIGHT),
+            Size::new(x1 - x0, height),
         ),
         fill: color,
         corner_radii: CornerRadii::all(0.0),
@@ -237,7 +245,7 @@ fn push_row_quad(scene: &mut Scene, rect: Rect, y: f32, x0: f32, x1: f32, color:
 }
 
 /// Rasterize `polygon` (in `rect`'s local `0..w, 0..h` space) into a stack of
-/// 1px-tall `Quad` rows — real, inspectable facet geometry built only from
+/// at-most-1px-tall `Quad` rows — inspectable facet geometry built only from
 /// the one primitive (`Quad`) guaranteed to tessellate exactly as drawn
 /// (axis-aligned, no corner rounding involved). The polygon's straight edges
 /// and corner vertices are still exactly where they are; row height only
@@ -245,24 +253,18 @@ fn push_row_quad(scene: &mut Scene, rect: Rect, y: f32, x0: f32, x1: f32, color:
 fn push_faceted_polygon_fill(scene: &mut Scene, rect: Rect, polygon: &[(f32, f32)], fill: Color) {
     let mut y = 0.0;
     while y < rect.size.height {
-        let sample_y = (y + ROW_HEIGHT * 0.5).min(rect.size.height - f32::EPSILON);
+        let height = ROW_HEIGHT.min(rect.size.height - y);
+        let sample_y = y + height * 0.5;
         if let Some((x0, x1)) = polygon_x_range_at_y(polygon, sample_y) {
-            push_row_quad(scene, rect, y, x0, x1, fill);
+            push_row_quad(scene, rect, y, height, x0, x1, fill);
         }
-        y += ROW_HEIGHT;
+        y += height;
     }
 }
 
 /// Rasterize a stroked rounded rect as a true ring (ring color) around a
-/// disjoint interior (fill color) — never a full stroke-color underlay with
-/// fill painted on top of it. A round review caught that the naive
-/// "outer polygon in stroke color, inner polygon in fill color on top"
-/// approach composites both translucent colors together across the whole
-/// interior (both `BORDER` and `FILL`/`CARD_FILL` are `< 1.0` alpha), so the
-/// triangulated column's interior visibly lightened relative to the vector
-/// column's — the vector lane's fill and stroke are disjoint regions
-/// (`stroke_to_fill` expands a centreline, it doesn't underlay the whole
-/// fill), so there was nothing to match. Per row: a `[outer_x0, inner_x0)`
+/// disjoint interior (fill color). Both colors are translucent, so overlap
+/// would change the composited color. Per row: a `[outer_x0, inner_x0)`
 /// ring segment, an `[inner_x0, inner_x1)` fill segment, an
 /// `[inner_x1, outer_x1)` ring segment — zero overlap by construction. Rows
 /// above/below the inner rect's y-range (the corners' pure-ring band) get a
@@ -280,9 +282,18 @@ fn push_faceted_ring_and_fill(
 ) {
     let mut y = 0.0;
     while y < rect.size.height {
-        let sample_y = (y + ROW_HEIGHT * 0.5).min(rect.size.height - f32::EPSILON);
+        // Split at the inner top/bottom even for fractional widths (the
+        // card uses 1.5px). A fixed 1px row would move those boundaries.
+        let mut end_y = (y + ROW_HEIGHT).min(rect.size.height);
+        for boundary in [inset, inset + inner_height] {
+            if boundary > y {
+                end_y = end_y.min(boundary);
+            }
+        }
+        let height = end_y - y;
+        let sample_y = y + height * 0.5;
         let Some((outer_x0, outer_x1)) = polygon_x_range_at_y(outer, sample_y) else {
-            y += ROW_HEIGHT;
+            y = end_y;
             continue;
         };
 
@@ -295,14 +306,40 @@ fn push_faceted_ring_and_fill(
             Some((inner_x0, inner_x1)) => {
                 let abs_inner_x0 = inner_x0 + inset;
                 let abs_inner_x1 = inner_x1 + inset;
-                push_row_quad(scene, rect, y, outer_x0, abs_inner_x0, ring_color);
-                push_row_quad(scene, rect, y, abs_inner_x0, abs_inner_x1, fill_color);
-                push_row_quad(scene, rect, y, abs_inner_x1, outer_x1, ring_color);
+                push_row_quad(scene, rect, y, height, outer_x0, abs_inner_x0, ring_color);
+                push_row_quad(
+                    scene,
+                    rect,
+                    y,
+                    height,
+                    abs_inner_x0,
+                    abs_inner_x1,
+                    fill_color,
+                );
+                push_row_quad(scene, rect, y, height, abs_inner_x1, outer_x1, ring_color);
             }
-            None => push_row_quad(scene, rect, y, outer_x0, outer_x1, ring_color),
+            None => push_row_quad(scene, rect, y, height, outer_x0, outer_x1, ring_color),
         }
-        y += ROW_HEIGHT;
+        y = end_y;
     }
+}
+
+/// Shared inset-border convention: `rect` is the outer boundary; the fill
+/// starts one border width inside it, with the corner radius reduced too.
+fn border_interior(rect: Rect, radius: f32, width: f32) -> (Rect, f32) {
+    let inset = width
+        .max(0.0)
+        .min(rect.size.width.min(rect.size.height) * 0.5);
+    (
+        Rect::new(
+            Point::new(rect.origin.x + inset, rect.origin.y + inset),
+            Size::new(
+                rect.size.width - 2.0 * inset,
+                rect.size.height - 2.0 * inset,
+            ),
+        ),
+        (radius - inset).max(0.0),
+    )
 }
 
 /// The showcase's local "triangulated" baseline: a faceted-polygon
@@ -323,11 +360,10 @@ fn faceted_rounded_rect(
         Some(stroke) => {
             let outer = rounded_rect_polygon(rect.size.width, rect.size.height, radius);
 
-            let inset = stroke.width.max(1.0);
-            let inner_w = (rect.size.width - 2.0 * inset).max(0.0);
-            let inner_h = (rect.size.height - 2.0 * inset).max(0.0);
-            let inner_r = (radius - inset).max(0.0);
-            let inner = rounded_rect_polygon(inner_w, inner_h, inner_r);
+            let (inner_rect, inner_r) = border_interior(rect, radius, stroke.width);
+            let inset = inner_rect.origin.y - rect.origin.y;
+            let inner =
+                rounded_rect_polygon(inner_rect.size.width, inner_rect.size.height, inner_r);
 
             push_faceted_ring_and_fill(
                 scene,
@@ -335,7 +371,7 @@ fn faceted_rounded_rect(
                 &outer,
                 &inner,
                 inset,
-                inner_h,
+                inner_rect.size.height,
                 stroke.color,
                 fill,
             );
@@ -402,7 +438,10 @@ fn rounded_rect_commands(w: f32, h: f32, r: f32) -> Vec<mkui_vector2d::PathComma
 }
 
 /// Vector rounded rect: the same shape as [`faceted_rounded_rect`],
-/// built as a `Primitive::VectorPath` (#139) via [`rounded_rect_commands`].
+/// built as filled `Primitive::VectorPath`s (#139). A border is the outer
+/// contour minus the inner contour, alongside a separate interior fill.
+/// This matches the faceted inset ring without a centered stroke overlapping
+/// the fill (which would blend both translucent colors at the inner edge).
 /// `radius == min(w, h) / 2` closes into a stadium/circle, which is how the
 /// dot row below reuses this same builder.
 #[cfg(feature = "slug")]
@@ -413,22 +452,54 @@ fn vector_rounded_rect(
     fill: Color,
     stroke: Option<(Color, f32)>,
 ) {
-    use mkui_vector2d::{Bounds, FillRule, Stroke as VectorStroke, Vec2, VectorPath};
+    use mkui_vector2d::{Bounds, FillRule, PathCommand, Vec2, VectorPath};
     use std::sync::Arc;
 
     let w = rect.size.width;
     let h = rect.size.height;
-    let commands = rounded_rect_commands(w, h, radius);
+    let mut commands = rounded_rect_commands(w, h, radius);
     let bounds = Bounds::new(Vec2::ZERO, Vec2::new(w, h));
+    let mut paint = fill;
+    if let Some((color, width)) = stroke {
+        let (inner, inner_radius) = border_interior(rect, radius, width);
+        if inner.size.width > 0.0 && inner.size.height > 0.0 {
+            let inset = inner.origin.x - rect.origin.x;
+            // Reflect the symmetric inner rounded rect horizontally to
+            // reverse its winding, then place it inside the outer contour.
+            // NonZero fill thus makes a hole; EvenOdd is not supported by
+            // the vector encoder. The hole and interior share one geometry.
+            let hole_point = |p: Vec2| Vec2::new(w - inset - p.x, inset + p.y);
+            commands.extend(
+                rounded_rect_commands(inner.size.width, inner.size.height, inner_radius)
+                    .into_iter()
+                    .map(|command| match command {
+                        PathCommand::MoveTo(p) => PathCommand::MoveTo(hole_point(p)),
+                        PathCommand::LineTo(p) => PathCommand::LineTo(hole_point(p)),
+                        PathCommand::CubicTo {
+                            control1,
+                            control2,
+                            to,
+                        } => PathCommand::CubicTo {
+                            control1: hole_point(control1),
+                            control2: hole_point(control2),
+                            to: hole_point(to),
+                        },
+                        PathCommand::Close => PathCommand::Close,
+                        _ => unreachable!("rounded_rect_commands emits only lines and cubics"),
+                    }),
+            );
+            vector_rounded_rect(scene, inner, inner_radius, fill, None);
+        }
+        // The interior was emitted separately; this path paints only border.
+        paint = color;
+    }
     let path = VectorPath::new(commands, FillRule::NonZero, bounds);
 
     scene.vector_path(mkui_wgpu::PlacedVectorPath {
         path: Arc::new(path),
-        stroke: stroke.map(|(_, width)| VectorStroke::new(width)),
-        stroke_color: stroke
-            .map(|(color, _)| color)
-            .unwrap_or(Color::rgba(0.0, 0.0, 0.0, 0.0)),
-        fill_color: Some(fill),
+        stroke: None,
+        stroke_color: Color::rgba(0.0, 0.0, 0.0, 0.0),
+        fill_color: Some(paint),
         // Bottom-left, not top-left — see `rounded_rect_commands`' doc.
         origin_px: [rect.origin.x, rect.height_end()],
         scale_px_per_unit: 1.0,
@@ -580,9 +651,8 @@ mod tests {
     /// `push_faceted_ring_and_fill`/`push_faceted_polygon_fill` can emit: at
     /// least 1 (full-width ring, or the no-stroke fill), at most 3 (ring,
     /// fill, ring) for a stroked row with nonzero ring width on both sides.
-    /// `height.round()` handles float step accumulation; every height in
-    /// this file is already a whole number, so this is exact row-count
-    /// (just not exact *quad* count — individual rows can emit 1-3).
+    /// Every height in this file is a whole number. Fractional border
+    /// boundaries can add up to two rows to this baseline count.
     fn row_count(height: f32) -> usize {
         height.round() as usize
     }
@@ -594,7 +664,7 @@ mod tests {
         let button = row_count(BUTTON_SIZE.height);
         let card = row_count(CARD_SIZE.height);
         let dot = row_count(DOT_SIZE.height);
-        (button + card + dot, button * 3 + card * 3 + dot)
+        (button + card + dot, (button + 2) * 3 + (card + 2) * 3 + dot)
     }
 
     #[test]
@@ -628,8 +698,8 @@ mod tests {
                 .filter(|p| matches!(p, Primitive::VectorPath(_)))
                 .count();
             assert_eq!(
-                vector_paths, 3,
-                "right column should emit exactly 3 VectorPaths"
+                vector_paths, 5,
+                "right column should emit border + fill for button/card, and a filled dot"
             );
         }
         #[cfg(not(feature = "slug"))]
@@ -655,12 +725,127 @@ mod tests {
         assert_eq!(scene.viewport, WINDOW);
     }
 
+    /// Sample the actual emitted paints, retaining every covering color so
+    /// a border/fill overlap cannot hide behind the last paint's color.
+    fn paints_at(scene: &Scene, point: Point) -> Vec<Color> {
+        let mut colors = Vec::new();
+        for primitive in &scene.primitives {
+            match primitive {
+                Primitive::Quad(q) => {
+                    if point.x >= q.rect.origin.x
+                        && point.x < q.rect.width_end()
+                        && point.y >= q.rect.origin.y
+                        && point.y < q.rect.height_end()
+                    {
+                        colors.push(q.fill);
+                    }
+                }
+                #[cfg(feature = "slug")]
+                Primitive::VectorPath(v) => {
+                    let local = mkui_vector2d::Vec2::new(
+                        (point.x - v.origin_px[0]) / v.scale_px_per_unit,
+                        (v.origin_px[1] - point.y) / v.scale_px_per_unit,
+                    );
+                    if let Some(fill) = v.fill_color {
+                        if vector_path_contains(&v.path, local) {
+                            colors.push(fill);
+                        }
+                    }
+                    if let Some(stroke) = &v.stroke {
+                        let outline = mkui_vector2d::stroke_to_fill(&v.path, stroke);
+                        if vector_path_contains(&outline, local) {
+                            colors.push(v.stroke_color);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        colors
+    }
+
+    /// Non-zero winding of the encoder's actual curve records. Straight
+    /// edges are exact; subdividing quadratic corners is sufficient here
+    /// because probes are in the middle of straight edges, far from arcs.
+    #[cfg(feature = "slug")]
+    fn vector_path_contains(path: &mkui_vector2d::VectorPath, p: mkui_vector2d::Vec2) -> bool {
+        use mkui_vector2d::{encode_vector_path, SlugConfig, Vec2};
+
+        let glyph = encode_vector_path(path, &SlugConfig::new(8, 8, 1)).unwrap();
+        let mut winding = 0;
+        for curve in glyph.curves {
+            let steps = if curve.p1 == curve.p2 { 1 } else { 32 };
+            let mut a = curve.p0;
+            for step in 1..=steps {
+                let t = step as f32 / steps as f32;
+                let u = 1.0 - t;
+                let b = Vec2::new(
+                    u * u * curve.p0.x + 2.0 * u * t * curve.p1.x + t * t * curve.p2.x,
+                    u * u * curve.p0.y + 2.0 * u * t * curve.p1.y + t * t * curve.p2.y,
+                );
+                if (a.y <= p.y) != (b.y <= p.y) {
+                    let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+                    if x > p.x {
+                        winding += if b.y > a.y { 1 } else { -1 };
+                    }
+                }
+                a = b;
+            }
+        }
+        winding != 0
+    }
+
+    #[test]
+    fn comparison_columns_agree_on_inset_border_and_fill_at_straight_edges() {
+        let scene = build_scene();
+        for (y, size, width, fill) in [
+            (BUTTON_Y, BUTTON_SIZE, BUTTON_STROKE_WIDTH, FILL),
+            (CARD_Y, CARD_SIZE, CARD_STROKE_WIDTH, CARD_FILL),
+        ] {
+            // 1.5px reproduces #143's button finding; the fractional card
+            // probes also catch scanlines snapping its 1.5px border to 1/2px.
+            if y == BUTTON_Y {
+                check_edge_samples(&scene, y, size, width, fill, 1.5);
+            }
+            for depth in [-0.5, 0.5, width - 0.25, width + 0.25, 2.5] {
+                check_edge_samples(&scene, y, size, width, fill, depth);
+            }
+        }
+    }
+
+    fn check_edge_samples(scene: &Scene, y: f32, size: Size, width: f32, fill: Color, depth: f32) {
+        let expected = if depth < 0.0 {
+            vec![]
+        } else if depth < width {
+            vec![BORDER]
+        } else {
+            vec![fill]
+        };
+        for (x, local_y) in [
+            (depth, size.height * 0.5),
+            (size.width - depth, size.height * 0.5),
+            (size.width * 0.5, depth),
+            (size.width * 0.5, size.height - depth),
+        ] {
+            let sample = |column| {
+                paints_at(
+                    scene,
+                    Point::new(column + (COL_WIDTH - size.width) * 0.5 + x, y + local_y),
+                )
+            };
+            let left = sample(COL_LEFT_X);
+            let right = sample(COL_RIGHT_X);
+            assert_eq!(left, right, "row y={y}, local ({x}, {local_y})");
+            assert_eq!(left, expected, "row y={y}, local ({x}, {local_y})");
+        }
+    }
+
     /// Regression test for the y-axis bug a code review caught before merge:
     /// `mkui_vector2d_wgpu::PlacedVectorPath` is y-up (increasing path-y goes
     /// *up* the screen), the opposite of this crate's y-down `Rect`. Getting
     /// it wrong silently shifts every vector shape above where it belongs by
     /// its own height — nothing panics, nothing fails to compile, it just
-    /// renders wrong. Compares each `PlacedVectorPath`'s screen-space bbox
+    /// renders wrong. Compares each outer `PlacedVectorPath`'s screen-space bbox
     /// (derived from `origin_px` + path `bounds` under the adapter's
     /// documented y-flip) directly against its row's known `(Y, SIZE)` —
     /// the same source-of-truth constants `build_scene` draws from, not
@@ -674,7 +859,11 @@ mod tests {
             .primitives
             .iter()
             .filter_map(|p| match p {
-                Primitive::VectorPath(v) => Some(v),
+                Primitive::VectorPath(v)
+                    if v.fill_color == Some(BORDER) || v.fill_color == Some(DOT_FILL) =>
+                {
+                    Some(v)
+                }
                 _ => None,
             })
             .collect();

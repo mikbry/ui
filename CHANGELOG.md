@@ -47,9 +47,13 @@ breaking changes can land on minor bumps).
     relative to the vector column (measured center RGB ~(79,74,69) vs.
     ~(40,32,27)). `push_faceted_ring_and_fill` now rasterizes the stroke
     as a true ring — disjoint `[outer, inner)` segments per row around a
-    separate `[inner_x0, inner_x1)` fill segment — so the two colors never
-    overlap, matching the vector lane (whose fill and `stroke_to_fill`
-    outline are already disjoint regions).
+    separate `[inner_x0, inner_x1)` fill segment.
+  - Fixed (#143): both comparison columns now use inset borders with
+    disjoint border/fill regions. The vector border uses an outer contour
+    with an inner hole instead of a centered stroke over the fill. Faceted
+    rows preserve the card's fractional 1.5px border boundaries. Regression
+    samples on all four straight edges verify matching border/fill colors
+    and no overlapping paints, including 1.5px inside the button's edge.
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
