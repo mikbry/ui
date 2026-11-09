@@ -30,16 +30,15 @@
 //!   `mkui_wgpu::Mkui::run`.
 //!
 //! Scope note (acceptance criterion "triangulated column shows visible
-//! polygons" — not literally met): the native wgpu tessellator's
-//! `tessellate_quad` does not rasterize `Quad::corner_radii` at all today
-//! (it always draws a plain rectangle — see `mkui-wgpu/src/tessellation.rs`),
-//! so the "triangulated" column below is byte-identical to what
-//! button/card/dot already render in production — a plain-cornered
-//! rectangle, not a faceted polygon. That's an issue↔codebase contradiction
-//! predating #143 (every Wave 2 component inherits it) and a
-//! tessellator-wide fix, not a showcase-page concern, so it isn't fixed
-//! here; see #212. The on-screen caption below names it so a viewer isn't
-//! left thinking the left column is broken.
+//! polygons"): `mkui-wgpu`'s native tessellator (`tessellate_quad`) now
+//! facets `Quad::corner_radii` into a low-segment triangle-fan approximation
+//! (`push_rounded_rect_fill`, 3 segments per 90° corner) instead of ignoring
+//! it — a codebase-wide fix (every `CornerRadii`-using atom benefits, not
+//! just this showcase), landed alongside #143 after review flagged the
+//! original "documented but unfixed" gap. One piece is still open and
+//! tracked in #212: the *stroke* outline (button/card's border) is still 4
+//! straight edge strips and does not yet bend around the rounded corner —
+//! the on-screen caption below names that residual gap.
 
 use mkui_wgpu::components::label;
 use mkui_wgpu::{
@@ -296,13 +295,17 @@ fn build_scene() -> Scene {
         column_header_style(),
     );
 
-    // Honest caveat (#212): the native tessellator doesn't rasterize
-    // corner_radii at all yet, so the left column renders as a plain
-    // rectangle today, not the faceted polygon its name implies.
+    // Honest caveat (#212): the fill facets corner_radii now, but the
+    // stroke outline (the button/card border) is still 4 straight edge
+    // strips and doesn't bend around the rounded corner yet. The box height
+    // below is sized for 2 wrapped lines (not 1) specifically because an
+    // undersized box here previously truncated this caption mid-sentence,
+    // silently dropping the trailing issue reference — see the caption_style
+    // line_height (18px) × the lines this text actually needs.
     label(
         &mut scene,
-        Rect::new(Point::new(COL_LEFT_X, 104.0), Size::new(COL_WIDTH, 30.0)),
-        "(renders as a plain rectangle today — tessellate_quad ignores corner_radii, see #212)",
+        Rect::new(Point::new(COL_LEFT_X, 104.0), Size::new(COL_WIDTH, 36.0)),
+        "(border doesn't follow rounded corners yet — see #212)",
         caption_style(),
     );
 

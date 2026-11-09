@@ -12,8 +12,8 @@ use mkui_text::{
 };
 
 use crate::types::{
-    Color, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene, Shadow, Size, Text,
-    TextAlign,
+    Color, CornerRadii, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene, Shadow,
+    Size, Text, TextAlign,
 };
 
 /// Round `value_px` to the nearest physical pixel at `device_pixel_ratio`,
@@ -96,8 +96,12 @@ fn tessellate_shadow(triangles: &mut Vec<GuiTriangle>, shadow: Shadow) {
 }
 
 fn tessellate_quad(triangles: &mut Vec<GuiTriangle>, quad: Quad) {
-    push_rect(triangles, quad.rect, quad.fill);
+    push_rounded_rect_fill(triangles, quad.rect, quad.corner_radii, quad.fill);
     if let Some(stroke) = quad.stroke {
+        // The stroke outline is still 4 straight edge strips — it does not
+        // yet bend around a rounded corner the way the fill above does
+        // (#212). A stroked rounded `Quad`'s border therefore cuts straight
+        // across its own faceted corners rather than following them.
         let width = stroke.width.max(1.0);
         let top = Rect::new(quad.rect.origin, Size::new(quad.rect.size.width, width));
         let bottom = Rect::new(
@@ -232,11 +236,215 @@ fn push_rect(triangles: &mut Vec<GuiTriangle>, rect: Rect, color: Color) {
     });
 }
 
+/// Facet count per 90° rounded corner. Deliberately low — not an attempt at
+/// a smooth circle, but a visibly *polygonal* approximation (an octagon for
+/// a full circle, a two-facet chamfer per button/card corner). This is the
+/// native wgpu backend's actual fidelity level for rounded shapes, and the
+/// Sprint 8 Wave 2 vector-primitives showcase (#143) needs that to read as
+/// visibly non-smooth next to the new vector lane's true curves at 1x, with
+/// no zoom (#212).
+const ROUNDED_CORNER_SEGMENTS: usize = 3;
+
+/// Fill `rect` as a rounded rectangle: a non-overlapping 3-band decomposition
+/// (middle + top + bottom, each a plain axis-aligned rect) plus one
+/// low-facet-count triangle fan per corner (#212). Exact for the uniform
+/// radius every call site in this codebase actually uses
+/// (`CornerRadii::all(r)`); for independent per-corner radii it stays
+/// seam-free (each band's extent is the `max` of its two corners, each fan
+/// uses its own corner's radius) without being claimed pixel-perfect, since
+/// nothing here exercises that case today. Any corner radius `<= 0` across
+/// the board falls back to the exact previous behavior (`push_rect`, 2
+/// triangles) — a zero-radius `Quad` renders byte-identically to before.
+fn push_rounded_rect_fill(
+    triangles: &mut Vec<GuiTriangle>,
+    rect: Rect,
+    corners: CornerRadii,
+    color: Color,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || color.a <= 0.0 {
+        return;
+    }
+
+    let max_r = rect.size.width.min(rect.size.height) * 0.5;
+    let tl = corners.top_left.clamp(0.0, max_r);
+    let tr = corners.top_right.clamp(0.0, max_r);
+    let br = corners.bottom_right.clamp(0.0, max_r);
+    let bl = corners.bottom_left.clamp(0.0, max_r);
+
+    if tl <= 0.0 && tr <= 0.0 && br <= 0.0 && bl <= 0.0 {
+        push_rect(triangles, rect, color);
+        return;
+    }
+
+    let x0 = rect.origin.x;
+    let y0 = rect.origin.y;
+    let x1 = rect.width_end();
+    let y1 = rect.height_end();
+    let top_band = tl.max(tr);
+    let bottom_band = bl.max(br);
+
+    push_rect(
+        triangles,
+        Rect::new(
+            Point::new(x0, y0 + top_band),
+            Size::new(x1 - x0, (y1 - y0 - top_band - bottom_band).max(0.0)),
+        ),
+        color,
+    );
+    push_rect(
+        triangles,
+        Rect::new(
+            Point::new(x0 + tl, y0),
+            Size::new((x1 - x0 - tl - tr).max(0.0), top_band),
+        ),
+        color,
+    );
+    push_rect(
+        triangles,
+        Rect::new(
+            Point::new(x0 + bl, y1 - bottom_band),
+            Size::new((x1 - x0 - bl - br).max(0.0), bottom_band),
+        ),
+        color,
+    );
+
+    use std::f32::consts::PI;
+    push_corner_fan(
+        triangles,
+        Point::new(x0 + tl, y0 + tl),
+        tl,
+        PI,
+        PI * 1.5,
+        color,
+    );
+    push_corner_fan(
+        triangles,
+        Point::new(x1 - tr, y0 + tr),
+        tr,
+        PI * 1.5,
+        PI * 2.0,
+        color,
+    );
+    push_corner_fan(
+        triangles,
+        Point::new(x1 - br, y1 - br),
+        br,
+        0.0,
+        PI * 0.5,
+        color,
+    );
+    push_corner_fan(
+        triangles,
+        Point::new(x0 + bl, y1 - bl),
+        bl,
+        PI * 0.5,
+        PI,
+        color,
+    );
+}
+
+/// Triangle-fan a single rounded corner: `ROUNDED_CORNER_SEGMENTS` triangles
+/// from `center` to points on the circle of `radius` swept from
+/// `start_angle` to `end_angle` (radians, standard screen convention — angle
+/// 0 points in `+x`, increasing angle rotates toward `+y`, i.e. "down").
+/// No-op for `radius <= 0` (a sharp corner needs no fan — the band
+/// decomposition in [`push_rounded_rect_fill`] already reaches it exactly).
+fn push_corner_fan(
+    triangles: &mut Vec<GuiTriangle>,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+    color: Color,
+) {
+    if radius <= 0.0 {
+        return;
+    }
+    let step = (end_angle - start_angle) / ROUNDED_CORNER_SEGMENTS as f32;
+    let point_at = |angle: f32| {
+        Point::new(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        )
+    };
+    let mut previous = point_at(start_angle);
+    for i in 1..=ROUNDED_CORNER_SEGMENTS {
+        let next = point_at(start_angle + step * i as f32);
+        triangles.push(GuiTriangle {
+            points: [center, previous, next],
+            color,
+        });
+        previous = next;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size, Text};
+
+    // ---- #212: rounded Quad fill actually facets corner_radii -------------
+
+    #[test]
+    fn zero_radius_quad_tessellates_to_exactly_two_triangles() {
+        // Regression: a non-rounded `Quad` (the overwhelming common case —
+        // hit boxes, panels with `CornerRadii::all(0.0)`, etc.) must render
+        // byte-identically to the pre-#212 `push_rect` behavior.
+        let mut triangles = Vec::new();
+        push_rounded_rect_fill(
+            &mut triangles,
+            Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 40.0)),
+            CornerRadii::all(0.0),
+            Color::rgb(1.0, 1.0, 1.0),
+        );
+        assert_eq!(triangles.len(), 2);
+    }
+
+    #[test]
+    fn rounded_quad_tessellates_to_more_than_a_plain_rectangle() {
+        let mut triangles = Vec::new();
+        push_rounded_rect_fill(
+            &mut triangles,
+            Rect::new(Point::new(0.0, 0.0), Size::new(260.0, 70.0)),
+            CornerRadii::all(18.0),
+            Color::rgb(1.0, 1.0, 1.0),
+        );
+        assert!(
+            triangles.len() > 2,
+            "a rounded corner must add geometry beyond the plain 2-triangle rect, got {}",
+            triangles.len()
+        );
+    }
+
+    #[test]
+    fn full_circle_quad_emits_only_the_four_corner_fans() {
+        // radius == size/2 on a square: the 3 bands all degenerate to zero
+        // size (fully consumed by the corner radius), so only the 4 corner
+        // fans contribute geometry — this is the showcase's (#143) dot row.
+        let mut triangles = Vec::new();
+        push_rounded_rect_fill(
+            &mut triangles,
+            Rect::new(Point::new(0.0, 0.0), Size::new(110.0, 110.0)),
+            CornerRadii::all(55.0),
+            Color::rgb(1.0, 1.0, 1.0),
+        );
+        assert_eq!(triangles.len(), 4 * ROUNDED_CORNER_SEGMENTS);
+
+        // Every emitted vertex should lie at the shared center or within a
+        // tight tolerance of radius 55 from it — the polygon approximates a
+        // circle, it doesn't bulge outside or collapse inward.
+        let center = Point::new(55.0, 55.0);
+        for triangle in &triangles {
+            for p in triangle.points {
+                let dist = ((p.x - center.x).powi(2) + (p.y - center.y).powi(2)).sqrt();
+                assert!(
+                    dist < 0.01 || (dist - 55.0).abs() < 0.01,
+                    "vertex {p:?} should be the center or on the radius-55 circle, got dist {dist}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn text_tessellation_produces_triangles() {
