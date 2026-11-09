@@ -68,6 +68,65 @@ breaking changes can land on minor bumps).
     only when `stroke` is `Some`. Everything else (width/caps/joins/dash
     units, placement scale) passes straight through to the adapter unchanged;
     no local reinterpretation of stroke units.
+- **`dot` emits `Primitive::VectorPath` for its circle — Sprint 8 Wave 2 (#142),
+  the killer Sprint 8 demo primitive.** With the `slug` feature on, `dot`'s
+  body (and halo, when present) now paint as a true vector circle instead of
+  the quad this atom drew through v0.10.0 — triangulated circles are famously
+  polygonal; vector circles are mathematically smooth at any radius.
+  - **Circle construction**: 4 cubic Bézier arcs around a unit circle
+    (`kappa ≈ 0.5523`), placed by translating to the dot's centre and scaling
+    by its radius — no `LineTo` segments, so the boundary is a true curve, not
+    a polygon. The general `encode_vector_path` encoder (#137) subdivides the
+    cubics to quadratics internally; `dot` needs no local flattening. A CPU
+    test calls the real encoder directly on the cached unit circle — the
+    renderer's own call site, `encode_fill`, drops an encode failure
+    silently via `.ok()?`, so a dot would just vanish on the `slug` lane
+    with no error if it ever didn't; this is checked directly rather than
+    inferred from `dot()` only having built a primitive — and it encodes
+    cleanly.
+  - **Allocation-free hot path**: the unit-circle geometry is built once into
+    a process-wide `Arc`-shared `VectorPath` (`std::sync::LazyLock`); every
+    `dot()` call — body and halo alike, across every variant/size — clones
+    the `Arc` (a refcount bump) and only varies placement (`origin_px`/
+    `scale_px_per_unit`) and fill color.
+  - **Zero behavior change off `slug`**: the fallback is the exact v0.10.0
+    quad, same primitive order (halo, then body).
+  - **Cross-consumer GPU acceptance test** (`render/dot_vector_gpu.rs`,
+    `dot_vector_vs_triangulated_*`, `gpu-tests`+`slug`) — drives the real
+    vector-path lane (`scene_vector_paths` + `vector_path_paints` +
+    `SlugAdapter`) against the real triangulated quad path
+    (`tessellate_scene` + the UI pipeline) on #106's Lavapipe harness: a point
+    inside the square's bounding box but outside the circle — the corner a
+    circle doesn't have — is covered by the triangulated primitive and not by
+    the vector one; a whole-target scan finds several partial-coverage
+    (anti-aliased) texels around the vector circle's curved edge and exactly
+    zero around the triangulated quad's flat, binary edge; and the vector
+    shape's integrated coverage area tracks circle area (~`pi/4` of the
+    square), not square area.
+  - **Scope decision — halo stays two solid fills, not one stroked path**:
+    the issue's anti-pattern note prefers a single stroked path over a
+    separate halo fill, for primitive economy. The decisive fact:
+    `render/mod.rs`'s `vector_path_paints` already lowers one
+    `PlacedVectorPath` carrying both a `fill_color` *and* a `stroke` into
+    **two** `PathPaint`s (`Fill` then `Stroke`), which pack into two
+    separate Slug GPU instances — exactly the same instance count as `dot`'s
+    two independent fills. A combined path would only save one entry in
+    `Scene::primitives` (a `Vec` push, not a draw), while adding a per-frame
+    `stroke_to_fill` expansion (`mkui-vector2d`) that flattens the
+    centreline to polylines (`CURVE_FLATTEN_STEPS = 24`) before offsetting —
+    the halo ring would itself end up faceted, exactly what this issue's
+    circle work is about *not* shipping — and reversing today's halo-then-body
+    paint order (a combined path's stroke always draws after its own fill).
+    `dot` keeps the halo as its own solid-fill `VectorPath` (the same shared
+    unit circle, placed at 1.5× the radius): no GPU-instance cost over a
+    stroked alternative, no faceting, no reordering.
+  - **Scope decision**: the triangulated (off-`slug`) fallback renders as a
+    plain square, not a rounded shape — `tessellate_quad`/`push_rect` never
+    consumed `Quad::corner_radii` even before #142 (confirmed by inspection;
+    the renderer has no quad-corner-rounding path at all today). Rounding the
+    triangulated fallback is a pre-existing, unrelated gap, out of scope here;
+    #142's contract is only that the `slug` circle is exact and the
+    off-feature path is byte-identical to v0.10.0, which it is.
 - **Component Slug-lane rendering path (`mikbry/ui#171`, Part B.2 of `#165`'s
   Sprint 8 tail).** `mkui-wgpu`'s component call site — `slug_text::place_slug_run`
   plus a new `slug_text::expand_slug_text` — now consumes Part B.1's
