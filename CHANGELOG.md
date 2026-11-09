@@ -451,6 +451,16 @@ breaking changes can land on minor bumps).
   needing a GPU. CI's Vulkan Validation Layers enforcement (#153/#154) is the
   safety net going forward: the `gpu-offscreen` job now fails outright if a
   bind-group/buffer-size mismatch like this one reaches Lavapipe undetected.
+- **`mkui-text`: `FontIdAllocator` rustdoc link in `system.rs` kept in its
+  short `[\`FontIdAllocator\`]` form (#116).** PR #109's `isolated()`
+  visibility-tighten fix-commit also rewrote this link from the explicit
+  `[\`FontIdAllocator\`](crate::FontIdAllocator)` path to the short form;
+  Codex round-N+2 flagged the rewrite as unrelated scope creep and filed it
+  as a followup. Verified here: the explicit-path form trips
+  `rustdoc::redundant_explicit_links` (warn-by-default since Rust 1.73,
+  `cargo doc -D warnings`) because `FontIdAllocator` already resolves via the
+  crate-root re-export in scope — the short form the #109 agent landed is the
+  lint-clean one. Documentation-only; no behavioral impact, no code change.
 
 ### Tooling
 - **`cargo doc -D warnings` CI gate closes the rustdoc-link drift gap (#127).**
