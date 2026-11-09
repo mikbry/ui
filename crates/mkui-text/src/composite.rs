@@ -138,7 +138,6 @@ mod fallback {
     /// [`ValidatedFallback`], or reject an unknown target with
     /// [`RegistryError::UnknownFont`]. The private field makes this the only
     /// construction path; providers and tests cannot bypass it.
-    #[allow(dead_code)]
     pub(crate) fn validate(
         target: FontId,
         is_registered: impl FnOnce(FontId) -> bool,
@@ -166,7 +165,6 @@ pub(crate) use fallback::ValidatedFallback;
 /// the single-lane bitmap adapter, which is always `Primary`); the outline
 /// provider in #67 constructs it, and the mixed-fallback tests here exercise
 /// it. The router already honors it — see `CompositeTextSystem::layout`.
-#[allow(dead_code)]
 pub(crate) enum RoutedRun {
     /// Render via the provider's primary (selected) face. The router stamps the
     /// selected `FontId`, its render class, and its registry generation.
@@ -605,7 +603,6 @@ impl CompositeTextSystem {
     /// Crate-internal registration API: consumed by the in-crate outline
     /// provider in #67, and exercised by the mock-provider tests here. No
     /// shipping caller exists in #62 (generic-only boundary).
-    #[allow(dead_code)]
     pub(crate) fn add_provider(&mut self, provider: Box<dyn FontProvider>) -> ProviderId {
         self.push_provider(provider)
     }
@@ -620,7 +617,6 @@ impl CompositeTextSystem {
     /// pair is idempotent — it returns the existing [`FontId`] without a second
     /// allocation. The router obtains the `FontId` *only* here; it never
     /// reconstructs one from `local`.
-    #[allow(dead_code)]
     pub(crate) fn register_face(
         &mut self,
         provider_id: ProviderId,
@@ -664,6 +660,11 @@ impl CompositeTextSystem {
     /// On generation exhaustion the old mapping is left intact and
     /// [`RegistryError::GenerationOverflow`] is returned. Returns the new
     /// generation on success.
+    // allow: the only writer of the `font_generation` that the public
+    // `font_generation()` accessor exposes to downstream cache keys; no
+    // shipping reload trigger calls it yet, but the generation-bump tests
+    // below exercise it. Also keeps `next_generation` and
+    // `RegistryError::GenerationOverflow` live.
     #[allow(dead_code)]
     pub(crate) fn reload_face(
         &mut self,
@@ -691,7 +692,6 @@ impl CompositeTextSystem {
     /// being silently coerced to bitmap at dispatch. Because the token is the
     /// only way to construct a `Fallback` and it cannot be forged, an
     /// unregistered fallback route is unrepresentable downstream.
-    #[allow(dead_code)]
     pub(crate) fn validated_fallback(
         &self,
         target: FontId,
