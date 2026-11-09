@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "slug")]
 use crate::types::PlacedVectorPath;
 #[cfg(feature = "slug")]
-use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, Stroke as PathStroke, Vec2, VectorPath};
+use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, Vec2, VectorPath};
 
 /// Card chrome — rounded rect with fill, stroke, no shadow. The shadcn
 /// "Card" primitive (minus the typography slot). Use this for inline list
@@ -62,22 +62,23 @@ fn card_triangulated(scene: &mut Scene, rect: Rect, style: &CardStyle) {
     });
 }
 
-/// #141 vector path: the rounded rect's fill plus its border stroke, pushed
-/// as two separate `PlacedVectorPath`s (fill first, stroke on top, matching
+/// #141 vector path: the rounded rect's fill plus its border, pushed as two
+/// separate `PlacedVectorPath`s (fill first, border on top, matching
 /// `card_triangulated`'s fill-then-border-rects order) — the substrate
 /// corners + border lane, in place of the triangulated approximation.
 ///
-/// Codex round-1 review of #141: `PathStroke` centers the stroke on its
-/// path's centerline, expanding `stroke_width / 2` on *both* sides. A stroke
-/// centered on the fill's own outer boundary therefore painted half the
-/// border outside the card's allocated rect — `card_triangulated`'s border
-/// rects, by contrast, are drawn fully inside the rect (see
-/// `tessellate_quad`). To match that inset footprint, the stroke is centered
-/// on a *second*, smaller rounded rect — inset by `stroke_width / 2` on every
-/// side, with the corner radius shrunk by the same amount (the concentric
-/// offset of a rounded rect) — so the stroke's outer edge lands exactly on
-/// the original rect's boundary and its inner edge lands `stroke_width`
-/// inside it, the same band `card_triangulated`'s border rects cover.
+/// The border is *filled* geometry (an outer-minus-inner annulus, built by
+/// [`build_rounded_rect_border_path`]), not a [`mkui_vector2d_wgpu::Stroke`]
+/// centered on a path. Codex round-1 review of #141 found that a centered
+/// stroke on the fill's own outer boundary paints half the border outside
+/// the card's allocated rect; round-2 review found that re-centering the
+/// stroke on an *inset* centerline instead (this function's first fix)
+/// introduces its own two edge cases — the border vanishing once the inset
+/// collapses the centerline rect to nothing, and a reduced, non-matching
+/// outer radius once the inset shrinks the centerline's radius below zero.
+/// Building the border directly as an annulus — whose *outer* contour is
+/// always the fill's own unmodified outline — sidesteps both: see
+/// [`build_rounded_rect_border_path`]'s docs.
 #[cfg(feature = "slug")]
 fn card_vector(scene: &mut Scene, rect: Rect, style: &CardStyle) {
     let fill_path = rounded_rect_path(rect.size.width, rect.size.height, style.corner_radius);
@@ -93,20 +94,18 @@ fn card_vector(scene: &mut Scene, rect: Rect, style: &CardStyle) {
     if style.stroke_width <= 0.0 {
         return;
     }
-    let inset = style.stroke_width * 0.5;
-    let stroke_rect_width = rect.size.width - style.stroke_width;
-    let stroke_rect_height = rect.size.height - style.stroke_width;
-    if stroke_rect_width <= 0.0 || stroke_rect_height <= 0.0 {
-        return;
-    }
-    let stroke_radius = (style.corner_radius - inset).max(0.0);
-    let stroke_path = rounded_rect_path(stroke_rect_width, stroke_rect_height, stroke_radius);
+    let border_path = rounded_rect_border_path(
+        rect.size.width,
+        rect.size.height,
+        style.corner_radius,
+        style.stroke_width,
+    );
     scene.vector_path(PlacedVectorPath {
-        path: stroke_path,
-        stroke: Some(PathStroke::new(style.stroke_width)),
+        path: border_path,
+        stroke: None,
         stroke_color: style.stroke,
-        fill_color: None,
-        origin_px: [rect.origin.x + inset, rect.origin.y + inset],
+        fill_color: Some(style.stroke),
+        origin_px: [rect.origin.x, rect.origin.y],
         scale_px_per_unit: 1.0,
     });
 }
@@ -148,60 +147,241 @@ fn rounded_rect_path(width: f32, height: f32, radius: f32) -> Arc<VectorPath> {
     path
 }
 
-/// Build a clockwise (in screen space) rounded-rect outline in local path
-/// space, placement is the caller's job via `PlacedVectorPath::origin_px`.
+/// Cache of border-annulus path geometry, parallel to [`ROUNDED_RECT_CACHE`]
+/// but keyed on the extra `stroke_width` dimension.
+/// `(width_bits, height_bits, radius_bits, stroke_width_bits)` -> path.
+#[cfg(feature = "slug")]
+type RoundedRectBorderCache = Mutex<HashMap<(u32, u32, u32, u32), Arc<VectorPath>>>;
+
+#[cfg(feature = "slug")]
+static ROUNDED_RECT_BORDER_CACHE: OnceLock<RoundedRectBorderCache> = OnceLock::new();
+
+#[cfg(feature = "slug")]
+fn rounded_rect_border_path(
+    width: f32,
+    height: f32,
+    radius: f32,
+    stroke_width: f32,
+) -> Arc<VectorPath> {
+    let key = (
+        width.to_bits(),
+        height.to_bits(),
+        radius.to_bits(),
+        stroke_width.to_bits(),
+    );
+    let cache = ROUNDED_RECT_BORDER_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("rounded-rect border cache poisoned");
+    if let Some(cached) = cache.get(&key) {
+        return cached.clone();
+    }
+    if cache.len() >= ROUNDED_RECT_CACHE_CAP {
+        cache.clear();
+    }
+    let path = Arc::new(build_rounded_rect_border_path(
+        width,
+        height,
+        radius,
+        stroke_width,
+    ));
+    cache.insert(key, path.clone());
+    path
+}
+
+/// 4/3 × (√2 − 1): distance (as a fraction of radius) from a circular arc's
+/// tangent point to its cubic-Bézier control point — the standard
+/// circle-to-cubic constant, shared by every rounded-rect contour this
+/// module builds.
+#[cfg(feature = "slug")]
+const KAPPA: f32 = 0.552_284_8;
+
+/// Build one clockwise (in screen space) rounded-rect contour — `MoveTo` +
+/// line/cubic segments + `Close` — in local path space, shifted by `offset`.
+/// Shared by [`build_rounded_rect_path`] (the fill, `offset` always zero)
+/// and [`build_rounded_rect_border_path`] (both the border's outer contour,
+/// `offset` zero, and its inner contour, `offset` the border inset).
 ///
 /// The Slug lane is y-up like a glyph's font units — the adapter projects
 /// `screen_y = origin_px[1] - local_y * scale_px_per_unit` (`x` has no flip:
 /// `screen_x = origin_px[0] + local_x * scale_px_per_unit`; see
 /// `mkui_vector2d_wgpu`'s `dilated_quad_brackets_the_scaled_glyph_bounds`
-/// test). So the rect's screen top-left (where `origin_px` is set, below) is
-/// local `(0, 0)` and screen bottom-right is local `(width, -height)` —
-/// `y` runs negative downward, the mirror of this crate's own y-down `Rect`.
+/// test). So a rect's screen top-left is local `(0, 0)` + `offset`, and
+/// screen bottom-right is local `(width, -height)` + `offset` — `y` runs
+/// negative downward, the mirror of this crate's own y-down `Rect`.
 ///
-/// Each corner is one cubic Bézier built from the standard circle-to-cubic
-/// constant `KAPPA` (4/3 × (√2 − 1)), the same construction a 4-arc circle
-/// approximation uses per quadrant — max radial error ≈0.027% of `radius`,
-/// visually indistinguishable from a true arc even at Sprint 8's "large
-/// radius" scale (§2.5). `radius` is clamped to half the shorter side so
-/// opposing arcs never overlap. `radius <= 0.0` degenerates every corner arc
-/// to a zero-length no-op, so this doubles as the square-corner case with no
-/// special-casing.
+/// Each corner is one cubic Bézier built from [`KAPPA`], the same
+/// construction a 4-arc circle approximation uses per quadrant — max radial
+/// error ≈0.027% of `radius`, visually indistinguishable from a true arc
+/// even at Sprint 8's "large radius" scale (§2.5). `radius` is clamped to
+/// half the shorter side so opposing arcs never overlap. `radius <= 0.0` (or
+/// `width`/`height` `<= 0.0`) degenerates every corner arc, and in the
+/// zero-size case every segment, to a zero-length no-op — this doubles as
+/// both the square-corner case and the fully-degenerate "no contour at all"
+/// case with no special-casing (the encoder drops a degenerate segment on
+/// its own, see `mkui_vector2d::encode::flatten_path_curves`).
 #[cfg(feature = "slug")]
-fn build_rounded_rect_path(width: f32, height: f32, radius: f32) -> VectorPath {
-    /// 4/3 × (√2 − 1): distance (as a fraction of radius) from each arc's
-    /// tangent point to its cubic control point.
-    const KAPPA: f32 = 0.552_284_8;
+fn rounded_rect_contour(width: f32, height: f32, radius: f32, offset: Vec2) -> Vec<PathCommand> {
+    let width = width.max(0.0);
+    let height = height.max(0.0);
     let r = radius.max(0.0).min(width.min(height) * 0.5);
     let rk = r * KAPPA;
-    let commands = vec![
-        PathCommand::MoveTo(Vec2::new(r, 0.0)),
-        PathCommand::LineTo(Vec2::new(width - r, 0.0)),
+    let p = |x: f32, y: f32| Vec2::new(x + offset.x, y + offset.y);
+    vec![
+        PathCommand::MoveTo(p(r, 0.0)),
+        PathCommand::LineTo(p(width - r, 0.0)),
         PathCommand::CubicTo {
-            control1: Vec2::new(width - r + rk, 0.0),
-            control2: Vec2::new(width, -(r - rk)),
-            to: Vec2::new(width, -r),
+            control1: p(width - r + rk, 0.0),
+            control2: p(width, -(r - rk)),
+            to: p(width, -r),
         },
-        PathCommand::LineTo(Vec2::new(width, -(height - r))),
+        PathCommand::LineTo(p(width, -(height - r))),
         PathCommand::CubicTo {
-            control1: Vec2::new(width, -(height - r + rk)),
-            control2: Vec2::new(width - r + rk, -height),
-            to: Vec2::new(width - r, -height),
+            control1: p(width, -(height - r + rk)),
+            control2: p(width - r + rk, -height),
+            to: p(width - r, -height),
         },
-        PathCommand::LineTo(Vec2::new(r, -height)),
+        PathCommand::LineTo(p(r, -height)),
         PathCommand::CubicTo {
-            control1: Vec2::new(r - rk, -height),
-            control2: Vec2::new(0.0, -(height - r + rk)),
-            to: Vec2::new(0.0, -(height - r)),
+            control1: p(r - rk, -height),
+            control2: p(0.0, -(height - r + rk)),
+            to: p(0.0, -(height - r)),
         },
-        PathCommand::LineTo(Vec2::new(0.0, -r)),
+        PathCommand::LineTo(p(0.0, -r)),
         PathCommand::CubicTo {
-            control1: Vec2::new(0.0, -(r - rk)),
-            control2: Vec2::new(r - rk, 0.0),
-            to: Vec2::new(r, 0.0),
+            control1: p(0.0, -(r - rk)),
+            control2: p(r - rk, 0.0),
+            to: p(r, 0.0),
         },
         PathCommand::Close,
-    ];
+    ]
+}
+
+/// Build a rounded-rect outline in local path space — see
+/// [`rounded_rect_contour`] for the coordinate convention and corner
+/// construction this wraps (`offset` zero).
+#[cfg(feature = "slug")]
+fn build_rounded_rect_path(width: f32, height: f32, radius: f32) -> VectorPath {
+    VectorPath::new(
+        rounded_rect_contour(width, height, radius, Vec2::ZERO),
+        FillRule::NonZero,
+        Bounds::new(Vec2::new(0.0, -height), Vec2::new(width, 0.0)),
+    )
+}
+
+/// Reverse a single closed contour's winding direction: decompose it into
+/// `(from, segment)` pairs by walking the pen position, then replay them in
+/// reverse order with each segment's own direction flipped (a reversed
+/// `QuadTo`/`CubicTo` keeps its control point(s) — swapped for a cubic —
+/// just runs from its old `to` back to its old `from`).
+///
+/// Pairing a contour with its reverse under [`FillRule::NonZero`] is the
+/// TrueType/PostScript "glyph with a hole" convention `path.rs` already
+/// documents (e.g. the letter "O": an outer contour one way, an inner
+/// contour the other) — [`build_rounded_rect_border_path`] uses it to punch
+/// the fill-shaped hole out of the border's outer silhouette.
+#[cfg(feature = "slug")]
+fn reverse_contour(commands: &[PathCommand]) -> Vec<PathCommand> {
+    enum Seg {
+        Line,
+        Quad(Vec2),
+        Cubic(Vec2, Vec2),
+    }
+    let mut start = Vec2::ZERO;
+    let mut cur = Vec2::ZERO;
+    let mut segments: Vec<(Vec2, Seg, Vec2)> = Vec::new();
+    for cmd in commands {
+        match *cmd {
+            PathCommand::MoveTo(p) => {
+                start = p;
+                cur = p;
+            }
+            PathCommand::LineTo(p) => {
+                segments.push((cur, Seg::Line, p));
+                cur = p;
+            }
+            PathCommand::QuadTo { control, to } => {
+                segments.push((cur, Seg::Quad(control), to));
+                cur = to;
+            }
+            PathCommand::CubicTo {
+                control1,
+                control2,
+                to,
+            } => {
+                segments.push((cur, Seg::Cubic(control1, control2), to));
+                cur = to;
+            }
+            PathCommand::Close => {
+                if cur != start {
+                    segments.push((cur, Seg::Line, start));
+                }
+                cur = start;
+            }
+            // `PathCommand` is `#[non_exhaustive]`; every variant it has
+            // today is handled above.
+            other => unreachable!("reverse_contour: unhandled PathCommand variant {other:?}"),
+        }
+    }
+    let mut out = vec![PathCommand::MoveTo(start)];
+    for (from, seg, _to) in segments.into_iter().rev() {
+        out.push(match seg {
+            Seg::Line => PathCommand::LineTo(from),
+            Seg::Quad(control) => PathCommand::QuadTo { control, to: from },
+            Seg::Cubic(control1, control2) => PathCommand::CubicTo {
+                control1: control2,
+                control2: control1,
+                to: from,
+            },
+        });
+    }
+    out.push(PathCommand::Close);
+    out
+}
+
+/// Build the card border as a single filled annulus — the fill's own outer
+/// contour, plus a smaller inner contour (the border's inner edge) wound the
+/// opposite direction so [`FillRule::NonZero`] punches it out as a hole —
+/// rather than as a [`mkui_vector2d_wgpu::Stroke`] centered on some
+/// centerline path.
+///
+/// Codex round-2 review of #141 found that centering a stroke on an *inset*
+/// centerline (this function's predecessor) breaks in two edge cases: the
+/// centerline rect degenerates to nothing once `stroke_width` reaches either
+/// dimension (vanishing the border instead of covering the remaining
+/// interior), and the centerline's own radius clamps to zero once
+/// `stroke_width >= 2 * radius` (shrinking the *outer* silhouette the stroke
+/// paints to a tighter, square-cornered radius than the fill's). Building
+/// the border as an explicit outer-minus-inner shape fixes both at the root:
+///
+/// - **Outer contour** is `rounded_rect_contour(width, height, radius, ..)`
+///   — byte-identical to the fill's own contour, unconditionally. The
+///   border's outer silhouette can never mismatch the fill's, at any
+///   `stroke_width`.
+/// - **Inner contour** is inset by `stroke_width` on every side, with its
+///   own radius reduced by `stroke_width` (the concentric offset of a
+///   rounded rect), both floored at `0.0`. When the inset would consume the
+///   whole rect, `rounded_rect_contour` degenerates it to a zero-area
+///   no-op contour (see its own docs) — contributing no hole at all, so the
+///   annulus covers the *entire* outer shape: the "cover the remaining
+///   interior instead of vanishing" fix.
+#[cfg(feature = "slug")]
+fn build_rounded_rect_border_path(
+    width: f32,
+    height: f32,
+    radius: f32,
+    stroke_width: f32,
+) -> VectorPath {
+    let stroke_width = stroke_width.max(0.0);
+    let mut commands = rounded_rect_contour(width, height, radius, Vec2::ZERO);
+    let inner_width = width - 2.0 * stroke_width;
+    let inner_height = height - 2.0 * stroke_width;
+    let inner_radius = (radius - stroke_width).max(0.0);
+    let inner = rounded_rect_contour(
+        inner_width,
+        inner_height,
+        inner_radius,
+        Vec2::new(stroke_width, -stroke_width),
+    );
+    commands.extend(reverse_contour(&inner));
     VectorPath::new(
         commands,
         FillRule::NonZero,
@@ -235,7 +415,7 @@ mod tests {
 
     #[cfg(feature = "slug")]
     #[test]
-    fn card_emits_a_fill_path_and_an_inset_stroke_path() {
+    fn card_emits_a_fill_path_and_a_border_annulus_path() {
         let mut scene = Scene::new(Size::new(200.0, 80.0));
         let theme = WgpuTheme::default();
         let style = theme.card();
@@ -255,14 +435,14 @@ mod tests {
         assert_eq!(
             paths.len(),
             2,
-            "card must emit a fill path and a separate inset stroke path"
+            "card must emit a fill path and a separate border annulus path"
         );
 
         let fill = paths[0];
         assert_eq!(fill.fill_color, Some(style.fill));
         assert!(fill.stroke.is_none(), "the fill primitive must not stroke");
         assert_eq!(fill.origin_px, [10.0, 5.0]);
-        // Local path space is y-up (see `build_rounded_rect_path`'s docs):
+        // Local path space is y-up (see `rounded_rect_contour`'s docs):
         // screen top-left is local (0, 0), screen bottom-right is local
         // (width, -height). The fill path covers the card's full rect.
         assert_eq!(
@@ -271,26 +451,21 @@ mod tests {
         );
 
         let border = paths[1];
-        assert!(
-            border.fill_color.is_none(),
-            "the stroke primitive must not also fill"
-        );
-        assert_eq!(border.stroke_color, style.stroke);
-        let stroke = border.stroke.as_ref().expect("card border must stroke");
-        assert_eq!(stroke.width_px, style.stroke_width);
-        // Codex round-1 review of #141: a stroke centers on its path, so the
-        // centerline path must be inset by half the stroke width on every
-        // side — the stroke's outer edge then lands exactly on the fill's
-        // outer edge instead of bleeding `stroke_width / 2` past it.
-        let inset = style.stroke_width * 0.5;
-        assert_eq!(border.origin_px, [10.0 + inset, 5.0 + inset]);
         assert_eq!(
-            border.path.bounds,
-            Bounds::new(
-                Vec2::new(0.0, -(40.0 - style.stroke_width)),
-                Vec2::new(120.0 - style.stroke_width, 0.0)
-            )
+            border.fill_color,
+            Some(style.stroke),
+            "the border annulus paints directly with fill_color, not a Stroke"
         );
+        assert!(
+            border.stroke.is_none(),
+            "the border annulus must not also carry a centered Stroke (#141 round-2 fix)"
+        );
+        // Codex round-2 review of #141: the border's outer contour is the
+        // fill's own unmodified outline, so its placement and overall
+        // bounds are identical to the fill's — only the path's *interior*
+        // differs (it carries an inner hole).
+        assert_eq!(border.origin_px, fill.origin_px);
+        assert_eq!(border.path.bounds, fill.path.bounds);
     }
 
     #[cfg(feature = "slug")]
@@ -361,27 +536,17 @@ mod tests {
             )
         );
 
-        assert_eq!(border.stroke_color, quad_stroke.color);
-        let stroke = border.stroke.clone().expect("border must stroke");
-        assert_eq!(stroke.width_px, quad_stroke.width);
+        assert_eq!(border.fill_color, Some(quad_stroke.color));
+        assert!(border.stroke.is_none());
         // `card_triangulated`'s border rects stay entirely within `quad.rect`
-        // (see `tessellate_quad`); the vector border's stroke band must cover
-        // the same footprint, not extend past it — the exact regression
-        // Codex round-1 review of #141 caught. The border's inset centerline
-        // path, offset by the half-stroke-width inset, achieves that; the
-        // GPU test verifies the painted pixels directly.
-        let inset = quad_stroke.width * 0.5;
-        assert_eq!(
-            border.origin_px,
-            [quad.rect.origin.x + inset, quad.rect.origin.y + inset]
-        );
-        assert_eq!(
-            border.path.bounds,
-            Bounds::new(
-                Vec2::new(0.0, -(quad.rect.size.height - quad_stroke.width)),
-                Vec2::new(quad.rect.size.width - quad_stroke.width, 0.0)
-            )
-        );
+        // (see `tessellate_quad`); the vector border annulus's outer contour
+        // — identical to the fill's — covers the same footprint, never more
+        // (the regression Codex round-1 review of #141 caught) and never
+        // less, regardless of `stroke_width` (the two further edge cases
+        // Codex round-2 review caught). The GPU test verifies the painted
+        // pixels directly, including both edge cases.
+        assert_eq!(border.origin_px, fill.origin_px);
+        assert_eq!(border.path.bounds, fill.path.bounds);
     }
 
     #[cfg(feature = "slug")]
@@ -404,5 +569,95 @@ mod tests {
             Bounds::new(Vec2::new(0.0, -20.0), Vec2::new(50.0, 0.0))
         );
         assert!(!path.is_empty());
+    }
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn reverse_contour_flips_winding_direction() {
+        // A simple unit square traced with only line segments, so winding
+        // direction reduces to the textbook shoelace-formula signed area.
+        let square = vec![
+            PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(1.0, 1.0)),
+            PathCommand::LineTo(Vec2::new(0.0, 1.0)),
+            PathCommand::Close,
+        ];
+        let reversed = reverse_contour(&square);
+
+        fn signed_area(commands: &[PathCommand]) -> f32 {
+            let mut points = Vec::new();
+            for cmd in commands {
+                match *cmd {
+                    PathCommand::MoveTo(p) | PathCommand::LineTo(p) => points.push(p),
+                    PathCommand::Close => {}
+                    other => unreachable!("test only emits MoveTo/LineTo/Close, got {other:?}"),
+                }
+            }
+            let mut area = 0.0;
+            for i in 0..points.len() {
+                let a = points[i];
+                let b = points[(i + 1) % points.len()];
+                area += a.x * b.y - b.x * a.y;
+            }
+            area * 0.5
+        }
+
+        let forward_area = signed_area(&square);
+        let reversed_area = signed_area(&reversed);
+        assert!(
+            forward_area.abs() > 0.0,
+            "the test square must have nonzero area"
+        );
+        assert_eq!(
+            reversed_area, -forward_area,
+            "reversing a contour must flip its signed area (winding direction)"
+        );
+        assert_eq!(
+            reversed.first(),
+            Some(&PathCommand::MoveTo(Vec2::new(0.0, 0.0))),
+            "the reversed contour starts at the same point as the original"
+        );
+    }
+
+    /// Codex round-2 review of #141: a centerline-inset border's own radius
+    /// clamps to zero once `stroke_width >= 2 * radius`, producing a
+    /// tighter, square-cornered outer silhouette than the fill's — painting
+    /// outside the fill's rounded corner (confirmed with radius 4, stroke
+    /// width 8). The border's outer contour must be byte-identical to the
+    /// fill's own contour, unconditionally — never reduced by `stroke_width`.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn border_outer_contour_matches_fill_outline_regardless_of_stroke_width() {
+        let (width, height, radius) = (40.0, 40.0, 4.0);
+        let fill_contour = rounded_rect_contour(width, height, radius, Vec2::ZERO);
+        for stroke_width in [0.5, 2.0, 4.0, 8.0, 100.0] {
+            let border = build_rounded_rect_border_path(width, height, radius, stroke_width);
+            assert_eq!(
+                border.commands[..fill_contour.len()],
+                fill_contour[..],
+                "the border's outer contour must match the fill's exactly at stroke_width={stroke_width}"
+            );
+        }
+    }
+
+    /// Codex round-2 review of #141: a border whose `stroke_width` reaches
+    /// (or exceeds) the card's shorter dimension must not vanish — it must
+    /// still paint, covering the whole interior (confirmed with a 32×8 card
+    /// and an 8px border). This is a CPU-only well-formedness check; the GPU
+    /// test (`card_vector_vs_triangulated`) verifies the rendered result
+    /// actually covers the interior, not just that construction succeeds.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn border_path_is_well_formed_when_stroke_width_consumes_the_shorter_dimension() {
+        let border = build_rounded_rect_border_path(32.0, 8.0, 2.0, 8.0);
+        assert!(
+            !border.is_empty(),
+            "the border's outer contour must still paint when the inset collapses"
+        );
+        assert_eq!(
+            border.bounds,
+            Bounds::new(Vec2::new(0.0, -8.0), Vec2::new(32.0, 0.0))
+        );
     }
 }

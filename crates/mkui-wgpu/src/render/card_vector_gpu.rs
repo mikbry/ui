@@ -45,6 +45,9 @@ const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
 const BLUE: [u8; 4] = [0, 0, 255, 255];
 
+const RED_COLOR: Color = Color::rgba(1.0, 0.0, 0.0, 1.0);
+const GREEN_COLOR: Color = Color::rgba(0.0, 1.0, 0.0, 1.0);
+
 fn harness() -> OffscreenRenderer {
     let renderer = OffscreenRenderer::new(W, H)
         .expect("offscreen adapter/device must be available on the CI Vulkan/Lavapipe runner");
@@ -86,8 +89,8 @@ fn harness() -> OffscreenRenderer {
 /// behavior directly observable in the readback.
 fn test_style() -> CardStyle {
     CardStyle {
-        fill: Color::rgba(1.0, 0.0, 0.0, 1.0),
-        stroke: Color::rgba(0.0, 1.0, 0.0, 1.0),
+        fill: RED_COLOR,
+        stroke: GREEN_COLOR,
         stroke_width: 4.0,
         corner_radius: 8.0,
     }
@@ -121,11 +124,10 @@ fn render_to_offscreen(
 /// the feature-off behavior today. Mirrors `components::card::card_triangulated`'s
 /// `Quad` push by hand (see module docs for why this can't call that function
 /// directly from here).
-fn render_triangulated() -> Vec<u8> {
-    let style = test_style();
+fn render_triangulated(rect: Rect, style: &CardStyle) -> Vec<u8> {
     let mut scene = Scene::new(Size::new(W as f32, H as f32));
     scene.quad(Quad {
-        rect: test_rect(),
+        rect,
         fill: style.fill,
         corner_radii: CornerRadii::all(style.corner_radius),
         stroke: Some(Stroke {
@@ -170,14 +172,14 @@ fn render_triangulated() -> Vec<u8> {
 /// Render through the real `components::card` public entry point + the real
 /// `SlugAdapter` — with `slug` enabled this is exactly what a consumer's
 /// frame draws today.
-fn render_vector() -> Vec<u8> {
+fn render_vector(rect: Rect, style: &CardStyle) -> Vec<u8> {
     let mut scene = Scene::new(Size::new(W as f32, H as f32));
-    components::card(&mut scene, test_rect(), test_style());
+    components::card(&mut scene, rect, *style);
     let paths = scene_vector_paths(&scene.primitives);
     assert_eq!(
         paths.len(),
         2,
-        "card must emit a fill path and a separate inset-stroke border path"
+        "card must emit a fill path and a separate border annulus path"
     );
     let paints = vector_path_paints(&paths);
 
@@ -235,8 +237,8 @@ fn texel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 /// match everywhere except the corners themselves.
 #[test]
 fn card_vector_vs_triangulated() {
-    let triangulated = render_triangulated();
-    let vector = render_vector();
+    let triangulated = render_triangulated(test_rect(), &test_style());
+    let vector = render_vector(test_rect(), &test_style());
 
     // The exact corner pixel: squared (and border-colored, since both
     // adjacent border rects overlap there) in the triangulated lane;
@@ -305,4 +307,75 @@ fn card_vector_vs_triangulated() {
     // The center, well past the border band, is fill on both lanes.
     assert_eq!(texel(&triangulated, 32, 32), RED);
     assert_eq!(texel(&vector, 32, 32), RED);
+}
+
+/// Codex round-2 review of #141: a 32×8 card with an 8px border (stroke
+/// width equals the card's shorter dimension) must not vanish — it must
+/// cover the whole interior. The round-1 fix (a stroke centered on an inset
+/// centerline rect) collapsed that centerline rect to nothing here, leaving
+/// only the red fill visible; the outer-minus-inner annulus construction
+/// (the round-2 fix) instead degenerates the inner *hole* to nothing, so the
+/// border still covers the entire outer shape.
+#[test]
+fn card_border_covers_the_whole_interior_when_stroke_width_consumes_a_dimension() {
+    let rect = Rect::new(Point::new(16.0, 28.0), Size::new(32.0, 8.0));
+    let style = CardStyle {
+        fill: RED_COLOR,
+        stroke: GREEN_COLOR,
+        stroke_width: 8.0,
+        corner_radius: 0.0,
+    };
+
+    let vector = render_vector(rect, &style);
+    assert_eq!(
+        texel(&vector, 32, 32),
+        GREEN,
+        "the card's entire interior must be border-colored once stroke_width consumes the \
+         shorter dimension — the border must not vanish and leave only the fill visible"
+    );
+    assert_eq!(
+        texel(&vector, 17, 29),
+        GREEN,
+        "a near-edge interior pixel must also be border-colored"
+    );
+    // Still must not bleed past the card's own rect (the round-1 fix).
+    assert_eq!(
+        texel(&vector, 32, 24),
+        BLUE,
+        "above the rect must stay background"
+    );
+    assert_eq!(
+        texel(&vector, 32, 40),
+        BLUE,
+        "below the rect must stay background"
+    );
+}
+
+/// Codex round-2 review of #141: with radius 4 and stroke width 8
+/// (`stroke_width >= 2 * radius`), a centerline-inset border's own radius
+/// (the round-1 fix) clamped to zero, producing a square-cornered outer
+/// silhouette wider than the fill's rounded one — painting the border at the
+/// card's exact corner pixel, outside the fill's own rounded silhouette. The
+/// outer-minus-inner annulus construction (the round-2 fix) always uses the
+/// fill's own unmodified contour as the border's outer edge, so the exact
+/// corner pixel stays background regardless of `stroke_width`.
+#[test]
+fn card_border_preserves_the_outer_radius_when_stroke_width_is_large() {
+    let rect = Rect::new(Point::new(12.0, 12.0), Size::new(40.0, 40.0));
+    let style = CardStyle {
+        fill: RED_COLOR,
+        stroke: GREEN_COLOR,
+        stroke_width: 8.0,
+        corner_radius: 4.0,
+    };
+
+    let vector = render_vector(rect, &style);
+    assert_eq!(
+        texel(&vector, 12, 12),
+        BLUE,
+        "the card's exact corner pixel must stay background: the border's outer radius must \
+         match the fill's rounded corner, not a squared-off wider silhouette"
+    );
+    // Just inside the rounded corner's radius, in the border band: covered.
+    assert_eq!(texel(&vector, 15, 15), GREEN);
 }
