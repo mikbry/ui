@@ -8,6 +8,52 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
+  (#143).** A new `examples/vector-showcase` binary renders button/card/dot
+  in a 3×2 grid: the right column emits a rounded-rect through
+  `Primitive::VectorPath` (#139) — one `moveTo` plus a cubic-Bézier arc per
+  corner, with `r == size/2` on a square closing the dot row into a true
+  circle. The left column is a showcase-local faceted-polygon approximation
+  of the same shape (`rounded_rect_polygon` + `push_faceted_polygon_fill`,
+  3 segments per 90° corner, rasterized as many 1px `Quad` rows) — **not**
+  the shared `Quad`/`tessellate_quad` path real components use, which still
+  renders a rounded `Quad` as a plain square (#212; see the scope note
+  below). Sizes (button 18px radius, card 36px radius, dot 55px radius) sit
+  well above the theme-token scale so the comparison reads at 1x window
+  scale with no zoom.
+  - `cargo run -p vector-showcase --release --features slug` — both columns
+    live.
+  - `cargo run -p vector-showcase --release` (no `slug`) — the vector column
+    falls back to the same faceted-polygon approximation as the left,
+    mirroring the zero-API-break contract #140-#142 commit to for the real
+    atoms.
+  - `HEADLESS=1` (either build) exits after a single walk pass, per
+    `mkui_wgpu::Mkui::run`'s existing smoke-test gate.
+  - Scope note: an earlier revision of this showcase tried fixing the
+    shared `tessellate_quad` tessellator directly so the triangulated
+    column would facet for real. That broke #142's merged, reviewed GPU
+    acceptance test (`dot_vector_gpu.rs`), which hand-builds the
+    triangulated dot as `CornerRadii::all(r)` and explicitly asserts it
+    renders as a plain square — a ratified scope decision in #142's own
+    CHANGELOG entry, not a bug. Reverted; the showcase-local rasterizer
+    above demonstrates the polygon-vs-smooth-curve contrast without
+    touching code #142 depends on. #212 still tracks the production-wide
+    gap.
+  - Fixed: the stroked rows (button/card) originally painted the full
+    outer polygon in the stroke color, then the inner polygon in the
+    fill color *on top of it* — since both `BORDER` and `FILL`/`CARD_FILL`
+    are translucent (`< 1.0` alpha), every interior pixel composited two
+    colors instead of one, visibly lightening the triangulated column
+    relative to the vector column (measured center RGB ~(79,74,69) vs.
+    ~(40,32,27)). `push_faceted_ring_and_fill` now rasterizes the stroke
+    as a true ring — disjoint `[outer, inner)` segments per row around a
+    separate `[inner_x0, inner_x1)` fill segment.
+  - Fixed (#143): both comparison columns now use inset borders with
+    disjoint border/fill regions. The vector border uses an outer contour
+    with an inner hole instead of a centered stroke over the fill. Faceted
+    rows preserve the card's fractional 1.5px border boundaries. Regression
+    samples on all four straight edges verify matching border/fill colors
+    and no overlapping paints, including 1.5px inside the button's edge.
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
