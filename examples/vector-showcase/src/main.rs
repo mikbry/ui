@@ -30,15 +30,22 @@
 //!   `mkui_wgpu::Mkui::run`.
 //!
 //! Scope note (acceptance criterion "triangulated column shows visible
-//! polygons"): `mkui-wgpu`'s native tessellator (`tessellate_quad`) now
-//! facets `Quad::corner_radii` into a low-segment triangle-fan approximation
-//! (`push_rounded_rect_fill`, 3 segments per 90° corner) instead of ignoring
-//! it — a codebase-wide fix (every `CornerRadii`-using atom benefits, not
-//! just this showcase), landed alongside #143 after review flagged the
-//! original "documented but unfixed" gap. One piece is still open and
-//! tracked in #212: the *stroke* outline (button/card's border) is still 4
-//! straight edge strips and does not yet bend around the rounded corner —
-//! the on-screen caption below names that residual gap.
+//! polygons" — not literally met, by design): `mkui-wgpu`'s native
+//! tessellator (`tessellate_quad`/`push_rect`) does not consume
+//! `Quad::corner_radii` at all — a rounded `Quad` renders as a plain square,
+//! not a faceted polygon. This is not a bug this showcase introduces or
+//! should fix: it is the exact, documented, GPU-test-asserted baseline
+//! #142's own `render/dot_vector_gpu.rs` builds its triangulated-vs-vector
+//! comparison against ("the triangulated fallback is visibly polygonal
+//! (here: literally square)"), and that PR's own scope decision explicitly
+//! defers rounding the fallback as a separate, unrelated concern (#212).
+//! Faceting it here would silently break that merged acceptance test and
+//! change the rendered look of every `CornerRadii`-using atom in the
+//! toolkit (button/card/dot/badge/panel/scrollbar/slider/swatch/text_field)
+//! — exactly the kind of out-of-scope, hard-to-review change the issue's
+//! own "default to minimum scope" guidance warns against. The on-screen
+//! caption below names the gap so a viewer isn't left thinking the left
+//! column is broken.
 
 use mkui_wgpu::components::label;
 use mkui_wgpu::{
@@ -295,17 +302,17 @@ fn build_scene() -> Scene {
         column_header_style(),
     );
 
-    // Honest caveat (#212): the fill facets corner_radii now, but the
-    // stroke outline (the button/card border) is still 4 straight edge
-    // strips and doesn't bend around the rounded corner yet. The box height
-    // below is sized for 2 wrapped lines (not 1) specifically because an
-    // undersized box here previously truncated this caption mid-sentence,
-    // silently dropping the trailing issue reference — see the caption_style
-    // line_height (18px) × the lines this text actually needs.
+    // Honest caveat (#212, same baseline #142's dot_vector_gpu.rs GPU test
+    // asserts): the native tessellator doesn't facet corner_radii at all, so
+    // the left column renders as a plain square, not a faceted polygon. The
+    // box height below is sized for the 2 lines this text actually wraps to
+    // at COL_WIDTH (verified against the bitmap font's real glyph-advance
+    // wrap — a previous, undersized box here truncated this caption
+    // mid-sentence and silently dropped the trailing issue reference).
     label(
         &mut scene,
         Rect::new(Point::new(COL_LEFT_X, 104.0), Size::new(COL_WIDTH, 36.0)),
-        "(border doesn't follow rounded corners yet — see #212)",
+        "(renders as a plain square — same #142-tested baseline, see #212)",
         caption_style(),
     );
 

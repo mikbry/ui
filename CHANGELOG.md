@@ -24,20 +24,11 @@ breaking changes can land on minor bumps).
     zero-API-break contract #140-#142 commit to for the real atoms.
   - `HEADLESS=1` (either build) exits after a single walk pass, per
     `mkui_wgpu::Mkui::run`'s existing smoke-test gate.
-- **`mkui-wgpu`'s native tessellator now facets `Quad::corner_radii` (#212,
-  surfaced by #143 review).** `tessellate_quad` previously ignored
-  `corner_radii` entirely and always drew a plain rectangle, for every
-  `CornerRadii`-using atom (button/card/dot/badge/panel/scrollbar/slider/
-  swatch/text_field). `push_rounded_rect_fill` now fills a rounded `Quad` as
-  a seam-free 3-band decomposition (middle/top/bottom, each a plain rect)
-  plus a low-facet-count (3 segments per 90°) triangle fan per corner — a
-  deliberately *polygonal*, not smooth-circle, approximation, so the
-  vector-showcase's triangulated-vs-vector comparison actually demonstrates
-  the acceptance criterion it names. A `corner_radii` of all zero still takes
-  the exact pre-#212 `push_rect` path (byte-identical 2-triangle output) —
-  no change for the common unrounded case. The *stroke* outline (a rounded
-  `Quad`'s border) is unchanged and still 4 straight edge strips that don't
-  bend around the corner; that residual gap stays open on #212.
+  - Scope note: the native wgpu tessellator's triangulated `Quad` fallback
+    renders as a plain square, not a faceted polygon — the same documented,
+    tested baseline #142's own `dot_vector_gpu.rs` GPU acceptance test
+    asserts for the real `dot()` atom's off-`slug` path. Rounding/faceting
+    that fallback is #212, out of scope for both #142 and this showcase.
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
