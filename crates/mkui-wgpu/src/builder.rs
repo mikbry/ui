@@ -483,6 +483,39 @@ mod tests {
         )
     }
 
+    /// Whether `p` is `components::card`'s chrome primitive — a `Quad`, or
+    /// (#141) a `VectorPath` under the `slug` feature. Lane-agnostic so
+    /// builder-level tests assert on the row's card background without
+    /// coupling to which rendering lane `card()` currently picks.
+    #[cfg(feature = "slug")]
+    fn is_card_chrome(p: &Primitive) -> bool {
+        matches!(p, Primitive::Quad(_) | Primitive::VectorPath(_))
+    }
+
+    #[cfg(not(feature = "slug"))]
+    fn is_card_chrome(p: &Primitive) -> bool {
+        matches!(p, Primitive::Quad(_))
+    }
+
+    /// The fill color of a card-chrome primitive (see [`is_card_chrome`]),
+    /// or `None` for anything else / a stroke-only vector path.
+    #[cfg(feature = "slug")]
+    fn card_chrome_fill(p: &Primitive) -> Option<Color> {
+        match p {
+            Primitive::Quad(q) => Some(q.fill),
+            Primitive::VectorPath(placed) => placed.fill_color,
+            _ => None,
+        }
+    }
+
+    #[cfg(not(feature = "slug"))]
+    fn card_chrome_fill(p: &Primitive) -> Option<Color> {
+        match p {
+            Primitive::Quad(q) => Some(q.fill),
+            _ => None,
+        }
+    }
+
     #[test]
     fn heading_and_gap_advance_cursor_by_exact_amounts() {
         let (mut scene, mut layout, theme, content) = fresh();
@@ -504,18 +537,18 @@ mod tests {
         let (mut scene, mut layout, theme, content) = fresh();
         let mut ui = UiBuilder::<&'static str>::new(&mut scene, &mut layout, &theme, content);
         ui.readonly_row("area", "1.4 m²");
-        // card quad + label + value => at least 1 quad + 2 texts.
-        let quads = scene
+        // card chrome + label + value => at least 1 chrome primitive + 2 texts.
+        let card_chrome = scene
             .primitives
             .iter()
-            .filter(|p| matches!(p, Primitive::Quad(_)))
+            .filter(|p| is_card_chrome(p))
             .count();
         let texts = scene
             .primitives
             .iter()
             .filter(|p| matches!(p, Primitive::Text(_)))
             .count();
-        assert!(quads >= 1);
+        assert!(card_chrome >= 1);
         assert!(texts >= 2);
     }
 
@@ -592,7 +625,7 @@ mod tests {
             scene
                 .primitives
                 .iter()
-                .any(|p| matches!(p, Primitive::Quad(q) if q.fill == fill)),
+                .any(|p| card_chrome_fill(p) == Some(fill)),
             "selected list row should use card_selected fill"
         );
         assert!(scene

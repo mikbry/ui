@@ -145,6 +145,15 @@ mod vvl_regression;
 #[cfg(all(test, feature = "gpu-tests"))]
 mod linear_blend_gpu;
 
+/// Cross-consumer integration test for `card` (#141, Sprint 8 plan v2 §4.3):
+/// renders `components::card`'s triangulated and vector lanes on #106's
+/// Lavapipe harness and reads back pixels, proving the vector lane's rounded
+/// corners actually differ from the triangulated lane's square ones. Same
+/// dual gate as [`slug_gpu`] (`gpu-tests` for the harness, `slug` for the
+/// `VectorPath` lane + `SlugAdapter`).
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod card_vector_gpu;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
