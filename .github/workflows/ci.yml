@@ -430,6 +430,11 @@ jobs:
       # #67's text example: the GPU smoke (Abel Slug + bitmap) with `slug` on.
       - run: cargo clippy -p text --features slug --all-targets --locked -- -D warnings
       - run: cargo build -p text --features slug --locked
+      # #143's vector-primitives showcase: triangulated vs vector columns
+      # with `slug` on (its own test asserts the VectorPath lane fires).
+      - run: cargo clippy -p vector-showcase --features slug --all-targets --locked -- -D warnings
+      - run: cargo test -p vector-showcase --features slug --locked
+      - run: cargo build -p vector-showcase --features slug --locked
 
   mkui-backend-matrix:
     # Enforces the `mkui` one-primary-backend invariant (#102). The bridge

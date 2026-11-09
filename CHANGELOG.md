@@ -8,6 +8,26 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
+  (#143).** A new `examples/vector-showcase` binary renders button/card/dot
+  in a 3×2 grid: the left column is the existing triangulated `Primitive::Quad`
+  construction every `mkui-wgpu::components` atom already uses; the right
+  column emits the same rounded-rect geometry through `Primitive::VectorPath`
+  (#139) — one `moveTo` plus a cubic-Bézier arc per corner, with
+  `r == size/2` on a square closing the dot row into a true circle. Sizes
+  (button 18px radius, card 36px radius, dot 55px radius) sit well above the
+  theme-token scale so the comparison reads at 1x window scale with no zoom.
+  - `cargo run -p vector-showcase --release --features slug` — both columns
+    live.
+  - `cargo run -p vector-showcase --release` (no `slug`) — the vector column
+    falls back to the same triangulated geometry as the left, mirroring the
+    zero-API-break contract #140-#142 commit to for the real atoms.
+  - `HEADLESS=1` (either build) exits after a single walk pass, per
+    `mkui_wgpu::Mkui::run`'s existing smoke-test gate.
+  - Scope note: the native wgpu tessellator's `tessellate_quad` does not
+    rasterize `Quad::corner_radii` (it always draws a plain rectangle), so
+    the "triangulated" column is byte-identical to today's production
+    rendering, not a faceted polygon — tracked separately as #212.
 - **`Primitive::VectorPath` scene seam + `RenderCommand::VectorPath` — Sprint 8
   substrate Wave 1 (#139).** `mkui-wgpu` now exposes the scene-level seam
   consumer components (button/card/dot, Wave 2 #140-#142) will emit into,
