@@ -117,6 +117,13 @@ mod sfnt_slug_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod slug_reference_parity;
 
+/// Cross-consumer GPU acceptance test for the `dot` atom's circle (#142,
+/// Sprint 8 Wave 2): the real vector-path circle vs. the real triangulated
+/// quad fallback, rendered and read back through #106's harness. Same dual
+/// gate as [`slug_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod dot_vector_gpu;
+
 /// Validation-enforcement regression guard (#153). A deliberate bind-group
 /// buffer-size mismatch run through #106's harness — the CI gap-fix that
 /// followed the #149 revert (`f8da740`). See the module docs for exactly what
