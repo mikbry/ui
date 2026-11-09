@@ -10,10 +10,15 @@
 //! The rounded-rect fill + border forks on the `slug` feature, resolved at
 //! compile time in [`emit_chrome`] (two separate definitions below, each
 //! `#[cfg]`-gated): off, it is the pre-existing triangulated [`Quad`] (byte-
-//! identical to v0.10.0); on, it is a single [`Primitive::VectorPath`] fill +
-//! stroke, built from one closed rounded-rect [`VectorPath`] (Sprint 8 Wave 2
-//! — `card`/`dot` follow the same shape in #141/#142). `button`/`button_with`'s
-//! own signatures never change — the fork is entirely internal.
+//! identical to v0.10.0); on, it is two [`Primitive::VectorPath`]s — a
+//! fill-only rounded rect at the full rect size, and a stroke-only rounded
+//! rect inset by half the border width (Sprint 8 Wave 2 — `card`/`dot` follow
+//! the same shape in #141/#142). The inset keeps the border's *outer* edge
+//! flush with `rect`, matching the triangulated tessellator (its border
+//! strips start exactly at `rect.origin` and never extend past it) — a plain
+//! shared centreline would stroke outward past `rect` by half the border
+//! width (#213 Codex round 1). `button`/`button_with`'s own signatures never
+//! change — the fork is entirely internal.
 
 use crate::theme::{ButtonSize, ButtonState, ButtonStyle, ButtonVariant, WgpuTheme};
 use crate::types::{Color, Point, Rect, Scene, Size, TextAlign, TextStyle};
@@ -106,11 +111,15 @@ fn emit_chrome(
     });
 }
 
-/// Vector rounded-rect fill + border (#140): one closed [`VectorPath`] serves
-/// as both the fill boundary and the border's stroke centreline, matching how
-/// the triangulated [`Quad`] above carries one `fill` + one `stroke` for the
-/// same rect. `stroke` uses theme width with default (butt/miter, no dash)
-/// caps/joins per the issue's scope.
+/// Vector rounded-rect fill + border (#140): a fill-only [`VectorPath`] at
+/// the full `rect`, plus a *separate* stroke-only [`VectorPath`] whose
+/// centreline is inset by half the border width on every side (and whose
+/// corner radius shrinks to match). Stroking that inset centreline with the
+/// full `stroke_width` expands it back out by the same half-width, so the
+/// border's outer edge lands exactly on `rect`'s boundary — never past it —
+/// matching the triangulated [`Quad`] below, whose border strips are drawn
+/// fully inside `rect` from `rect.origin`. `stroke` uses the theme width with
+/// default (butt/miter, no dash) caps/joins per the issue's scope.
 #[cfg(feature = "slug")]
 fn emit_chrome(
     scene: &mut Scene,
@@ -120,15 +129,32 @@ fn emit_chrome(
     corner_radius: f32,
     stroke_width: f32,
 ) {
+    let w = rect.size.width.max(0.0);
+    let h = rect.size.height.max(0.0);
+    // Bottom-left anchor in the Slug lane's y-up local path space — see
+    // `rounded_rect_path`'s doc comment for why this is the bottom-left (not
+    // top-left) corner.
     scene.vector_path(PlacedVectorPath {
         path: std::sync::Arc::new(rounded_rect_path(rect.size, corner_radius)),
-        stroke: Some(PathStroke::new(stroke_width)),
+        stroke: None,
         stroke_color,
         fill_color: Some(fill),
-        // Bottom-left anchor in the Slug lane's y-up local path space — see
-        // `rounded_rect_path`'s doc comment for why this is the bottom-left
-        // (not top-left) corner.
-        origin_px: [rect.origin.x, rect.origin.y + rect.size.height],
+        origin_px: [rect.origin.x, rect.origin.y + h],
+        scale_px_per_unit: 1.0,
+    });
+
+    let half = stroke_width.max(0.0) * 0.5;
+    let inset_size = Size::new((w - stroke_width).max(0.0), (h - stroke_width).max(0.0));
+    let inset_radius = (corner_radius - half).max(0.0);
+    scene.vector_path(PlacedVectorPath {
+        path: std::sync::Arc::new(rounded_rect_path(inset_size, inset_radius)),
+        stroke: Some(PathStroke::new(stroke_width)),
+        stroke_color,
+        fill_color: None,
+        // The inset rect's own bottom-left anchor: `rect`'s anchor shifted
+        // inward by `half` on both axes (screen x grows right, screen y here
+        // shrinks toward `rect`'s top as local y grows — see the module doc).
+        origin_px: [rect.origin.x + half, rect.origin.y + h - half],
         scale_px_per_unit: 1.0,
     });
 }
@@ -270,21 +296,21 @@ mod tests {
             ButtonState::Idle,
             &theme,
         );
-        let path = scene
+        let vector_paths: Vec<_> = scene
             .primitives
             .iter()
-            .find_map(|p| match p {
+            .filter_map(|p| match p {
                 Primitive::VectorPath(v) => Some(v),
                 _ => None,
             })
-            .expect("slug-on button must emit a Primitive::VectorPath for its chrome");
+            .collect();
         assert!(
-            path.fill_color.is_some(),
-            "button fill must ride the vector path"
+            vector_paths.iter().any(|v| v.fill_color.is_some()),
+            "button fill must ride a vector path"
         );
         assert!(
-            path.stroke.is_some(),
-            "button border must ride the vector path"
+            vector_paths.iter().any(|v| v.stroke.is_some()),
+            "button border must ride a vector path"
         );
         assert!(
             !scene
@@ -292,6 +318,63 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, Primitive::Quad(_))),
             "slug-on button must not also emit the triangulated Quad chrome"
+        );
+    }
+
+    /// #213 Codex round 1: the border's *expanded* stroke (centreline ±
+    /// half its width) must stay entirely within the button's layout/hit
+    /// rect, matching the triangulated tessellator — never bleed outside it.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn button_vector_border_outer_edge_stays_within_rect() {
+        let theme = WgpuTheme::default();
+        let style = theme.button_style(ButtonVariant::Default, ButtonSize::Default);
+        let rect = Rect::new(Point::new(10.0, 10.0), Size::new(60.0, 40.0));
+        let mut scene = Scene::new(Size::new(200.0, 80.0));
+        button_with(&mut scene, rect, "", ButtonState::Idle, &style);
+
+        let border = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::VectorPath(v) if v.stroke.is_some() => Some(v),
+                _ => None,
+            })
+            .expect("button must emit a stroke-only VectorPath for its border");
+        let stroke = border.stroke.as_ref().expect("checked above");
+        let half = stroke.width_px * 0.5;
+        let [ox, oy] = border.origin_px;
+        let bounds = border.path.bounds;
+
+        // Screen-space outer envelope of the expanded stroke, using this
+        // module's y-up-local -> y-down-screen placement (`screen_x = ox +
+        // local_x`, `screen_y = oy - local_y`): the centreline's local bounds,
+        // widened by half the stroke width on every side.
+        let outer_min_x = ox + bounds.min.x - half;
+        let outer_max_x = ox + bounds.max.x + half;
+        let outer_min_y = oy - bounds.max.y - half;
+        let outer_max_y = oy - bounds.min.y + half;
+
+        let eps = 1e-4;
+        assert!(
+            outer_min_x >= rect.origin.x - eps,
+            "border must not extend left of rect: {outer_min_x} < {}",
+            rect.origin.x
+        );
+        assert!(
+            outer_max_x <= rect.origin.x + rect.size.width + eps,
+            "border must not extend right of rect: {outer_max_x} > {}",
+            rect.origin.x + rect.size.width
+        );
+        assert!(
+            outer_min_y >= rect.origin.y - eps,
+            "border must not extend above rect: {outer_min_y} < {}",
+            rect.origin.y
+        );
+        assert!(
+            outer_max_y <= rect.origin.y + rect.size.height + eps,
+            "border must not extend below rect: {outer_max_y} > {}",
+            rect.origin.y + rect.size.height
         );
     }
 
