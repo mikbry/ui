@@ -731,14 +731,13 @@ mod tests {
         let mut colors = Vec::new();
         for primitive in &scene.primitives {
             match primitive {
-                Primitive::Quad(q) => {
+                Primitive::Quad(q)
                     if point.x >= q.rect.origin.x
                         && point.x < q.rect.width_end()
                         && point.y >= q.rect.origin.y
-                        && point.y < q.rect.height_end()
-                    {
-                        colors.push(q.fill);
-                    }
+                        && point.y < q.rect.height_end() =>
+                {
+                    colors.push(q.fill);
                 }
                 #[cfg(feature = "slug")]
                 Primitive::VectorPath(v) => {
