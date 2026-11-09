@@ -111,6 +111,12 @@ mod slug_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod sfnt_slug_gpu;
 
+/// Cross-consumer GPU acceptance test for the `button` component (#140,
+/// Sprint 8 plan v2 §4.3 Tier 2B): vector-vs-triangulated readback on the same
+/// Vulkan/Lavapipe harness. Same dual gate as [`slug_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod button_vector_gpu;
+
 /// Reference-adapter parity self-check for #157 Phase 1 — diffs mkui's Slug
 /// output against the ratified `reference-harness/` goldens. Same dual gate
 /// as [`slug_gpu`].
