@@ -136,14 +136,19 @@ impl TableRecord {
 /// A located, validated `kern` version-0 format-0 horizontal subtable:
 /// `nPairs` sorted `(left, right, value)` triples immediately following the
 /// format-0 header, ready for binary search. Never constructed for a missing
-/// `kern` table or an unsupported subtable (vertical, cross-stream, override,
+/// `kern` table or an unsupported subtable (vertical, cross-stream, minimum,
 /// or a format other than 0) — those degrade to "no kerning data" rather than
-/// a parse failure.
+/// a parse failure. `override_values` (coverage bit 3) is retained — it
+/// changes how [`SfntFace::kerning`] combines this subtable's contribution
+/// with earlier ones, not whether the subtable is usable at all.
 #[derive(Debug, Clone, Copy)]
 struct KernSubtable {
     /// Offset of the first `(left, right, value)` triple.
     pairs_offset: usize,
     n_pairs: u16,
+    /// Coverage bit 3: a pair value found here replaces the running total
+    /// rather than adding to it (OpenType "override" semantics).
+    override_values: bool,
 }
 
 /// A decoded SFNT face — the narrow TrueType slice the fixture exercises.
@@ -173,8 +178,11 @@ pub struct SfntFace {
     /// `OS/2.fsSelection` bit 0, or `false` when the table is absent or
     /// unreadable.
     italic: bool,
-    /// The `kern` table's usable format-0 horizontal subtable, if any.
-    kern: Option<KernSubtable>,
+    /// The `kern` table's usable format-0 horizontal subtables, in file
+    /// order (empty if the face has none). [`SfntFace::kerning`] combines
+    /// all of them per OpenType accumulation/override rules, not just the
+    /// first.
+    kern: Vec<KernSubtable>,
 }
 
 /// Resolved horizontal/vertical line metrics for the face, in font units.
@@ -253,7 +261,9 @@ impl SfntFace {
         let (weight_class, italic) = find(b"OS/2")
             .and_then(|os2| Self::read_os2(&bytes, os2).ok())
             .unwrap_or((400, false));
-        let kern = find(b"kern").and_then(|k| Self::find_kern_format0(&bytes, k).ok());
+        let kern = find(b"kern")
+            .and_then(|k| Self::find_kern_subtables(&bytes, k).ok())
+            .unwrap_or_default();
 
         Ok(Self {
             data: bytes,
@@ -456,12 +466,23 @@ impl SfntFace {
         Ok((weight_class, italic))
     }
 
-    /// Locate the `kern` table's usable subtable: version-0 header, a
-    /// format-0 subtable flagged horizontal and not cross-stream. Later
-    /// subtables (vertical, cross-stream, override, or non-format-0) are
-    /// skipped; the **first** matching horizontal format-0 subtable wins, per
-    /// the common (Windows) convention of exactly one such subtable.
-    fn find_kern_format0(data: &[u8], kern: TableRecord) -> Result<KernSubtable, SfntError> {
+    /// Locate every usable `kern` subtable: version-0 header, format-0,
+    /// flagged horizontal, and neither cross-stream nor minimum. Unlike a
+    /// kerning subtable, a **minimum** subtable (coverage bit 1) defines a
+    /// floor the glyphs' natural advance must not fall below, not an
+    /// adjustment to apply — folding its value in as if it were ordinary
+    /// kerning would apply that floor as a kern instead, over-tightening the
+    /// pair. This decoder doesn't implement minimum-constraint semantics, so
+    /// those subtables are skipped entirely (degrading to "no kerning data
+    /// from this subtable") rather than misread.
+    ///
+    /// Vertical, cross-stream, or non-format-0 subtables are skipped too.
+    /// Every other subtable is collected, in file order: OpenType defines a
+    /// `kern` table's subtables as cumulative (see [`SfntFace::kerning`]),
+    /// not "first match wins" — a font can legitimately ship more than one
+    /// horizontal format-0 subtable (e.g. a base set plus an
+    /// override/supplement).
+    fn find_kern_subtables(data: &[u8], kern: TableRecord) -> Result<Vec<KernSubtable>, SfntError> {
         let base = kern.offset;
         let table_end = base + kern.length;
         let version = read_u16(data, base)?;
@@ -473,6 +494,7 @@ impl SfntFace {
         }
         let n_tables = read_u16(data, base + 2)?;
         let mut cursor = base + 4;
+        let mut subtables = Vec::new();
         for _ in 0..n_tables {
             if cursor + 6 > table_end {
                 return Err(SfntError::Malformed("kern subtable header"));
@@ -491,12 +513,15 @@ impl SfntFace {
                 return Err(SfntError::Malformed("kern subtable bounds"));
             }
 
-            // Coverage: bit 0 horizontal, bit 2 cross-stream; bits 8-15 hold
-            // the subtable format for a version-0 `kern` table.
+            // Coverage: bit 0 horizontal, bit 1 minimum, bit 2 cross-stream,
+            // bit 3 override; bits 8-15 hold the subtable format for a
+            // version-0 `kern` table.
             let horizontal = coverage & 0x0001 != 0;
+            let minimum = coverage & 0x0002 != 0;
             let cross_stream = coverage & 0x0004 != 0;
+            let override_values = coverage & 0x0008 != 0;
             let format = coverage >> 8;
-            if sub_version == 0 && format == 0 && horizontal && !cross_stream {
+            if sub_version == 0 && format == 0 && horizontal && !cross_stream && !minimum {
                 let format0_base = cursor + 6;
                 // The format-0 header itself (nPairs + 3 reserved fields) must
                 // fit before `nPairs` is trusted.
@@ -511,14 +536,15 @@ impl SfntFace {
                 if pairs_end > sub_end {
                     return Err(SfntError::Malformed("kern pairs out of bounds"));
                 }
-                return Ok(KernSubtable {
+                subtables.push(KernSubtable {
                     pairs_offset,
                     n_pairs,
+                    override_values,
                 });
             }
             cursor = sub_end;
         }
-        Err(SfntError::Malformed("kern: no usable format-0 subtable"))
+        Ok(subtables)
     }
 
     /// Font design units per em.
@@ -560,15 +586,35 @@ impl SfntFace {
 
     /// Kerning adjustment (font design units, added to the pen position
     /// between `left` and `right`) from the face's `kern` table, or `0` if
-    /// the face has no usable kerning data or no entry for this pair.
-    /// Negative values pull the pair closer (the common case); the pair is
-    /// looked up by binary search over the table's sorted entries.
+    /// the face has no usable kerning data or no entry for this pair in any
+    /// subtable. Negative values pull the pair closer (the common case).
+    ///
+    /// Every usable subtable (minimum subtables excluded, see the parse-time
+    /// subtable scan) is consulted, in file order, and combined per
+    /// OpenType's accumulation rule: a subtable with no entry for this pair
+    /// contributes nothing; an
+    /// ordinary subtable's value is *added* to the running total; an
+    /// "override" subtable's value (coverage bit 3) *replaces* it instead of
+    /// adding to it. A font with a single subtable — the common case — sees
+    /// no behavioral change from this accumulation.
     pub fn kerning(&self, left: u16, right: u16) -> i16 {
-        let Some(sub) = &self.kern else {
-            return 0;
-        };
         let key = ((left as u32) << 16) | (right as u32);
-        let data = &self.data;
+        let mut total: i32 = 0;
+        for sub in &self.kern {
+            if let Some(value) = Self::lookup_kern_pair(&self.data, sub, key) {
+                if sub.override_values {
+                    total = value as i32;
+                } else {
+                    total += value as i32;
+                }
+            }
+        }
+        total.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    }
+
+    /// Binary search `sub`'s sorted `(left, right, value)` triples for
+    /// `key` (`left << 16 | right`), returning the pair's value if present.
+    fn lookup_kern_pair(data: &[u8], sub: &KernSubtable, key: u32) -> Option<i16> {
         let mut lo = 0usize;
         let mut hi = sub.n_pairs as usize;
         while lo < hi {
@@ -580,10 +626,10 @@ impl SfntFace {
             match entry_key.cmp(&key) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return read_i16(data, off + 4).unwrap_or(0),
+                std::cmp::Ordering::Equal => return Some(read_i16(data, off + 4).unwrap_or(0)),
             }
         }
-        0
+        None
     }
 
     /// Map a Unicode scalar to a glyph id via the format-4 cmap, or `None` if
@@ -1031,27 +1077,38 @@ pub(crate) mod test_support {
     /// subtable holding `pairs`, pre-sorted by `(left, right)` as the format
     /// requires.
     pub(crate) fn kern_table_format0(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
-        let mut sub = Vec::new();
-        push16(&mut sub, pairs.len() as u16); // nPairs
-        push16(&mut sub, 0); // searchRange
-        push16(&mut sub, 0); // entrySelector
-        push16(&mut sub, 0); // rangeShift
-        for &(left, right, value) in pairs {
-            push16(&mut sub, left);
-            push16(&mut sub, right);
-            sub.extend_from_slice(&value.to_be_bytes());
-        }
+        kern_table_multi(&[(0, pairs)])
+    }
 
-        let mut subtable_header = Vec::new();
-        push16(&mut subtable_header, 0); // subtable version
-        push16(&mut subtable_header, (6 + sub.len()) as u16); // length (header + body)
-        push16(&mut subtable_header, 0x0001); // coverage: horizontal, format 0
+    /// One format-0 subtable's `(extra_coverage, pairs)` input to
+    /// [`kern_table_multi`]: `extra_coverage` ORed onto the mandatory
+    /// horizontal bit, and `pairs` pre-sorted by `(left, right)`.
+    pub(crate) type KernSubtableSpec<'a> = (u16, &'a [(u16, u16, i16)]);
 
+    /// A `kern` table (version 0) with one or more format-0 subtables —
+    /// `extra_coverage` is ORed onto the mandatory horizontal bit (`0x0001`),
+    /// e.g. `0x0002` (minimum) or `0x0008` (override) — shared by the
+    /// subtable-accumulation/override/minimum-skip regression tests below.
+    pub(crate) fn kern_table_multi(subtables: &[KernSubtableSpec]) -> Vec<u8> {
         let mut kern = Vec::new();
         push16(&mut kern, 0); // kern table version
-        push16(&mut kern, 1); // nTables
-        kern.extend_from_slice(&subtable_header);
-        kern.extend_from_slice(&sub);
+        push16(&mut kern, subtables.len() as u16); // nTables
+        for &(extra_coverage, pairs) in subtables {
+            let mut sub = Vec::new();
+            push16(&mut sub, pairs.len() as u16); // nPairs
+            push16(&mut sub, 0); // searchRange
+            push16(&mut sub, 0); // entrySelector
+            push16(&mut sub, 0); // rangeShift
+            for &(left, right, value) in pairs {
+                push16(&mut sub, left);
+                push16(&mut sub, right);
+                sub.extend_from_slice(&value.to_be_bytes());
+            }
+            push16(&mut kern, 0); // subtable version
+            push16(&mut kern, (6 + sub.len()) as u16); // length (header + body)
+            push16(&mut kern, 0x0001 | extra_coverage); // coverage: horizontal + extra
+            kern.extend_from_slice(&sub);
+        }
         kern
     }
 
@@ -1341,6 +1398,64 @@ mod tests {
         assert_eq!(face.kerning(1, 1), -40);
         // Unlisted pair: no kerning, not an error.
         assert_eq!(face.kerning(5, 6), 0);
+    }
+
+    #[test]
+    fn minimum_subtable_is_not_applied_as_kerning() {
+        // Coverage 0x0002 (minimum) ORed onto the mandatory horizontal bit
+        // 0x0001 yields 0x0003: a minimum-constraint subtable, not a
+        // kerning one. Its -200 must not land as a kerning adjustment.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(*b"kern", kern_table_multi(&[(0x0002, &[(0, 1, -200)])]))],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), 0);
+    }
+
+    #[test]
+    fn two_ordinary_subtables_accumulate() {
+        // Two independent horizontal format-0 subtables both carrying the
+        // same pair: OpenType defines accumulation (sum), not "first wins".
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0, &[(0, 1, -20)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -30);
+    }
+
+    #[test]
+    fn override_subtable_replaces_rather_than_adds() {
+        // Coverage bit 3 (0x0008) on the second subtable: its value for the
+        // pair replaces the running total instead of adding to it.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0x0008, &[(0, 1, -5)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -5);
+    }
+
+    #[test]
+    fn override_subtable_without_a_matching_pair_leaves_the_total_untouched() {
+        // The override subtable has no entry for (0, 1): it must not zero
+        // out or otherwise disturb the first subtable's contribution.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0x0008, &[(2, 3, -99)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -10);
     }
 
     // ---- #181: typographic family (name id 16) grouping -------------------
