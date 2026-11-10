@@ -101,6 +101,27 @@ breaking changes can land on minor bumps).
     a still-physically-held gesture to the host; and losing window focus
     now cancels a pending pointer activation instead of leaving it armed
     for a later, unrelated release to fire. See ADR 0011's addendum.
+- **`mkui-text` bitmap face: full Latin-1 Supplement letter coverage, defined
+  fallback glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers every
+  letter in the Unicode Latin-1 Supplement block (U+00C0-U+00FF) — the
+  French-accented letters in both cases (à â ä é è ê ë î ï ô ö ù û ü ÿ ç and
+  À Â Ä É È Ê Ë Î Ï Ô Ö Ù Û Ü Ÿ), the acute/tilde/ring vowels needed for
+  Spanish, Portuguese, and Scandinavian text (á í ó ú ã å õ ì ò ý and their
+  capitals), ñ/Ñ, ß, and the Icelandic/Old English letters eth and thorn
+  (ð/Ð, þ/Þ) — plus the œ/Œ and æ/Æ ligatures, guillemets, curly double
+  quotes, ellipsis, and the previously-missing ASCII `!` and `;`, and folds
+  NBSP / narrow-NBSP to a plain space. The only Latin-1 Supplement
+  codepoints with no table entry are `×` and `÷`, which are symbols, not
+  letters — an exhaustive test iterates the whole block and asserts every
+  letter in it renders a real glyph. `Ç` still folds to `C` — a
+  cedilla sits below the baseline, and `C`'s bottom row already uses every
+  column the 5-bit cell has, unlike the other accented capitals, which free
+  row 0 for the diacritic by compressing their letterform into 6 rows. Any
+  codepoint still missing a glyph renders a new, explicit `FALLBACK_GLYPH`
+  (a hollow box) instead of reusing `'?'` — legible, never blank, never a
+  panic. `BitmapTextSystem::rasterize` now normalizes before table lookup
+  so this applies uniformly, including to callers (like `cache_key_for`)
+  that build a `GlyphCacheKey` straight from a raw codepoint.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through
