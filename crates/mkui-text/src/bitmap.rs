@@ -425,12 +425,13 @@ pub fn is_fallback_glyph(bits: &[u8; 7]) -> bool {
 }
 
 /// 5×7 bit pattern for a single glyph. Rows are MSB-first; bit 4 is the
-/// leftmost column. Covers ASCII plus the French-accented letters (both
-/// cases), the œ/Œ ligature, guillemets, curly quotes, and ellipsis needed
-/// for Latin + French text; [`normalize_bitmap_char`] folds a few other
-/// codepoints (NBSP, narrow NBSP, `Ç`) onto entries here before this table
-/// is consulted. Characters with no entry below render the explicit
-/// [`FALLBACK_GLYPH`], never `'?'` and never a blank cell.
+/// leftmost column. Covers ASCII (including `!`/`;`) plus the French-accented
+/// letters (both cases), the œ/Œ and æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets,
+/// curly quotes, and ellipsis needed for Latin + French text;
+/// [`normalize_bitmap_char`] folds a few other codepoints (NBSP, narrow
+/// NBSP, `Ç`) onto entries here before this table is consulted. Characters
+/// with no entry below render the explicit [`FALLBACK_GLYPH`], never `'?'`
+/// and never a blank cell.
 #[rustfmt::skip]
 pub fn bitmap_glyph(character: char) -> [u8; 7] {
     match character {
@@ -527,17 +528,25 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'Ë' => [0b10001, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
         'Î' => [0b01010, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
         'Ï' => [0b10001, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
-        'Ô' => [0b01010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        'Ö' => [0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        // 'Ô'/'Ö' need their own bottom row, not plain 'O''s 0b01110: 'O''s
+        // compressed body (top curve + 4 identical 0b10001 stem rows +
+        // closing curve) is bit-for-bit the same 6 rows as lowercase 'o''s
+        // own non-blank body, so stacking an accent on top of each
+        // reproduces the *same* array for the capital and lowercase
+        // version (`Ô` == `ô`, `Ö` == `ö`) — unlike 'À'/'É'/'Î', whose
+        // capitals have a unique non-repeating top row that the accent
+        // necessarily overwrites, breaking any such reuse. Widening the
+        // closing curve by one bit on the right (same trick as 'Ü' below)
+        // disambiguates the capital from the lowercase glyph.
+        'Ô' => [0b01010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
+        'Ö' => [0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ù' => [0b01000, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         'Û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         // 'Ü' needs its own bottom row, not plain 'U''s 0b01110: 'U''s
         // compressed body is five identical 0b10001 stem rows followed by
         // the closing curve, so a diaeresis accent row (also 0b10001)
         // stacked on top exactly reconstructs the seven rows of plain 'U'
-        // bit-for-bit (unlike 'À'/'É'/'Î'/'Ô', whose capitals have a unique
-        // non-repeating top row that the accent necessarily overwrites).
-        // Widening the closing curve by one bit on the right breaks that
+        // bit-for-bit. Widening the closing curve by one bit on the right breaks that
         // collision while keeping the shape recognizable as 'U'.
         'Ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ÿ' => [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100],
@@ -553,6 +562,33 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         // Œ: a 'C' shape (open on the right) with a middle bar extending
         // further right, like the crossbar of a fused 'E'.
         'Œ' => [0b01111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b01111],
+        // æ/Æ: the same single-row-tick ligature trick as œ/Œ, applied to
+        // 'a'/'A' instead of 'o'/'C' — one of the base letter's rows gains
+        // a center bit to suggest the seam between the two joined letters.
+        'æ' => [0b00000, 0b01110, 0b00001, 0b01111, 0b10101, 0b10011, 0b01101],
+        'Æ' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10101, 0b10001, 0b10001],
+        // ñ/Ñ: 'n' with a tilde. Lowercase 'n' has the usual free ascender
+        // row 0; capital 'N' does not, so its body is compressed into 6
+        // rows the same way the other accented capitals are (dropping one
+        // of its three identical bottom 0b10001 rows) — using a tilde bit
+        // pattern (0b01101) not shared with any other diacritic row in
+        // this table, so it can't reconstruct plain 'N' the way a reused
+        // row value could (see the 'Ü' comment above).
+        'ñ' => [0b01101, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001, 0b10001],
+        'Ñ' => [0b01101, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001],
+        // ß (sharp s): a tall figure-eight-like stem with an open tail at
+        // the bottom right instead of closing the lower loop — the
+        // distinguishing feature from '8' (which closes both loops), at
+        // the cost of a true descender (the 5×7 cell has none to spare).
+        'ß' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b10010],
+        // ø/Ø: 'o'/'O' with a diagonal stroke added through the inner
+        // columns (bits 1-3, which the circle's sides at bits 0/4 leave
+        // free) of the middle rows. The diagonal runs top-left to
+        // bottom-right — the opposite direction from digit '0''s own
+        // built-in slash (top-right to bottom-left, see '0' below) — so
+        // 'Ø' and '0' don't collide despite both being a slashed circle.
+        'ø' => [0b00000, 0b01110, 0b11001, 0b10101, 0b10011, 0b10001, 0b01110],
+        'Ø' => [0b01110, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b01110],
         '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
         '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
         '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
@@ -566,6 +602,14 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         ':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
         '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110],
         ',' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110, 0b00100],
+        // '!': the dot reuses '.''s bottom-row shape so the two punctuation
+        // marks share a baseline footprint; row 4 is blank to separate the
+        // bar from the dot, matching ':''s gap convention.
+        '!' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00110, 0b00110],
+        // ';': ':''s upper dot (rows 1-2) over ','s descending tail
+        // (rows 4-6), the same composition French typography uses to build
+        // ';' from ':' + ','.
+        ';' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00110, 0b00110, 0b00100],
         '+' => [0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000],
         '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
         '/' => [0b00001, 0b00010, 0b00100, 0b00100, 0b01000, 0b10000, 0b00000],
@@ -685,13 +729,37 @@ mod tests {
     #[test]
     fn fallback_glyph_is_distinct_from_every_mapped_character() {
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸ";
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØ";
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
             assert!(
                 !is_fallback_glyph(&bits),
                 "mapped character {ch:?} must not collide with FALLBACK_GLYPH"
             );
+        }
+    }
+
+    #[test]
+    fn every_mapped_character_has_a_pairwise_distinct_glyph() {
+        // Hand-authoring compressed/ligature-derived bit patterns (the
+        // accented capitals, œ/Œ, æ/Æ, ñ/Ñ, ø/Ø, ß) risks accidentally
+        // reconstructing another entry's exact bits, as happened twice
+        // during review: 'Ü''s first attempt was bit-identical to plain
+        // 'U' (diaeresis row == U's own duplicated stem row), and 'Ø''s
+        // first attempt was bit-identical to digit '0' (same diagonal
+        // direction already baked into '0' to distinguish it from 'O').
+        // This check is exhaustive over every mapped character, not just
+        // those two pairs, so a future addition can't reintroduce the
+        // same class of bug silently.
+        let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØ";
+        let mut seen: Vec<(char, [u8; 7])> = Vec::new();
+        for ch in mapped_chars.chars() {
+            let bits = bitmap_glyph(ch);
+            if let Some((other, _)) = seen.iter().find(|(_, other_bits)| *other_bits == bits) {
+                panic!("{ch:?} and {other:?} render the identical glyph {bits:?}");
+            }
+            seen.push((ch, bits));
         }
     }
 
@@ -733,6 +801,37 @@ mod tests {
             assert!(
                 !is_fallback_glyph(&bitmap_glyph(accented)),
                 "{accented:?} must not render the fallback glyph"
+            );
+        }
+    }
+
+    #[test]
+    fn pan_latin_letters_render_distinctly_from_their_lookalikes() {
+        // æ/Æ, ñ/Ñ, ø/Ø, and ß each risk rendering as (or colliding with) an
+        // unrelated already-mapped glyph — the base letter the ligature is
+        // built from, the plain letter a diacritic was dropped from, or
+        // (for ø/Ø) the digit '0', which this font already draws with its
+        // own diagonal slash. Each pair below must differ, and neither
+        // half may fall back.
+        let pairs = [
+            ('æ', 'a'),
+            ('Æ', 'A'),
+            ('ñ', 'n'),
+            ('Ñ', 'N'),
+            ('ø', 'o'),
+            ('Ø', 'O'),
+            ('Ø', '0'),
+            ('ß', '8'),
+        ];
+        for (ch, lookalike) in pairs {
+            assert_ne!(
+                bitmap_glyph(ch),
+                bitmap_glyph(lookalike),
+                "{ch:?} must render distinctly from {lookalike:?}"
+            );
+            assert!(
+                !is_fallback_glyph(&bitmap_glyph(ch)),
+                "{ch:?} must not render the fallback glyph"
             );
         }
     }
@@ -806,6 +905,42 @@ mod tests {
                     image.data, fallback_image.data,
                     "char {ch:?} rasterized as the fallback glyph via the real pipeline"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn review_reported_sentences_rasterize_without_missing_glyphs_via_real_pipeline() {
+        // Regression test for a review finding on #184's original PR: these
+        // exact three sentences, run through the real `layout` -> `rasterize`
+        // pipeline, rendered the fallback box for '!', ';', and 'æ' (and,
+        // separately, for the unaccented Latin letters later folded into
+        // #227's scope). '!' and ';' are plain ASCII that should have had
+        // their own `bitmap_glyph` entries from the start; 'æ' is covered
+        // directly here rather than deferred.
+        let sentences = ["« Bonjour ! »", "café ; thé", "ex æquo"];
+        let system = BitmapTextSystem::new();
+        let spec = LayoutSpec::default();
+        let fallback_image = system
+            .rasterize(cache_key_for('\u{E000}', spec.font_size_px))
+            .expect("fallback glyph must rasterize");
+
+        for sentence in sentences {
+            let runs = system.layout(sentence, &spec, None);
+            for run in &runs {
+                for glyph in &run.glyphs {
+                    let ch = char::from_u32(glyph.glyph_id).expect("glyph_id must be a valid char");
+                    let image = system
+                        .rasterize(run.cache_key(glyph))
+                        .unwrap_or_else(|e| panic!("char {ch:?} failed to rasterize: {e:?}"));
+                    if ch == ' ' {
+                        continue;
+                    }
+                    assert_ne!(
+                        image.data, fallback_image.data,
+                        "char {ch:?} in {sentence:?} rasterized as the fallback glyph"
+                    );
+                }
             }
         }
     }

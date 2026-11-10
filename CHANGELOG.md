@@ -104,17 +104,17 @@ breaking changes can land on minor bumps).
 - **`mkui-text` bitmap face: Latin + French glyph coverage, defined fallback
   glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers the French-accented
   letters in both cases (à â ä é è ê ë î ï ô ö ù û ü ÿ ç and À Â Ä É È Ê Ë Î Ï
-  Ô Ö Ù Û Ü Ÿ), the œ/Œ ligature, guillemets, curly double quotes, and
-  ellipsis, and folds NBSP / narrow-NBSP to a plain space. `Ç` still folds to
-  `C` — a cedilla sits below the baseline, and `C`'s bottom row already uses
-  every column the 5-bit cell has, unlike the other accented capitals, which
-  free row 0 for the diacritic by compressing their letterform into 6 rows.
-  Any codepoint still missing a glyph renders a new, explicit
-  `FALLBACK_GLYPH` (a hollow box) instead of reusing `'?'` — legible, never
-  blank, never a panic. `BitmapTextSystem::rasterize` now normalizes before
-  table lookup so this applies uniformly, including to callers (like
-  `cache_key_for`) that build a `GlyphCacheKey` straight from a raw
-  codepoint.
+  Ô Ö Ù Û Ü Ÿ), the œ/Œ and æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets, curly
+  double quotes, ellipsis, and the previously-missing ASCII `!` and `;`, and
+  folds NBSP / narrow-NBSP to a plain space. `Ç` still folds to `C` — a
+  cedilla sits below the baseline, and `C`'s bottom row already uses every
+  column the 5-bit cell has, unlike the other accented capitals, which free
+  row 0 for the diacritic by compressing their letterform into 6 rows. Any
+  codepoint still missing a glyph renders a new, explicit `FALLBACK_GLYPH`
+  (a hollow box) instead of reusing `'?'` — legible, never blank, never a
+  panic. `BitmapTextSystem::rasterize` now normalizes before table lookup
+  so this applies uniformly, including to callers (like `cache_key_for`)
+  that build a `GlyphCacheKey` straight from a raw codepoint.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through
