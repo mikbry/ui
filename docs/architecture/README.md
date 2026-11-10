@@ -57,6 +57,13 @@ and the records below.
   (consumed/ignored) per `winit::WindowEvent`: gesture-length pointer
   capture, a modal stack that gives Escape dialog precedence, a text-focus
   slot that swallows every other key, and corner-exact hit-testing.
+- [ADR 0012 — Host-owned GPU and frame: `EmbeddedRenderer`](0012-host-owned-gpu-embedding.md)
+  — `EmbeddedRenderer` borrows a host's `wgpu::Device` + target format
+  (ADR 0007's borrowed-resources discipline, one layer up) and records its
+  UI pass into the host's own command encoder and texture view — no
+  instance/surface/window of its own, one submission per frame, no extra
+  texture copy. Parallel to the winit-owned standalone shell, not a
+  replacement for it.
 
 ## ADR format conventions
 
