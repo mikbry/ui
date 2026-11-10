@@ -8,6 +8,23 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
+  embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
+  point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which
+  is unchanged). `EmbeddedRenderer::new` borrows the host's `wgpu::Device`,
+  target `TextureFormat`, and an explicit `EmbeddedColorSpace`, creating no
+  instance/adapter/surface/window of its own.
+  `EmbeddedRenderer::render_into` records exactly one UI render pass into
+  the host's own command encoder and texture view (`LoadOp::Load`, so the
+  host's already-drawn 3D scene survives underneath) — it never submits or
+  presents; the host does both once per frame around this call, meeting the
+  one-frame/one-submission/no-extra-copy acceptance bar.
+  - Scope decision: `EmbeddedColorSpace` (`Linear`/`EncodedUnorm`) is
+    explicit rather than inferred from `target_format.is_srgb()`, since a
+    plain UNORM sRGB format and a linear HDR float format can both report
+    `is_srgb() == false` while needing opposite fragment-shader handling —
+    an early version that inferred from `is_srgb()` alone silently
+    mishandled linear float targets, caught in review before merge.
 - **`mkui_core::platform::PlatformHost` — clipboard + native share routed
   through the host, not the OS (#206).** New `mkui-core` module defining
   `PlatformHost` (`copy_to_clipboard`, `share`) and `ShareRequest`

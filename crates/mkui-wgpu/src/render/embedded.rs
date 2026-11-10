@@ -1,11 +1,11 @@
 //! Host-owned GPU and frame — the borrowed-resources entry point (#175).
 //!
-//! [`Renderer`](super::Renderer) is the winit-owned "standalone" shell (ADR
+//! [`Renderer`] is the winit-owned "standalone" shell (ADR
 //! 0006/0007): it creates its own `wgpu::Instance`, requests its own adapter
 //! / device / queue, negotiates its own `Surface` from an `Arc<Window>`, and
 //! owns the per-frame command encoder and submission end-to-end.
 //!
-//! [`EmbeddedRenderer`] is the opposite: a third-party `wgpu`-based host
+//! [`EmbeddedRenderer`](crate::EmbeddedRenderer) is the opposite: a third-party `wgpu`-based host
 //! (a game or interactive engine) already owns an instance, adapter, device,
 //! queue, and a frame target — its swapchain view, drawn into by its own 3D
 //! scene. `EmbeddedRenderer` creates **none** of those. It borrows the host's
@@ -23,7 +23,7 @@
 //! Phase 1 (#175) covers the triangle lane only — the UI shapes, bitmap
 //! text, and borders every component renders through today. The Slug
 //! vector-glyph lane (`slug` feature, ADR 0007) and `Primitive::VectorPath`
-//! are not wired into [`EmbeddedRenderer::render_into`] yet; primitives of
+//! are not wired into [`EmbeddedRenderer::render_into`](crate::EmbeddedRenderer::render_into) yet; primitives of
 //! those kinds are silently skipped (the same no-op [`crate::tessellate_primitives`]
 //! already gives them on an unselected lane), not rejected. Follow-up:
 //! extending the embedded path to the Slug/vector lane is tracked
@@ -48,18 +48,18 @@
 //! class as not encoding a UNORM target. Inferring the right answer from the
 //! format alone silently mishandles whichever group the heuristic didn't
 //! anticipate (filed and fixed as part of #175's review — see the module
-//! tests), so [`EmbeddedRenderer::new`] takes an explicit
-//! [`EmbeddedColorSpace`] instead of guessing:
+//! tests), so [`EmbeddedRenderer::new`](crate::EmbeddedRenderer::new) takes an explicit
+//! [`EmbeddedColorSpace`](crate::EmbeddedColorSpace) instead of guessing:
 //!
-//! - [`EmbeddedColorSpace::Linear`] — the target either auto-encodes sRGB on
+//! - [`EmbeddedColorSpace::Linear`](crate::EmbeddedColorSpace::Linear) — the target either auto-encodes sRGB on
 //!   write (`target_format.is_srgb()`) or is itself a linear store that
 //!   expects already-linear values (e.g. `Rgba16Float`). Either way,
 //!   `render_into` writes the same linear vertex colors
-//!   [`super::gui_vertices`] already produces, untouched, through
+//!   `super::gui_vertices` already produces, untouched, through
 //!   `ui_triangles.wgsl`'s `fs_ui_triangles` entry point. Alpha blending
 //!   stays physically correct, in linear light — identical in spirit to the
 //!   standalone path.
-//! - [`EmbeddedColorSpace::EncodedUnorm`] — the target is a plain non-sRGB
+//! - [`EmbeddedColorSpace::EncodedUnorm`](crate::EmbeddedColorSpace::EncodedUnorm) — the target is a plain non-sRGB
 //!   UNORM format that stores perceptually-encoded sRGB bytes directly, with
 //!   no hardware transform on write (e.g. `Bgra8Unorm`). `render_into` draws
 //!   through `fs_ui_triangles_encode_srgb` instead, which applies the linear
