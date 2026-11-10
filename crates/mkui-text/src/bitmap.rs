@@ -160,6 +160,10 @@ impl TextSystem for BitmapTextSystem {
                     cluster: cluster as u32,
                     subpixel_variant: 0,
                     format: GlyphFormat::Alpha,
+                    // The bitmap lane is the bottom of the fallback chain —
+                    // nothing downstream ever needs to degrade one of its
+                    // glyphs further, so this has no reader here.
+                    fallback_char: None,
                 });
                 pen_x += advance;
             }

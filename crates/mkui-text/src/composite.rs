@@ -328,6 +328,10 @@ struct Shaped {
     is_slug: bool,
     glyph_id: u32,
     advance_px: f32,
+    /// Mirrors [`LayoutGlyph::fallback_char`] — `None` for an ordinarily
+    /// classified character (its `cluster` indexes real source text), `Some`
+    /// for a layout-synthesized glyph (an ellipsis) that has none.
+    fallback_char: Option<char>,
 }
 
 impl SfntProvider {
@@ -347,11 +351,13 @@ impl SfntProvider {
                 is_slug: true,
                 glyph_id: gid as u32,
                 advance_px: self.face.advance_width(gid) as f32 * sfnt_scale,
+                fallback_char: None,
             },
             None => Shaped {
                 is_slug: false,
                 glyph_id: normalize_bitmap_char(ch) as u32,
                 advance_px: bmp_advance,
+                fallback_char: None,
             },
         }
     }
@@ -359,16 +365,26 @@ impl SfntProvider {
     /// Build the ellipsis glyph(s) appended to a truncated line: a single
     /// `'…'` glyph when the face maps it, otherwise three `'.'` glyphs
     /// (mirroring the bitmap lane's own `"..."` fallback in
-    /// [`ellipsize_line`](crate::bitmap::wrap_text_lines)).
+    /// [`ellipsize_line`](crate::bitmap::wrap_text_lines)). Every returned
+    /// glyph carries `fallback_char`: these are synthesized, not classified
+    /// from source text, so a renderer that must degrade one to the bitmap
+    /// lane for *any* reason — the layout-time classification here, or a
+    /// later outline-extraction failure — has the literal character to draw
+    /// without consulting `cluster`/source text, which would not describe a
+    /// synthesized glyph correctly.
     fn ellipsis_glyphs(&self, sfnt_scale: f32, bmp_advance: f32) -> Vec<Shaped> {
         match self.face.glyph_index('…') {
             Some(gid) => vec![Shaped {
                 is_slug: true,
                 glyph_id: gid as u32,
                 advance_px: self.face.advance_width(gid) as f32 * sfnt_scale,
+                fallback_char: Some('…'),
             }],
             None => {
-                let dot = self.classify('.', sfnt_scale, bmp_advance);
+                let dot = Shaped {
+                    fallback_char: Some('.'),
+                    ..self.classify('.', sfnt_scale, bmp_advance)
+                };
                 vec![dot, dot, dot]
             }
         }
@@ -379,18 +395,22 @@ impl SfntProvider {
     /// bounded, shrinking the kept content until it plus the ellipsis fits —
     /// the width-based analogue of the bitmap lane's `ellipsize_line`.
     /// Returns `(cluster, Shaped)` pairs; the ellipsis glyphs themselves
-    /// carry `chars.len()` — an out-of-range sentinel cluster — because they
-    /// are synthetic and correspond to **no** position in the source text.
-    /// An earlier revision instead borrowed the last kept content
-    /// character's cluster, on the theory that a glyph falling back to the
-    /// bitmap lane should "resolve to a real character instead of
-    /// panicking" — but every downstream cluster lookup already guards with
-    /// `.get`/`.min(chars.len())`, so that borrowing only replaced a
-    /// not-actually-needed panic guard with silent corruption: a dot/ellipsis
-    /// glyph that fell back to the bitmap lane rendered whatever real
-    /// character happened to sit at the borrowed cluster instead of a dot.
-    /// The sentinel lets every consumer tell "no literal source character
-    /// here" apart from "this is index 0 of the text".
+    /// carry `chars.len()` — an out-of-range sentinel cluster — plus
+    /// [`Shaped::fallback_char`], because they are synthetic and correspond
+    /// to **no** position in the source text. An earlier revision instead
+    /// borrowed the last kept content character's cluster, on the theory
+    /// that a glyph falling back to the bitmap lane should "resolve to a
+    /// real character instead of panicking" — but every downstream cluster
+    /// lookup already guards with `.get`/`.min(chars.len())`, so that
+    /// borrowing only replaced a not-actually-needed panic guard with silent
+    /// corruption: a dot/ellipsis glyph that fell back to the bitmap lane
+    /// (whether by the layout-time classification here, or a later
+    /// outline-extraction failure) rendered whatever real character
+    /// happened to sit at the borrowed cluster instead of a dot. The
+    /// out-of-range cluster alone fixed the layout-time case (every consumer
+    /// of it was already `.get`/`.min`-guarded, so it just drops the glyph);
+    /// `fallback_char` fixes the extraction-failure case too, by giving the
+    /// renderer the literal character to draw instead of dropping it.
     fn ellipsize_range(
         &self,
         chars: &[char],
@@ -644,6 +664,7 @@ fn push_line_runs(
             cluster: *cluster,
             subpixel_variant: 0,
             format: GlyphFormat::Alpha,
+            fallback_char: shape.fallback_char,
         });
         pen_x += shape.advance_px;
     }
@@ -1450,6 +1471,7 @@ mod tests {
                 cluster: 0,
                 subpixel_variant: 0,
                 format: GlyphFormat::Alpha,
+                fallback_char: None,
             }],
         }
     }

@@ -44,13 +44,19 @@ use crate::types::{Color, Point, Primitive, Rect, Size, Text, TextAlign, TextSty
 pub struct BitmapFallbackGlyph {
     /// Index into the source text's `chars()` (the run's
     /// [`LayoutGlyph::cluster`](mkui_text::LayoutGlyph::cluster)) — recovers
-    /// the character to rasterize through the bitmap lane. A synthesized
-    /// glyph with no corresponding source-text position (e.g. one of #182's
-    /// ellipsis dots) carries an out-of-range sentinel here instead of a
-    /// real index, so the lookup at the call site below finds nothing and
-    /// the glyph is dropped rather than mis-rendered as whatever character
-    /// happens to sit at a neighboring cluster.
+    /// the character to rasterize through the bitmap lane. Consulted only
+    /// when `fallback_char` is `None`: a synthesized glyph with no
+    /// corresponding source-text position (e.g. one of #182's ellipsis
+    /// dots) carries an out-of-range sentinel here instead of a real index,
+    /// since `fallback_char` already names its literal character directly.
     pub cluster: u32,
+    /// The literal character to rasterize, copied from the run glyph's
+    /// [`LayoutGlyph::fallback_char`](mkui_text::LayoutGlyph::fallback_char)
+    /// when it is `Some` — a layout-synthesized glyph (an ellipsis) names
+    /// its own character here because `cluster` does not index one. `None`
+    /// for an ordinary glyph, whose character the caller recovers from
+    /// `cluster` instead.
+    pub fallback_char: Option<char>,
     /// Pen x-position of the glyph cell, already offset by the caller's
     /// `box_origin_px` and the run's origin — the same absolute coordinate
     /// frame as [`PlacedSlugGlyph::origin_px`].
@@ -165,6 +171,7 @@ pub fn place_slug_run(
             None if sfnt_face.is_some() => {
                 result.bitmap_fallback.push(BitmapFallbackGlyph {
                     cluster: glyph.cluster,
+                    fallback_char: glyph.fallback_char,
                     pen_x_px: pen_x,
                 });
             }
@@ -309,7 +316,16 @@ fn expand_text_primitive(
             );
             out.extend(result.glyphs.into_iter().map(Primitive::SlugGlyph));
             for fallback in result.bitmap_fallback {
-                if let Some(&ch) = chars.get(fallback.cluster as usize) {
+                // Prefer the glyph's own literal character — set for a
+                // layout-synthesized glyph (an ellipsis) whose `cluster`
+                // does not index the source text at all. Only fall back to
+                // the cluster-indexed lookup for an ordinary glyph (e.g. an
+                // emoji outline that failed to extract), where `cluster`
+                // does name the real character to draw.
+                let ch = fallback
+                    .fallback_char
+                    .or_else(|| chars.get(fallback.cluster as usize).copied());
+                if let Some(ch) = ch {
                     out.push(bitmap_text_primitive(
                         text,
                         fallback.pen_x_px,
@@ -351,18 +367,16 @@ fn expand_text_primitive(
 }
 
 /// Reconstruct the literal text a Bitmap-class run's glyphs represent from
-/// each glyph's own `glyph_id`, not from `cluster`/the source text. Every
-/// bitmap-class `glyph_id` is `normalize_bitmap_char` of the character it
-/// stands for (see `SfntProvider::classify`/`ellipsis_glyphs` in
-/// `mkui-text`), so this is exact for a genuine per-character fallback
-/// (where it matches the source text 1:1) and, crucially, also for a
-/// synthesized glyph with no source-text position at all — e.g. one of
-/// #182's ellipsis dots, whose `cluster` is an out-of-range sentinel for
-/// exactly this reason.
+/// each glyph's own identity, not from `cluster`/the source text. A
+/// synthesized glyph (an ellipsis) names its character directly via
+/// `fallback_char`; an ordinary glyph has none, so its character is instead
+/// recovered from `glyph_id`, which `SfntProvider::classify` always sets to
+/// `normalize_bitmap_char` of the character it stands for — exact for a
+/// genuine per-character fallback, where it matches the source text 1:1.
 fn bitmap_fallback_span(glyphs: &[mkui_text::LayoutGlyph]) -> String {
     glyphs
         .iter()
-        .filter_map(|g| char::from_u32(g.glyph_id))
+        .filter_map(|g| g.fallback_char.or_else(|| char::from_u32(g.glyph_id)))
         .collect()
 }
 
@@ -399,7 +413,8 @@ fn bitmap_text_primitive(
 mod tests {
     use super::*;
     use mkui_text::{
-        normalize_bitmap_char, CompositeTextSystem, GlyphFormat, LayoutGlyph, LayoutSpec,
+        normalize_bitmap_char, CompositeTextSystem, FontQuery, GlyphCacheKey, GlyphFormat,
+        GlyphImage, LayoutGlyph, LayoutSpec, SfntFace, TextError,
     };
     use mkui_vector2d::SlugConfig;
 
@@ -661,10 +676,111 @@ mod tests {
                 cluster: wrong_cluster,
                 subpixel_variant: 0,
                 format: GlyphFormat::Alpha,
+                fallback_char: None,
             })
             .collect();
 
         assert_eq!(bitmap_fallback_span(&glyphs), "...");
+    }
+
+    /// Wraps a real [`CompositeTextSystem`], delegating every call straight
+    /// through except `layout`, where it corrupts the `glyph_id` of every
+    /// glyph carrying a `fallback_char` (i.e. every ellipsis glyph
+    /// `SfntProvider::ellipsize_range` produced) to an id outside `u16`'s
+    /// range. That forces `extract_slug_glyph` to fail deterministically for
+    /// exactly those glyphs, reproducing — on the bundled, embeddable Abel
+    /// fixture — the same outline-extraction failure a review caught with a
+    /// real font whose ellipsis/dot glyph is a composite outline
+    /// `mkui-vector2d`'s SFNT-to-Slug bridge rejects (that font can't be
+    /// bundled here).
+    struct ForceEllipsisExtractionFailure {
+        inner: CompositeTextSystem,
+    }
+
+    impl TextSystem for ForceEllipsisExtractionFailure {
+        fn resolve_font(&self, query: &FontQuery) -> Option<FontId> {
+            self.inner.resolve_font(query)
+        }
+
+        fn register_font_bytes(
+            &self,
+            bytes: std::sync::Arc<[u8]>,
+            index: u32,
+        ) -> Result<FontId, TextError> {
+            self.inner.register_font_bytes(bytes, index)
+        }
+
+        fn layout(
+            &self,
+            text: &str,
+            spec: &LayoutSpec,
+            max_width_px: Option<f32>,
+        ) -> Vec<LayoutRun> {
+            let mut runs = self.inner.layout(text, spec, max_width_px);
+            for run in &mut runs {
+                for glyph in &mut run.glyphs {
+                    if glyph.fallback_char.is_some() {
+                        glyph.glyph_id = u16::MAX as u32 + 1;
+                    }
+                }
+            }
+            runs
+        }
+
+        fn rasterize(&self, key: GlyphCacheKey) -> Result<GlyphImage, TextError> {
+            self.inner.rasterize(key)
+        }
+
+        fn sfnt_face(&self, font_id: FontId) -> Option<&SfntFace> {
+            self.inner.sfnt_face(font_id)
+        }
+
+        fn families(&self) -> Vec<String> {
+            self.inner.families()
+        }
+    }
+
+    #[test]
+    fn ellipsis_survives_a_forced_outline_extraction_failure_end_to_end() {
+        // Regression for review round 3's extraction-failure variant of
+        // ellipsis-glyph-identity-loss-through-bitmap-fallback, reproduced
+        // with Arial Black ("MMMMMMMMMM", 16px, a 40px-wide single-line
+        // box): the review's repro showed a bare glyph with no truncation
+        // indicator at all, because the ellipsis glyph's own outline failed
+        // to extract and `place_slug_run`'s extraction-failure fallback
+        // looked the drawn character up by `cluster` — an out-of-range
+        // sentinel for a synthesized glyph — and silently dropped it instead
+        // of drawing a dot. Same numbers, substituting the bundled Abel
+        // fixture for the proprietary font and `ForceEllipsisExtractionFailure`
+        // for whatever made Arial Black's ellipsis/dot glyph unextractable.
+        let mut inner = CompositeTextSystem::new();
+        let font_id = inner
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let sys = ForceEllipsisExtractionFailure { inner };
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (mut text, _) = text_primitive("MMMMMMMMMM", 16.0);
+        text.rect.size.width = 40.0;
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+
+        let bitmap_texts: Vec<&Text> = expanded
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Text(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let shows_truncation_indicator = bitmap_texts
+            .iter()
+            .any(|t| t.content.contains('.') || t.content.contains('…'));
+        assert!(
+            shows_truncation_indicator,
+            "a truncated line must still show a visible truncation \
+             indicator even when the ellipsis glyph's own outline fails to \
+             extract; got bitmap-fallback primitives {bitmap_texts:?}"
+        );
     }
 
     #[test]
