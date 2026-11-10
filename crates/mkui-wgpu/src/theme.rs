@@ -34,18 +34,21 @@ pub struct ShadowStyle {
     pub spread: f32,
 }
 
-/// Root theme for the wgpu UI backend. Holds panel / text baseline and a
-/// small palette of semantic tokens (`primary`, `muted`, `destructive`) that
-/// variant resolvers combine with size tokens into concrete widget styles.
+/// Root theme for the wgpu UI backend. A thin wrapper around [`ThemeTokens`]
+/// — `tokens` is the *only* stored state. `panel_compact` / `panel_style` /
+/// `title_style` / `body_style` / `button_style` / … are all methods that
+/// derive their result from `self.tokens` on every call, never a cached
+/// field, so swapping `self.tokens` (directly, or by assigning a whole new
+/// `WgpuTheme`) can never leave some other field stale (issue #205 Codex
+/// round 1 — an earlier revision cached `panel`/`title_style`/`body_style`
+/// as plain fields computed once in `Default::default()`, which went stale
+/// the moment a caller swapped only `tokens`).
 ///
 /// The defaults target a warm editorial control-surface look; a future
-/// light-mode or per-product palette swap would only need to replace this
-/// struct.
+/// light-mode or per-product palette swap only needs a different
+/// `ThemeTokens` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WgpuTheme {
-    pub panel: PanelStyle,
-    pub title_style: TextStyle,
-    pub body_style: TextStyle,
     pub tokens: ThemeTokens,
 }
 
@@ -335,7 +338,6 @@ pub struct DotStyle {
 
 impl Default for WgpuTheme {
     fn default() -> Self {
-        let font = FontFaceId(0);
         let spacing = SpacingTokens {
             stroke_width_hairline: 1.0,
             radius_tight: 4.0,
@@ -386,37 +388,52 @@ impl Default for WgpuTheme {
             },
             spacing,
         };
-        Self {
-            panel: PanelStyle {
-                fill: tokens.surface,
-                stroke: Stroke {
-                    color: tokens.border,
-                    width: tokens.spacing.stroke_width_hairline,
-                },
-                shadow: tokens.shadow,
-                corner_radius: tokens.spacing.radius_panel,
-                padding: Insets::all(tokens.spacing.padding_panel),
-            },
-            title_style: TextStyle {
-                font,
-                font_size_px: 15.0,
-                line_height_px: 20.0,
-                color: tokens.surface_foreground,
-                align: TextAlign::Start,
-            },
-            body_style: TextStyle {
-                font,
-                font_size_px: 13.0,
-                line_height_px: 18.0,
-                color: tokens.body_foreground.with_alpha(0.92),
-                align: TextAlign::Start,
-            },
-            tokens,
-        }
+        Self { tokens }
     }
 }
 
 impl WgpuTheme {
+    /// Compact panel chrome (`radius_panel` / `padding_panel` — 14px by
+    /// default): the baseline used by `info_list` / `titled_panel` call
+    /// sites that want a tighter chrome than [`Self::panel_style`]'s
+    /// roomier 16px preset. Both derive live from `self.tokens`.
+    pub fn panel_compact(&self) -> PanelStyle {
+        PanelStyle {
+            fill: self.tokens.surface,
+            stroke: Stroke {
+                color: self.tokens.border,
+                width: self.tokens.spacing.stroke_width_hairline,
+            },
+            shadow: self.tokens.shadow,
+            corner_radius: self.tokens.spacing.radius_panel,
+            padding: Insets::all(self.tokens.spacing.padding_panel),
+        }
+    }
+
+    /// Heading-ladder text style (used as the panel title). Derives live
+    /// from `self.tokens` — see the [`WgpuTheme`] doc comment.
+    pub fn title_style(&self) -> TextStyle {
+        TextStyle {
+            font: FontFaceId(0),
+            font_size_px: 15.0,
+            line_height_px: 20.0,
+            color: self.tokens.surface_foreground,
+            align: TextAlign::Start,
+        }
+    }
+
+    /// Default paragraph body text style. Derives live from `self.tokens`
+    /// — see the [`WgpuTheme`] doc comment.
+    pub fn body_style(&self) -> TextStyle {
+        TextStyle {
+            font: FontFaceId(0),
+            font_size_px: 13.0,
+            line_height_px: 18.0,
+            color: self.tokens.body_foreground.with_alpha(0.92),
+            align: TextAlign::Start,
+        }
+    }
+
     /// Baseline panel chrome (inspector, explorer, hint bar, toolbar, and
     /// other surface containers). Callers override padding / corner_radius as
     /// needed.
@@ -477,7 +494,7 @@ impl WgpuTheme {
                 fill: self.tokens.input_active_fill,
                 stroke: self.tokens.primary,
                 text_color: self.tokens.muted_foreground.with_alpha(1.0),
-                text_style: self.body_style,
+                text_style: self.body_style(),
                 corner_radius: self.tokens.spacing.radius_compact,
                 stroke_width: self.tokens.spacing.stroke_width_hairline,
                 padding: Insets::symmetric(6.0, 1.0),
@@ -487,7 +504,7 @@ impl WgpuTheme {
                 fill: self.tokens.surface_sunken,
                 stroke: self.tokens.border.with_alpha(0.22),
                 text_color: self.tokens.muted_foreground.with_alpha(1.0),
-                text_style: self.body_style,
+                text_style: self.body_style(),
                 corner_radius: self.tokens.spacing.radius_compact,
                 stroke_width: self.tokens.spacing.stroke_width_hairline,
                 padding: Insets::symmetric(6.0, 1.0),
@@ -518,18 +535,22 @@ impl WgpuTheme {
     pub fn button_style(&self, variant: ButtonVariant, size: ButtonSize) -> ButtonStyle {
         let hairline = self.tokens.spacing.stroke_width_hairline;
         let (corner_radius, stroke_width, label_size) = match size {
-            ButtonSize::Default => (self.tokens.spacing.radius_card, hairline, self.body_style),
+            ButtonSize::Default => (self.tokens.spacing.radius_card, hairline, self.body_style()),
             ButtonSize::Sm => (
                 self.tokens.spacing.radius_compact,
                 hairline,
-                self.body_style,
+                self.body_style(),
             ),
             ButtonSize::Lg => (
                 self.tokens.spacing.radius_relaxed,
                 hairline,
-                self.body_style,
+                self.body_style(),
             ),
-            ButtonSize::Icon => (self.tokens.spacing.radius_tight, hairline, self.body_style),
+            ButtonSize::Icon => (
+                self.tokens.spacing.radius_tight,
+                hairline,
+                self.body_style(),
+            ),
         };
         let label_style = TextStyle {
             align: TextAlign::Center,
@@ -619,7 +640,7 @@ impl WgpuTheme {
                 Insets::symmetric(8.0, 2.0),
                 TextStyle {
                     align: TextAlign::Center,
-                    ..self.body_style
+                    ..self.body_style()
                 },
             ),
             BadgeSize::Sm => (
@@ -629,7 +650,7 @@ impl WgpuTheme {
                     font_size_px: 10.0,
                     line_height_px: 12.0,
                     align: TextAlign::Center,
-                    ..self.body_style
+                    ..self.body_style()
                 },
             ),
         };
@@ -715,22 +736,22 @@ impl WgpuTheme {
     /// Resolve a semantic [`TextVariant`] to a concrete [`TextStyle`].
     pub fn text_style(&self, variant: TextVariant) -> TextStyle {
         match variant {
-            TextVariant::Heading => self.title_style,
+            TextVariant::Heading => self.title_style(),
             TextVariant::Subheading => TextStyle {
                 color: self.tokens.primary_ring,
-                ..self.title_style
+                ..self.title_style()
             },
-            TextVariant::Body => self.body_style,
+            TextVariant::Body => self.body_style(),
             TextVariant::Muted => TextStyle {
                 color: self.tokens.body_foreground.with_alpha(0.72),
-                ..self.body_style
+                ..self.body_style()
             },
             TextVariant::Caption => TextStyle {
                 color: self.tokens.body_foreground.with_alpha(0.65),
                 font_size_px: 10.0,
                 line_height_px: 12.0,
                 align: TextAlign::End,
-                ..self.body_style
+                ..self.body_style()
             },
         }
     }
@@ -826,7 +847,6 @@ mod tests {
     /// module: issue #205 asks for the swap *mechanism*, not a second
     /// built-in palette, so this "neon" set is never exposed as public API.
     fn alt_theme() -> WgpuTheme {
-        let font = FontFaceId(0);
         let spacing = SpacingTokens {
             stroke_width_hairline: 2.0,
             radius_tight: 1.0,
@@ -877,33 +897,7 @@ mod tests {
             },
             spacing,
         };
-        WgpuTheme {
-            panel: PanelStyle {
-                fill: tokens.surface,
-                stroke: Stroke {
-                    color: tokens.border,
-                    width: tokens.spacing.stroke_width_hairline,
-                },
-                shadow: tokens.shadow,
-                corner_radius: tokens.spacing.radius_panel,
-                padding: Insets::all(tokens.spacing.padding_panel),
-            },
-            title_style: TextStyle {
-                font,
-                font_size_px: 18.0,
-                line_height_px: 24.0,
-                color: tokens.surface_foreground,
-                align: TextAlign::Start,
-            },
-            body_style: TextStyle {
-                font,
-                font_size_px: 16.0,
-                line_height_px: 22.0,
-                color: tokens.body_foreground.with_alpha(1.0),
-                align: TextAlign::Start,
-            },
-            tokens,
-        }
+        WgpuTheme { tokens }
     }
 
     /// Acceptance criterion #205.2: swapping the active `ThemeTokens` must
@@ -920,7 +914,9 @@ mod tests {
         );
 
         assert_ne!(default_theme.panel_style(), swapped.panel_style());
-        assert_ne!(default_theme.panel, swapped.panel);
+        assert_ne!(default_theme.panel_compact(), swapped.panel_compact());
+        assert_ne!(default_theme.title_style(), swapped.title_style());
+        assert_ne!(default_theme.body_style(), swapped.body_style());
         assert_ne!(default_theme.card(), swapped.card());
         assert_ne!(default_theme.card_selected(), swapped.card_selected());
         assert_ne!(default_theme.slider(), swapped.slider());
@@ -1001,5 +997,51 @@ mod tests {
                 "text_style_active({variant:?}) did not change on swap"
             );
         }
+    }
+
+    /// Regression (Codex round 1 on #205/PR #238): an earlier revision
+    /// cached `panel` / `title_style` / `body_style` as plain `WgpuTheme`
+    /// fields, computed once in `Default::default()`. Mutating only
+    /// `theme.tokens` — the obvious way to "swap just the colors/spacing"
+    /// — left those three stale, because nothing re-derived them. Unlike
+    /// `swapping_token_set_changes_every_resolver_output` above (which
+    /// swaps in a whole second `WgpuTheme` built the same way `Default`
+    /// builds one), this test mutates `tokens` *in place* on a single
+    /// theme, exactly as the review reproduced it, and must see every
+    /// dependent style change.
+    #[test]
+    fn mutating_only_tokens_keeps_derived_styles_in_sync() {
+        let mut theme = WgpuTheme::default();
+        let before_body_color = theme.body_style().color;
+        let before_title_color = theme.title_style().color;
+        let before_panel_padding = theme.panel_compact().padding;
+
+        theme.tokens.body_foreground = Color::rgba(0.0, 1.0, 0.0, 1.0);
+        theme.tokens.surface_foreground = Color::rgba(1.0, 0.0, 1.0, 1.0);
+        theme.tokens.spacing.padding_panel = 42.0;
+
+        assert_ne!(
+            theme.body_style().color,
+            before_body_color,
+            "body_style() must re-derive from the mutated body_foreground token"
+        );
+        assert_eq!(
+            theme.body_style().color,
+            theme.tokens.body_foreground.with_alpha(0.92)
+        );
+
+        assert_ne!(
+            theme.title_style().color,
+            before_title_color,
+            "title_style() must re-derive from the mutated surface_foreground token"
+        );
+        assert_eq!(theme.title_style().color, theme.tokens.surface_foreground);
+
+        assert_ne!(
+            theme.panel_compact().padding,
+            before_panel_padding,
+            "panel_compact() must re-derive from the mutated spacing.padding_panel token"
+        );
+        assert_eq!(theme.panel_compact().padding, Insets::all(42.0));
     }
 }

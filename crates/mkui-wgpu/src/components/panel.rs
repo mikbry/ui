@@ -66,10 +66,16 @@ mod tests {
         let mut scene = Scene::new(Size::new(400.0, 400.0));
         let theme = WgpuTheme::default();
         let rect = Rect::new(Point::new(0.0, 0.0), Size::new(260.0, 200.0));
-        let body = titled_panel(&mut scene, rect, "Mode", theme.panel, theme.title_style);
-        let content = rect.inset(theme.panel.padding);
+        let body = titled_panel(
+            &mut scene,
+            rect,
+            "Mode",
+            theme.panel_compact(),
+            theme.title_style(),
+        );
+        let content = rect.inset(theme.panel_compact().padding);
         assert!(body.origin.y > content.origin.y);
-        assert!(body.origin.y >= content.origin.y + theme.title_style.line_height_px);
+        assert!(body.origin.y >= content.origin.y + theme.title_style().line_height_px);
         assert!(body.size.height < content.size.height);
         assert!(scene.primitives.iter().any(|p| match p {
             Primitive::Text(t) => t.content == "Mode",

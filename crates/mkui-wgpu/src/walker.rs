@@ -159,7 +159,7 @@ pub fn walk_app_tree(
             viewport_width: options.viewport.width,
             cursor_y: VIEWPORT_OUTER_MARGIN_PX,
             content_x: VIEWPORT_OUTER_MARGIN_PX,
-            current_foreground: options.theme.body_style.color,
+            current_foreground: options.theme.body_style().color,
         };
 
         if let Some(root) = tree.get(tree.root()) {
@@ -336,7 +336,7 @@ fn render_text(
     let font_size = text_font_size_px(text.variant, style);
     let line_height = (font_size * 1.25).max(font_size + 2.0);
 
-    let body_style = ctx.theme.body_style;
+    let body_style = ctx.theme.body_style();
     // The node's own `text-*` class (e.g. `text-foreground`) wins; absent
     // one, it inherits the nearest ancestor `View`'s foreground role (set
     // in `render_view`), falling back to the theme's default body color.

@@ -122,7 +122,7 @@ impl<'a, T> UiBuilder<'a, T> {
     }
 
     /// Same as [`Self::panel`] but also emits a `title` row at the top using
-    /// `theme.title_style`, and places the cursor below the title. Mirrors
+    /// `theme.title_style()`, and places the cursor below the title. Mirrors
     /// the miklabs `<Card header="…">` pattern.
     pub fn titled_panel(
         scene: &'a mut Scene,
@@ -132,7 +132,7 @@ impl<'a, T> UiBuilder<'a, T> {
         title: &str,
         style: PanelStyle,
     ) -> Self {
-        let content = components::titled_panel(scene, rect, title, style, theme.title_style);
+        let content = components::titled_panel(scene, rect, title, style, theme.title_style());
         layout.panel_rect = Some(rect);
         Self {
             scene,
@@ -231,7 +231,7 @@ impl<'a, T> UiBuilder<'a, T> {
         self.scene.text(Text {
             rect,
             content: text.into(),
-            style: self.theme.body_style,
+            style: self.theme.body_style(),
         });
         self
     }
@@ -241,7 +241,7 @@ impl<'a, T> UiBuilder<'a, T> {
     pub fn readonly_row(&mut self, label: &str, value: &str) -> &mut Self {
         let row_rect = self.reserve_row(28.0);
         let card_style = self.theme.card();
-        let body = self.theme.body_style;
+        let body = self.theme.body_style();
         components::card(self.scene, row_rect, card_style);
         components::label(self.scene, label_rect(row_rect), label, body);
         let value_style = TextStyle {
@@ -272,7 +272,7 @@ impl<'a, T> UiBuilder<'a, T> {
             self.scene,
             label_rect(row_rect),
             row.label,
-            self.theme.body_style,
+            self.theme.body_style(),
         );
 
         let input_width = 88.0;
@@ -359,7 +359,7 @@ impl<'a, T> UiBuilder<'a, T> {
             self.scene,
             label_rect(row_rect),
             label,
-            self.theme.body_style,
+            self.theme.body_style(),
         );
         components::chip_group(
             self.scene,
@@ -444,7 +444,7 @@ fn draw_list_row(
     );
     components::swatch(scene, swatch_rect, swatch_color, theme.swatch());
 
-    let label_style = theme.body_style;
+    let label_style = theme.body_style();
     let detail_style = theme.text_style(TextVariant::Muted);
     let text_origin_x = swatch_rect.origin.x + swatch_rect.size.width + 8.0;
     let text_width = rect.origin.x + rect.size.width - text_origin_x - 8.0;
@@ -526,7 +526,7 @@ mod tests {
         ui.gap(4.0);
         assert_eq!(
             after_heading - start,
-            theme.title_style.line_height_px,
+            theme.title_style().line_height_px,
             "heading should advance cursor by its line height"
         );
         assert!((ui.cursor_y() - after_heading - 4.0).abs() < f32::EPSILON);

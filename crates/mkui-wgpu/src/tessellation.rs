@@ -429,7 +429,7 @@ mod tests {
         scene.text(Text {
             rect: Rect::new(Point::new(8.0, 8.0), Size::new(220.0, 24.0)),
             content: "Undo Ctrl/Cmd+Z".to_string(),
-            style: WgpuTheme::default().body_style,
+            style: WgpuTheme::default().body_style(),
         });
 
         let triangles = tessellate_scene(&scene);
@@ -443,7 +443,7 @@ mod tests {
         scene.text(Text {
             rect: Rect::new(Point::new(8.0, 8.0), Size::new(220.0, 24.0)),
             content: String::new(),
-            style: WgpuTheme::default().body_style,
+            style: WgpuTheme::default().body_style(),
         });
         assert!(tessellate_scene(&scene).is_empty());
     }
@@ -512,7 +512,7 @@ mod tests {
     /// which specific bits are "on" in the raster.
     fn min_triangle_y(font_size_px: f32, rect_origin_y: f32, device_pixel_ratio: f32) -> f32 {
         let system = BitmapTextSystem::new();
-        let mut style = WgpuTheme::default().body_style;
+        let mut style = WgpuTheme::default().body_style();
         style.font_size_px = font_size_px;
         let mut scene = Scene::new(Size::new(240.0, 80.0));
         scene.text(Text {

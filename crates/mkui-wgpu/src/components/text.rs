@@ -52,7 +52,7 @@ mod tests {
             &mut scene,
             Rect::new(Point::new(0.0, 0.0), Size::new(120.0, 20.0)),
             "Hello",
-            theme.body_style,
+            theme.body_style(),
         );
         let texts: Vec<_> = scene
             .primitives

@@ -490,7 +490,7 @@ mod tests {
             viewport_width: 100.0,
             cursor_y: 0.0,
             content_x: 0.0,
-            current_foreground: theme.body_style.color,
+            current_foreground: theme.body_style().color,
         };
 
         let outcome = registry
@@ -553,7 +553,7 @@ mod tests {
             viewport_width: 100.0,
             cursor_y: 0.0,
             content_x: 0.0,
-            current_foreground: theme.body_style.color,
+            current_foreground: theme.body_style().color,
         };
 
         registry

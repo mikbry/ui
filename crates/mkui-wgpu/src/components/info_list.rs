@@ -21,29 +21,31 @@ pub fn info_list(
     lines: &[impl AsRef<str>],
     theme: &WgpuTheme,
 ) {
-    let content = panel(scene, rect, theme.panel);
+    let content = panel(scene, rect, theme.panel_compact());
+    let title_style = theme.title_style();
     label(
         scene,
         Rect::new(
             content.origin,
-            Size::new(content.size.width, theme.title_style.line_height_px),
+            Size::new(content.size.width, title_style.line_height_px),
         ),
         title,
-        theme.title_style,
+        title_style,
     );
 
-    let mut y = content.origin.y + theme.title_style.line_height_px + 6.0;
+    let body_style = theme.body_style();
+    let mut y = content.origin.y + title_style.line_height_px + 6.0;
     for line in lines {
         label(
             scene,
             Rect::new(
                 Point::new(content.origin.x, y),
-                Size::new(content.size.width, theme.body_style.line_height_px),
+                Size::new(content.size.width, body_style.line_height_px),
             ),
             line.as_ref(),
-            theme.body_style,
+            body_style,
         );
-        y += theme.body_style.line_height_px + 2.0;
+        y += body_style.line_height_px + 2.0;
     }
 }
 
