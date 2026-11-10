@@ -476,6 +476,18 @@ fn wrap_paragraph_by_width(
             lines.push(pos..end);
             break;
         }
+        // The character the loop stopped on (`cursor`) is the one that
+        // didn't fit — it was never added to `width` and so never got a
+        // chance to be recorded as `last_break`. When that very character is
+        // whitespace, the content before it already fits exactly as-is: break
+        // here directly rather than falling back to an earlier (shorter)
+        // `last_break`, which would wrap a word that actually fit onto the
+        // next line.
+        if chars[cursor].is_whitespace() {
+            lines.push(pos..cursor);
+            pos = cursor + 1;
+            continue;
+        }
         match last_break {
             Some(idx) if idx > pos => {
                 lines.push(pos..idx);

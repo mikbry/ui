@@ -328,6 +328,18 @@ fn wrap_paragraph(paragraph: &str, max_glyphs: usize) -> Vec<String> {
         }
 
         let end = start + max_glyphs;
+        // The character right past the line (`chars[end]`, guaranteed in
+        // bounds here since `remaining > max_glyphs`) is the one that didn't
+        // fit. When it is itself whitespace, the content up to `end` already
+        // fits exactly as a line: break there directly rather than scanning
+        // backward, which would find an earlier (shorter) whitespace and
+        // wrap a word that actually fit onto the next line.
+        if chars[end].is_whitespace() {
+            lines.push(chars[start..end].iter().collect::<String>());
+            start = end + 1;
+            continue;
+        }
+
         let mut break_at = None;
         for index in (start..end).rev() {
             if chars[index].is_whitespace() {

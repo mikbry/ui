@@ -639,6 +639,17 @@ breaking changes can land on minor bumps).
     range and hard-breaking mid-word only when a single word exceeds the
     width — the same contract `bitmap::wrap_paragraph` already gives the
     bitmap lane, now width- rather than glyph-count-bounded.
+  - Fixes a pre-existing off-by-one in both wrap algorithms: when the
+    character that first overflows the line is itself whitespace, the
+    previous code never recorded *that* whitespace as a break candidate
+    (its width was never added, so it never reached the "record as
+    break point" step) and instead broke at an earlier, shorter whitespace
+    — wrapping a word that actually fit onto the next line (e.g. a box sized
+    to exactly fit `"hello world"` would wrap `"hello world foo"` as
+    `"hello"` / `"world foo"` instead of `"hello world"` / `"foo"`). Both
+    `composite::wrap_paragraph_by_width` (new, this PR) and the pre-existing
+    `bitmap::wrap_paragraph` now check whether the overflowing character
+    itself is whitespace before falling back to the backward scan.
   - **Honors `TextAlign::Center`/`TextAlign::End`** by offsetting each line's
     pen start against its measured content width, only when `max_width_px` is
     bounded (unbounded text stays `Start`, matching the bitmap lane).
@@ -663,11 +674,22 @@ breaking changes can land on minor bumps).
     block without drawing it").
   - Scope decision: shipped the `mkui-text` layout engine work (wrap, align,
     line-height, max-width, ellipsis, measurement) for the Slug lane.
-    Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s bailout
-    guards (multi-line, non-`Start` align, `'\n'`) so already-correct Slug
-    output is actually routed through the Slug lane instead of falling back
-    to bitmap — that changes renderer routing and needs GPU (Lavapipe)
-    verification this environment cannot run. Tracked as a follow-up issue.
+    Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s three
+    remaining bailout guards (multi-line, non-`Start` align, `'\n'`) so
+    already-correct Slug output is actually routed through the Slug lane for
+    those cases too — that changes renderer routing and needs GPU (Lavapipe)
+    verification this environment cannot run. Tracked as #233.
+  - **Routing-visible side effect:** `expand_text_primitive`'s fourth guard
+    (width overflow) now sees different input, because `layout_local` can
+    ellipsize an overflowing single line to fit instead of overflowing. A
+    single-line, `Start`-aligned primitive that previously overflowed its box
+    and bailed to bitmap unconditionally now renders through Slug (with a
+    `'…'`/`"..."` tail) whenever the ellipsized line fits — only a box
+    narrower than the ellipsis glyph(s) themselves still bails. No shipping
+    example wires `Renderer::set_slug_font` yet (grepped: only the method
+    itself and its own doc comment reference it), so this has no visible
+    effect until #233 or a future example opts a font in — but it is a real
+    behavior change for the next caller that does.
   - Scope decision: paragraph spacing (mentioned in #182's Goal prose, not
     its Acceptance checklist) is out of scope — `LayoutSpec` has no paragraph-
     spacing field and adding one was not required to satisfy any Acceptance

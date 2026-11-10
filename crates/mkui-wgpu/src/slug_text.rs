@@ -224,18 +224,16 @@ fn expand_text_primitive(
 
     let line_height = text.style.line_height_px.max(1.0);
     let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
-    // The Slug-lane provider (`SfntProvider`) lays out a single unwrapped,
-    // Start-aligned line per call — it ignores `spec.align`, `max_width_px`,
-    // and hard line breaks alike (see its `layout_local` doc). A primitive
-    // whose box allows more than one line, that asks for non-Start alignment,
-    // or whose content contains `\n` would silently lose that behavior if
-    // routed through Slug: centered/end-aligned text would render flush-left;
-    // a wrappable box would overflow instead of wrapping; a hard break (e.g.
-    // `"M\nA"`) would route the `\n` itself into a one-character bitmap
-    // fallback run and draw both lines side by side on one line instead of
-    // respecting `max_lines`, unlike the bitmap lane's `wrap_text_lines`
-    // (Codex round 2 of this PR). Leave all three on the untouched bitmap
-    // lane, which implements them correctly.
+    // `SfntProvider::layout_local` (#182) now genuinely wraps, aligns, caps
+    // line count, and ellipsizes, so none of these three cases would
+    // actually misrender if routed through Slug. But this call site is not
+    // yet updated to pass a multi-line box, a non-Start alignment, or a hard
+    // break through — it still only ever calls the provider with `max_lines:
+    // Some(1)` and the primitive's own `Start`/non-`\n` content below, and
+    // bails everything else to the bitmap lane. Relaxing these three guards
+    // so already-correct Slug output is actually drawn is #233's scope (it
+    // needs GPU/Lavapipe verification this crate's CPU-only tests can't give
+    // it); this guard stays load-bearing until that lands.
     if max_lines > 1 || text.style.align != TextAlign::Start || text.content.contains('\n') {
         return vec![Primitive::Text(text.clone())];
     }
@@ -260,10 +258,12 @@ fn expand_text_primitive(
         return vec![Primitive::Text(text.clone())];
     }
 
-    // The provider ignores `max_width_px` too, so a line that doesn't fit
-    // would silently overflow the box instead of wrapping or clipping (the
-    // bitmap lane's tested contract) — bail to bitmap rather than draw past
-    // the primitive's bounds.
+    // The provider now honors `max_width_px` (#182): given `max_lines: Some(1)`
+    // above, it ellipsizes an overflowing line to fit rather than overflowing
+    // — so most single-line overflow now renders through Slug with a `…`/`...`
+    // tail instead of bailing here. This check remains a safety net for the
+    // case the provider itself can't shrink into: a box narrower than even
+    // the ellipsis glyph(s) alone.
     let total_width = runs
         .iter()
         .filter_map(|run| {
@@ -619,10 +619,10 @@ mod tests {
 
     #[test]
     fn non_start_alignment_stays_on_the_bitmap_lane() {
-        // `SfntProvider::layout_local` ignores `spec.align` entirely, so a
-        // Center/End-aligned primitive routed through Slug would silently
-        // render flush-left. `expand_slug_text` must recognize it cannot
-        // honor that alignment and leave the primitive untouched instead.
+        // `SfntProvider::layout_local` honors `spec.align` correctly since
+        // #182, but `expand_text_primitive`'s own guard (not the provider)
+        // still bails any non-`Start` primitive to the bitmap lane —
+        // relaxing that guard is #233's scope, pending GPU verification.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -638,10 +638,11 @@ mod tests {
 
     #[test]
     fn a_multiline_capable_box_stays_on_the_bitmap_lane() {
-        // `SfntProvider::layout_local` lays out a single unwrapped line; a
-        // box tall enough for more than one line could genuinely wrap under
-        // the bitmap lane, which Slug has no way to replicate — must bail to
-        // bitmap rather than silently collapse to one line.
+        // `SfntProvider::layout_local` genuinely wraps multi-line content
+        // since #182, but `expand_text_primitive` still always calls it with
+        // `max_lines: Some(1)` and bails a taller box to bitmap before ever
+        // reaching the provider — relaxing that is #233's scope, pending GPU
+        // verification.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -657,14 +658,14 @@ mod tests {
 
     #[test]
     fn content_with_a_hard_line_break_stays_on_the_bitmap_lane() {
-        // Codex round 2 of this PR: `SfntProvider::layout_local` has no line
-        // breaking at all, so a hard break like "M\nA" would otherwise route
-        // the `\n` into a one-character bitmap-fallback run and draw both
-        // letters side by side on a single line — silently discarding the
-        // bitmap lane's `wrap_text_lines`/`max_lines` hard-break handling.
-        // A tall (multi-line-capable) box would already bail via the
-        // `max_lines` guard, so size the box to exactly one line to prove
-        // the `\n` check is independently load-bearing.
+        // `SfntProvider::layout_local` honors a hard `'\n'` break correctly
+        // since #182 (it splits on `'\n'` exactly like the bitmap lane's
+        // `wrap_text_lines`), but `expand_text_primitive`'s own guard still
+        // bails any content containing `'\n'` before calling the provider —
+        // relaxing that is #233's scope, pending GPU verification. A tall
+        // (multi-line-capable) box would already bail via the `max_lines`
+        // guard, so size the box to exactly one line to prove the `\n` check
+        // is independently load-bearing.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -684,9 +685,12 @@ mod tests {
 
     #[test]
     fn a_line_that_overflows_the_box_width_stays_on_the_bitmap_lane() {
-        // `SfntProvider::layout_local` ignores `max_width_px`; a line that
-        // doesn't fit the box must not be routed through Slug (which would
-        // draw straight past the primitive's bounds with no wrap/clip).
+        // `SfntProvider::layout_local` ellipsizes an overflowing single line
+        // to fit `max_width_px` since #182 — but a box this narrow (1.0px)
+        // is narrower than even the ellipsis glyph(s) alone, so the provider
+        // can shrink the kept content to nothing and the line still doesn't
+        // fit. The width-overflow guard remains the safety net for exactly
+        // that residual case.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -698,6 +702,50 @@ mod tests {
 
         let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
         assert_eq!(expanded, vec![Primitive::Text(text)]);
+    }
+
+    #[test]
+    fn a_single_line_overflow_wide_enough_for_the_ellipsis_routes_through_slug() {
+        // #182's routing-visible change: a box too narrow for the full
+        // content but wide enough for the ellipsized tail now renders
+        // through Slug (with a `…`/`...` tail) instead of bailing to bitmap
+        // — the pre-#182 behavior for *any* overflow, regardless of how much
+        // room the box actually had.
+        let mut sys = CompositeTextSystem::new();
+        let font_id = sys
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .unwrap();
+        let face = sys.sfnt_face(font_id).unwrap().clone();
+        let scale = 16.0 / face.units_per_em() as f32;
+        let advance = |ch: char| face.advance_width(face.glyph_index(ch).unwrap()) as f32 * scale;
+
+        let ellipsis_width = match face.glyph_index('…') {
+            Some(gid) => face.advance_width(gid) as f32 * scale,
+            None => advance('.') * 3.0,
+        };
+        let mag_width: f32 = "Mag".chars().map(advance).sum();
+        assert!(
+            ellipsis_width < mag_width,
+            "the ellipsis must be narrower than the full content for this test to be meaningful"
+        );
+
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let (mut text, _) = text_primitive("Mag", 16.0);
+        text.rect.size.width = (ellipsis_width + mag_width) / 2.0;
+        let primitives = vec![Primitive::Text(text.clone())];
+
+        let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
+        assert!(
+            expanded
+                .iter()
+                .any(|p| matches!(p, Primitive::SlugGlyph(_))),
+            "an ellipsized line that fits must draw through Slug"
+        );
+        assert!(
+            !expanded.iter().any(|p| matches!(p, Primitive::Text(_))),
+            "no bitmap-fallback primitive should remain: Abel maps every glyph \
+             in \"Mag\" and the ellipsis"
+        );
     }
 
     #[test]

@@ -294,6 +294,29 @@ fn slug_lane_wraps_a_paragraph_at_an_arbitrary_max_width() {
     assert!(total_glyphs <= text.chars().count());
 }
 
+/// A word that exactly fits the line must not be wrapped early just because
+/// the *next* character (the separating space before the following word) is
+/// the one that overflows. The break point must be recognized as the
+/// overflowing whitespace itself, not an earlier, shorter one.
+#[test]
+fn slug_lane_does_not_wrap_a_word_that_exactly_fits_the_line() {
+    let (sys, id) = registered();
+    let spec = slug_spec(id, 16.0);
+    let engine = TextEngine::new(Arc::new(sys));
+
+    let probe = engine.prepare("hello world", spec.clone());
+    let hello_world_width = probe.intrinsic_width_px();
+
+    let prepared = engine.prepare("hello world foo", spec);
+    let layout = prepared.layout(Some(hello_world_width + 0.5));
+
+    assert_eq!(
+        layout.lines[0].glyph_range.len(),
+        11,
+        "line 0 must keep all of \"hello world\" (11 glyphs), not wrap early"
+    );
+}
+
 /// `TextAlign::Center` / `TextAlign::End` must offset the Slug run's pen
 /// start, not render flush-left — the exact regression #172's round-1/2 fix
 /// bailed to bitmap for instead of fixing.
