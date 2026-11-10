@@ -425,14 +425,21 @@ pub fn is_fallback_glyph(bits: &[u8; 7]) -> bool {
 }
 
 /// 5×7 bit pattern for a single glyph. Rows are MSB-first; bit 4 is the
-/// leftmost column. Covers ASCII (including `!`/`;`) plus the French-accented
-/// letters (both cases), the acute/tilde/ring vowels needed for Spanish,
-/// Portuguese, and Scandinavian text (á í ó ú ã å õ, both cases), the œ/Œ and
-/// æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets, curly quotes, and ellipsis;
-/// [`normalize_bitmap_char`] folds a few other codepoints (NBSP, narrow
-/// NBSP, `Ç`) onto entries here before this table is consulted. Characters
-/// with no entry below render the explicit [`FALLBACK_GLYPH`], never `'?'`
-/// and never a blank cell.
+/// leftmost column. Covers ASCII (including `!`/`;`) plus every letter in
+/// the Unicode Latin-1 Supplement block (U+00C0-U+00FF) except the two
+/// symbols in that range, `×` and `÷` (see
+/// [`normalize_bitmap_char`] for how those two still render), the œ/Œ and
+/// æ/Æ ligatures (Latin Extended-A — the only characters from that block
+/// this table needs), guillemets, curly quotes, and ellipsis. Latin-1
+/// Supplement coverage is exhaustively checked by
+/// `latin1_supplement_letters_have_no_fallback_glyph` in this module's
+/// tests, which iterates every codepoint in the block and asserts none of
+/// them render [`FALLBACK_GLYPH`] (after [`normalize_bitmap_char`], which
+/// folds NBSP, narrow NBSP, and `Ç` onto entries here rather than giving
+/// `Ç` its own distinct glyph — see that function's doc comment). Non-Latin
+/// scripts are out of scope entirely. Characters with no entry below
+/// render the explicit [`FALLBACK_GLYPH`], never `'?'` and never a blank
+/// cell.
 #[rustfmt::skip]
 pub fn bitmap_glyph(character: char) -> [u8; 7] {
     match character {
@@ -521,6 +528,14 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'ã' => [0b01101, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
         'å' => [0b01110, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
         'õ' => [0b01101, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        // Grave i/o and acute y complete the Latin-1 Supplement block (see
+        // the exhaustive `latin1_supplement_letters_have_no_fallback_glyph`
+        // test below): 'ì'/'ò' reviewers found missing ("lunedì", "però");
+        // 'ý' is included for the same reason even though no review named
+        // it. Same placement rules as the rest of this block.
+        'ì' => [0b01000, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'ò' => [0b01000, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'ý' => [0b00010, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
         // French-accented capital letters: unlike lowercase, capitals have
         // no free ascender row (every row is already load-bearing for the
         // letterform — see 'A'/'E'/'I'/'O'/'U'/'Y' above). Row 0 is freed
@@ -541,6 +556,7 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'Ë' => [0b10001, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
         'Î' => [0b01010, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
         'Ï' => [0b10001, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'Ì' => [0b01000, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
         // 'Ô'/'Ö' need their own bottom row, not plain 'O''s 0b01110: 'O''s
         // compressed body (top curve + 4 identical 0b10001 stem rows +
         // closing curve) is bit-for-bit the same 6 rows as lowercase 'o''s
@@ -553,6 +569,10 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         // disambiguates the capital from the lowercase glyph.
         'Ô' => [0b01010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ö' => [0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
+        // 'Ò' needs the same widened bottom row as 'Ô'/'Ö' for the same
+        // reason (grave-on-capital-O-body would otherwise equal
+        // grave-on-lowercase-o, i.e. 'ò').
+        'Ò' => [0b01000, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ù' => [0b01000, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         'Û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         // 'Ü' needs its own bottom row, not plain 'U''s 0b01110: 'U''s
@@ -563,6 +583,11 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         // collision while keeping the shape recognizable as 'U'.
         'Ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ÿ' => [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100],
+        // 'Ý' (acute) does not share 'Ÿ' (diaeresis)'s compressed body with
+        // any lowercase 'y' accent — 'Y''s body (crossing diagonal) and
+        // 'y''s body (descender tail) never collide — so no widening trick
+        // is needed here, unlike 'Ò'/'Ó'/'Õ'/'Ô'/'Ö'/'Ü' above.
+        'Ý' => [0b00010, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100],
         // Á/Í/Ú/Ã/Å/Õ: acute, tilde, and ring applied to the same compressed
         // capital bodies as À/É/Ù/Ñ above. 'Ó'/'Õ' need their bottom row
         // widened to 0b01111 (the same trick used for Ô/Ö) because their
@@ -618,6 +643,29 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         // 'Ø' and '0' don't collide despite both being a slashed circle.
         'ø' => [0b00000, 0b01110, 0b11001, 0b10101, 0b10011, 0b10001, 0b01110],
         'Ø' => [0b01110, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b01110],
+        // Eth and thorn (Icelandic/Old English) are the last two Latin-1
+        // Supplement letters without any accent-on-a-base-letter shortcut —
+        // they are distinct letterforms in their own right, not an existing
+        // ASCII letter plus a diacritic row.
+        //
+        // 'Ð' (eth, capital): 'D''s shape with its upper stem row widened
+        // into a full-width crossbar, the defining feature that
+        // distinguishes eth from a plain 'D'.
+        'Ð' => [0b11110, 0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        // 'ð' (eth, lowercase): 'd''s shape with its ascender row widened
+        // into a left-sweeping crossbar instead of the plain thin stem.
+        'ð' => [0b00001, 0b01111, 0b01101, 0b10011, 0b10001, 0b10001, 0b01111],
+        // 'Þ' (thorn, capital): a full-height stem (rows 0-6) with a bowl
+        // attached at the vertical center (rows 2-4) — unlike 'Þ''s
+        // lowercase form below, the bowl sits mid-height with plain stem
+        // above and below, since a capital has no true ascender/descender
+        // to extend into.
+        'Þ' => [0b10000, 0b10000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000],
+        // 'þ' (thorn, lowercase): unlike 'p' (bowl + descender, no
+        // ascender) or 'b' (ascender + bowl, no descender), thorn has
+        // both: an ascender row 0 (where 'p' is blank) above a 'p'-style
+        // bowl-plus-descender body, which keeps it bit-distinct from both.
+        'þ' => [0b10000, 0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000],
         '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
         '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
         '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
@@ -758,7 +806,7 @@ mod tests {
     #[test]
     fn fallback_glyph_is_distinct_from_every_mapped_character() {
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõÁÍÓÚÃÅÕ";
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõìòýÁÍÓÚÃÅÕÌÒÝÐðÞþ";
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
             assert!(
@@ -781,7 +829,7 @@ mod tests {
         // those two pairs, so a future addition can't reintroduce the
         // same class of bug silently.
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõÁÍÓÚÃÅÕ";
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõìòýÁÍÓÚÃÅÕÌÒÝÐðÞþ";
         let mut seen: Vec<(char, [u8; 7])> = Vec::new();
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
@@ -789,6 +837,42 @@ mod tests {
                 panic!("{ch:?} and {other:?} render the identical glyph {bits:?}");
             }
             seen.push((ch, bits));
+        }
+    }
+
+    #[test]
+    fn latin1_supplement_letters_have_no_fallback_glyph() {
+        // The complete target repertoire this PR commits to, stated
+        // explicitly rather than as a running list of whatever a review
+        // happened to name: every *letter* in the Unicode Latin-1
+        // Supplement block, U+00C0..=U+00FF. That block is 64 codepoints,
+        // of which exactly two, '×' (U+00D7, multiplication sign) and '÷'
+        // (U+00F7, division sign), are not letters at all — this test
+        // explicitly excludes only those two, nothing else. Everything
+        // else in the block must resolve to a real glyph (possibly via
+        // `normalize_bitmap_char`'s intentional 'Ç' -> 'C' fold, documented
+        // on that function) and never to `FALLBACK_GLYPH`. Non-Latin
+        // scripts remain entirely out of scope and are not asserted here.
+        for codepoint in 0x00C0u32..=0x00FF {
+            let ch = char::from_u32(codepoint).expect("Latin-1 Supplement is all valid chars");
+            if ch == '×' || ch == '÷' {
+                continue;
+            }
+            let normalized = normalize_bitmap_char(ch);
+            let bits = bitmap_glyph(normalized);
+            assert!(
+                !is_fallback_glyph(&bits),
+                "Latin-1 Supplement letter {ch:?} (U+{codepoint:04X}, normalized to \
+                 {normalized:?}) must not render the fallback glyph"
+            );
+        }
+        // The only Latin Extended-A characters this table needs (œ/Œ) are
+        // covered the same way the review asked for the Latin-1 block.
+        for ch in ['œ', 'Œ'] {
+            assert!(
+                !is_fallback_glyph(&bitmap_glyph(normalize_bitmap_char(ch))),
+                "{ch:?} must not render the fallback glyph"
+            );
         }
     }
 
@@ -822,6 +906,9 @@ mod tests {
             ('Ã', 'A'),
             ('Õ', 'O'),
             ('Å', 'A'),
+            ('Ì', 'I'),
+            ('Ò', 'O'),
+            ('Ý', 'Y'),
         ];
         for (accented, base) in pairs {
             assert_eq!(
@@ -874,6 +961,20 @@ mod tests {
             ('õ', 'o'),
             ('Õ', 'O'),
             ('Õ', 'õ'),
+            ('ì', 'i'),
+            ('Ì', 'I'),
+            ('ò', 'o'),
+            ('Ò', 'O'),
+            ('Ò', 'ò'),
+            ('ý', 'y'),
+            ('Ý', 'Y'),
+            ('ð', 'd'),
+            ('Ð', 'D'),
+            ('þ', 'p'),
+            ('þ', 'b'),
+            ('Þ', 'P'),
+            ('Þ', 'D'),
+            ('Þ', 'þ'),
         ];
         for (ch, lookalike) in pairs {
             assert_ne!(
@@ -1005,6 +1106,42 @@ mod tests {
         // 'á'. These letters (plus í/ó/ú/Ã/Å and their capitals) are now
         // covered directly rather than deferred to #227.
         let sentences = ["São Paulo", "smörgås", "Olá"];
+        let system = BitmapTextSystem::new();
+        let spec = LayoutSpec::default();
+        let fallback_image = system
+            .rasterize(cache_key_for('\u{E000}', spec.font_size_px))
+            .expect("fallback glyph must rasterize");
+
+        for sentence in sentences {
+            let runs = system.layout(sentence, &spec, None);
+            for run in &runs {
+                for glyph in &run.glyphs {
+                    let ch = char::from_u32(glyph.glyph_id).expect("glyph_id must be a valid char");
+                    let image = system
+                        .rasterize(run.cache_key(glyph))
+                        .unwrap_or_else(|e| panic!("char {ch:?} failed to rasterize: {e:?}"));
+                    if ch == ' ' {
+                        continue;
+                    }
+                    assert_ne!(
+                        image.data, fallback_image.data,
+                        "char {ch:?} in {sentence:?} rasterized as the fallback glyph"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_3_review_reported_words_rasterize_without_missing_glyphs_via_real_pipeline() {
+        // Regression test for the round-3 review finding on #184's PR:
+        // "lunedì" and "però", run through the real `layout` -> `rasterize`
+        // pipeline, rendered the fallback box for 'ì' and 'ò'. Rather than
+        // add just those two, this round defines and tests the complete
+        // Latin-1 Supplement letter repertoire (see
+        // `latin1_supplement_letters_have_no_fallback_glyph`); these two
+        // words stay as a real-pipeline regression check on top of that.
+        let sentences = ["lunedì", "però", "eðþ", "ÐÌÒÞÝìðòþý"];
         let system = BitmapTextSystem::new();
         let spec = LayoutSpec::default();
         let fallback_image = system
