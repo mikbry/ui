@@ -191,7 +191,13 @@ impl TextSystem for BitmapTextSystem {
         let Some(ch) = char::from_u32(key.glyph_id) else {
             return Err(TextError::UnknownGlyph(key.glyph_id));
         };
-        let bits = bitmap_glyph(ch);
+        // `prepare`/`wrap` already normalize before building a cache key, but
+        // callers that build a `GlyphCacheKey` straight from a raw codepoint
+        // (e.g. `cache_key_for`, or another crate's bitmap-fallback lane)
+        // must not bypass the NBSP/accent folding and hit `FALLBACK_GLYPH`
+        // for a codepoint that has a real glyph. Idempotent on an
+        // already-normalized `ch`.
+        let bits = bitmap_glyph(normalize_bitmap_char(ch));
 
         let font_size_px = (key.size_px_q26_6 as f32) / 64.0;
         let scale = bitmap_scale(font_size_px);
@@ -369,22 +375,65 @@ pub fn measure_line_width(glyphs: &[char], advance: f32, glyph_width: f32) -> f3
     }
 }
 
-/// Map a few common non-ASCII characters down to their ASCII bitmap-table
-/// equivalents. Ported verbatim from `normalize_bitmap_char` — the same
-/// short table the predecessor prototype ships.
+/// Map a few non-ASCII characters down to an existing bitmap-table glyph.
+/// Two kinds of folding happen here:
+///
+/// - Width/space folding: the bitmap face is fixed-advance, so there is no
+///   "narrow" glyph variant — NBSP and the French narrow no-break space both
+///   collapse to the plain blank space.
+/// - Capital-letter accent folding: lowercase letters reserve row 0 for the
+///   ascender, which gives accented lowercase glyphs (see [`bitmap_glyph`])
+///   a free row to draw the diacritic in. Capitals use all 7 rows for the
+///   letterform itself, so there is no spare row for a diacritic without a
+///   taller cell; rendering the unaccented capital is the legible fallback
+///   until the cell grows.
 pub fn normalize_bitmap_char(character: char) -> char {
     match character {
         '²' => '2',
         '×' => 'X',
         '–' | '—' => '-',
         '\u{2018}' | '\u{2019}' => '\'',
+        '\u{00A0}' | '\u{202F}' => ' ',
+        'À' | 'Â' | 'Ä' => 'A',
+        'É' | 'È' | 'Ê' | 'Ë' => 'E',
+        'Î' | 'Ï' => 'I',
+        'Ô' | 'Ö' => 'O',
+        'Ù' | 'Û' | 'Ü' => 'U',
+        'Ÿ' => 'Y',
+        'Ç' => 'C',
         _ => character,
     }
 }
 
-/// 5×7 bit pattern for a single ASCII glyph. Rows are MSB-first; bit 4 is the
-/// leftmost column. Unknown characters fall back to `'?'`. Ported verbatim
-/// from the predecessor prototype's `bitmap_glyph` table.
+/// The explicit "notdef" glyph: a hollow box, distinct from every real
+/// letterform and digit in this table (including `'?'`, which keeps its own
+/// question-mark glyph and is not treated as a fallback marker). Any
+/// codepoint reaching [`bitmap_glyph`] with no table entry renders this —
+/// legible and non-blank, never a panic and never an empty cell that could
+/// be mistaken for a space.
+#[rustfmt::skip]
+pub const FALLBACK_GLYPH: [u8; 7] = [
+    0b11111,
+    0b10001,
+    0b10001,
+    0b10001,
+    0b10001,
+    0b10001,
+    0b11111,
+];
+
+/// Whether `bits` is exactly the [`FALLBACK_GLYPH`] pattern.
+pub fn is_fallback_glyph(bits: &[u8; 7]) -> bool {
+    *bits == FALLBACK_GLYPH
+}
+
+/// 5×7 bit pattern for a single glyph. Rows are MSB-first; bit 4 is the
+/// leftmost column. Covers ASCII plus the lowercase French-accented
+/// letters, the œ/Œ ligature, guillemets, curly quotes, and ellipsis needed
+/// for Latin + French text; [`normalize_bitmap_char`] folds a few other
+/// codepoints (NBSP, narrow NBSP, accented capitals) onto entries here
+/// before this table is consulted. Characters with no entry below render
+/// the explicit [`FALLBACK_GLYPH`], never `'?'` and never a blank cell.
 #[rustfmt::skip]
 pub fn bitmap_glyph(character: char) -> [u8; 7] {
     match character {
@@ -440,6 +489,39 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'x' => [0b00000, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
         'y' => [0b00000, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
         'z' => [0b00000, 0b11111, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        // French-accented lowercase letters: row 0 is the free ascender row
+        // (see 'a'/'e'/'o'/'u'/'y' above, all of which start with 0b00000),
+        // so the diacritic is drawn there and rows 1..=6 are the base
+        // letter's rows unchanged. 'i' normally puts its tittle in row 0
+        // instead; for î/ï the diacritic replaces that dot, as it does in
+        // real Latin typography.
+        'à' => [0b01000, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'â' => [0b01010, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'ä' => [0b10001, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'é' => [0b00010, 0b01110, 0b10001, 0b11111, 0b10000, 0b10001, 0b01110],
+        'è' => [0b01000, 0b01110, 0b10001, 0b11111, 0b10000, 0b10001, 0b01110],
+        'ê' => [0b01010, 0b01110, 0b10001, 0b11111, 0b10000, 0b10001, 0b01110],
+        'ë' => [0b10001, 0b01110, 0b10001, 0b11111, 0b10000, 0b10001, 0b01110],
+        'î' => [0b01010, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'ï' => [0b10001, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'ô' => [0b01010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'ö' => [0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'ù' => [0b01000, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'ÿ' => [0b10001, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+        // Cedilla has no row below the baseline to sit in (row 6 is already
+        // the bottom of the letter), so it is approximated as a small hook
+        // extending the bottom-right of the 'c' shape rather than a true
+        // descending tail.
+        'ç' => [0b00000, 0b01110, 0b10001, 0b10000, 0b10000, 0b10001, 0b01111],
+        // œ: an 'o' shape with a single-row center tick suggesting the seam
+        // between the two joined letters (three full rows of the tick read
+        // as a fence rather than a rounded ligature).
+        'œ' => [0b00000, 0b01110, 0b10001, 0b10101, 0b10001, 0b10001, 0b01110],
+        // Œ: a 'C' shape (open on the right) with a middle bar extending
+        // further right, like the crossbar of a fused 'E'.
+        'Œ' => [0b01111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b01111],
         '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
         '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
         '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
@@ -464,8 +546,20 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         '?' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
         '#' => [0b01010, 0b01010, 0b11111, 0b01010, 0b11111, 0b01010, 0b01010],
         '·' => [0b00000, 0b00000, 0b00000, 0b00100, 0b00000, 0b00000, 0b00000],
+        // Guillemets sit at mid-x-height, like a hyphen, rather than the
+        // full cell height parentheses use.
+        '«' => [0b00000, 0b00000, 0b01010, 0b10100, 0b01010, 0b00000, 0b00000],
+        '»' => [0b00000, 0b00000, 0b01010, 0b00101, 0b01010, 0b00000, 0b00000],
+        // Curly double quotes: two strokes near the top of the cell, mirror
+        // images of each other, distinct from the single curly quotes
+        // folded onto `'` by `normalize_bitmap_char`.
+        '\u{201C}' => [0b01010, 0b01010, 0b00100, 0b00000, 0b00000, 0b00000, 0b00000],
+        '\u{201D}' => [0b01010, 0b01010, 0b01000, 0b00000, 0b00000, 0b00000, 0b00000],
+        // Ellipsis: three single-pixel dots on the baseline, each one
+        // column apart — as wide a spread as the 5-bit cell allows.
+        '…' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b10101, 0b10101],
         ' ' => [0, 0, 0, 0, 0, 0, 0],
-        _ => bitmap_glyph('?'),
+        _ => FALLBACK_GLYPH,
     }
 }
 
@@ -533,11 +627,135 @@ mod tests {
     fn bitmap_font_has_own_glyphs_for_hash_and_middle_dot() {
         let hash = bitmap_glyph('#');
         let dot = bitmap_glyph('·');
-        let fallback = bitmap_glyph('?');
-        assert_ne!(hash, fallback, "'#' should have its own glyph");
-        assert_ne!(dot, fallback, "'·' should have its own glyph");
+        let question_mark = bitmap_glyph('?');
+        assert_ne!(hash, question_mark, "'#' should have its own glyph");
+        assert_ne!(dot, question_mark, "'·' should have its own glyph");
         assert!(hash.iter().any(|row| *row != 0));
         assert!(dot.iter().any(|row| *row != 0));
+    }
+
+    #[test]
+    fn unmapped_codepoint_renders_the_defined_fallback_glyph() {
+        // U+E000 is in the Private Use Area: guaranteed to have no entry in
+        // `bitmap_glyph`, now or in any future addition to this table.
+        let bits = bitmap_glyph('\u{E000}');
+        assert!(
+            is_fallback_glyph(&bits),
+            "unmapped codepoint must render FALLBACK_GLYPH"
+        );
+        assert!(
+            bits.iter().any(|row| *row != 0),
+            "fallback glyph must not be blank"
+        );
+        // '?' is a real character with its own glyph, not a reused fallback.
+        assert_ne!(bits, bitmap_glyph('?'));
+    }
+
+    #[test]
+    fn fallback_glyph_is_distinct_from_every_mapped_character() {
+        let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
+            :.,+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒ";
+        for ch in mapped_chars.chars() {
+            let bits = bitmap_glyph(ch);
+            assert!(
+                !is_fallback_glyph(&bits),
+                "mapped character {ch:?} must not collide with FALLBACK_GLYPH"
+            );
+        }
+    }
+
+    #[test]
+    fn unmapped_codepoint_rasterizes_without_panicking_and_is_not_blank() {
+        let system = BitmapTextSystem::new();
+        let key = cache_key_for('\u{E000}', REFERENCE_FONT_SIZE_PX);
+        let image = system
+            .rasterize(key)
+            .expect("fallback glyph must rasterize");
+        assert!(
+            image.data.iter().any(|&byte| byte != 0),
+            "fallback glyph image must not be blank"
+        );
+    }
+
+    #[test]
+    fn french_sample_paragraph_has_no_missing_glyphs() {
+        // Covers every character class called for by Latin + French glyph
+        // coverage: lowercase accented letters, an accented capital, the
+        // œ/Œ ligature, guillemets with the narrow no-break space inside
+        // them, a plain NBSP, curly single and double quotes, an em dash,
+        // and an ellipsis.
+        let paragraph = "Été, où çà et là, l'œuvre d'un ami : à âme, édentée, \
+            crème brûlée, île, hôtel, dû, mûr, sûr, gruyère, Œuf, Noël\u{00A0}: \
+            «\u{202F}vraiment\u{202F}» \u{2018}simple\u{2019} \u{201C}double\u{201D} \
+            — c'est tout\u{2026}";
+
+        for ch in paragraph.chars() {
+            let normalized = normalize_bitmap_char(ch);
+            let bits = bitmap_glyph(normalized);
+            assert!(
+                !is_fallback_glyph(&bits),
+                "character {ch:?} (normalized to {normalized:?}) rendered the fallback glyph"
+            );
+        }
+    }
+
+    #[test]
+    fn french_sample_paragraph_rasterizes_without_missing_glyphs_via_real_pipeline() {
+        // Exercises the same paragraph end to end through the real
+        // `TextSystem::layout` -> `cache_key` -> `rasterize` path, not the
+        // `bitmap_glyph`/`normalize_bitmap_char` helpers directly — `layout`
+        // already normalizes before building each glyph's cache key, so
+        // this does not by itself guard against `rasterize` skipping
+        // normalization on a cache key built some other way; that path is
+        // covered separately by
+        // `accented_capitals_and_french_punctuation_rasterize_via_cache_key_for`.
+        let paragraph = "Été, où çà et là, l'œuvre d'un ami : à âme, édentée, \
+            crème brûlée, île, hôtel, dû, mûr, sûr, gruyère, Œuf, Noël\u{00A0}: \
+            «\u{202F}vraiment\u{202F}» \u{2018}simple\u{2019} \u{201C}double\u{201D} \
+            — c'est tout\u{2026}";
+        let system = BitmapTextSystem::new();
+        let spec = LayoutSpec::default();
+        let fallback_image = system
+            .rasterize(cache_key_for('\u{E000}', spec.font_size_px))
+            .expect("fallback glyph must rasterize");
+
+        let runs = system.layout(paragraph, &spec, None);
+        for run in &runs {
+            for glyph in &run.glyphs {
+                let ch = char::from_u32(glyph.glyph_id).expect("glyph_id must be a valid char");
+                let image = system
+                    .rasterize(run.cache_key(glyph))
+                    .unwrap_or_else(|e| panic!("char {ch:?} failed to rasterize: {e:?}"));
+                if ch == ' ' {
+                    continue; // Blank space is a legitimate non-fallback result.
+                }
+                assert_ne!(
+                    image.data, fallback_image.data,
+                    "char {ch:?} rasterized as the fallback glyph via the real pipeline"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accented_capitals_and_french_punctuation_rasterize_via_cache_key_for() {
+        // `cache_key_for` builds a `GlyphCacheKey` directly from a raw
+        // codepoint, bypassing `prepare`/`wrap`'s normalization — exactly
+        // the path that must still resolve correctly through `rasterize`.
+        let system = BitmapTextSystem::new();
+        let fallback_image = system
+            .rasterize(cache_key_for('\u{E000}', REFERENCE_FONT_SIZE_PX))
+            .expect("fallback glyph must rasterize");
+
+        for ch in ['É', 'À', 'Ç', '\u{00A0}', '\u{202F}', '—', '\u{2019}'] {
+            let image = system
+                .rasterize(cache_key_for(ch, REFERENCE_FONT_SIZE_PX))
+                .unwrap_or_else(|e| panic!("char {ch:?} failed to rasterize: {e:?}"));
+            assert_ne!(
+                image.data, fallback_image.data,
+                "char {ch:?} rasterized as the fallback glyph"
+            );
+        }
     }
 
     #[test]

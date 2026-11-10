@@ -101,6 +101,18 @@ breaking changes can land on minor bumps).
     a still-physically-held gesture to the host; and losing window focus
     now cancels a pending pointer activation instead of leaving it armed
     for a later, unrelated release to fire. See ADR 0011's addendum.
+- **`mkui-text` bitmap face: Latin + French glyph coverage, defined fallback
+  glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers the lowercase
+  French-accented letters (à â ä é è ê ë î ï ô ö ù û ü ÿ ç), the œ/Œ
+  ligature, guillemets, curly double quotes, and ellipsis, and folds NBSP /
+  narrow-NBSP to a plain space and accented capitals to their unaccented
+  base letter (the 7-row capital cell has no spare row for a diacritic).
+  Any codepoint still missing a glyph renders a new, explicit
+  `FALLBACK_GLYPH` (a hollow box) instead of reusing `'?'` — legible, never
+  blank, never a panic. `BitmapTextSystem::rasterize` now normalizes before
+  table lookup so this applies uniformly, including to callers (like
+  `cache_key_for`) that build a `GlyphCacheKey` straight from a raw
+  codepoint.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through
