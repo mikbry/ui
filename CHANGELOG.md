@@ -104,9 +104,11 @@ breaking changes can land on minor bumps).
 - **`mkui-text` bitmap face: Latin + French glyph coverage, defined fallback
   glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers the French-accented
   letters in both cases (à â ä é è ê ë î ï ô ö ù û ü ÿ ç and À Â Ä É È Ê Ë Î Ï
-  Ô Ö Ù Û Ü Ÿ), the œ/Œ and æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets, curly
-  double quotes, ellipsis, and the previously-missing ASCII `!` and `;`, and
-  folds NBSP / narrow-NBSP to a plain space. `Ç` still folds to `C` — a
+  Ô Ö Ù Û Ü Ÿ), the acute/tilde/ring vowels needed for Spanish, Portuguese,
+  and Scandinavian text (á í ó ú ã å õ and Á Í Ó Ú Ã Å Õ), the œ/Œ and æ/Æ
+  ligatures, ñ/Ñ, ø/Ø, ß, guillemets, curly double quotes, ellipsis, and the
+  previously-missing ASCII `!` and `;`, and folds NBSP / narrow-NBSP to a
+  plain space. `Ç` still folds to `C` — a
   cedilla sits below the baseline, and `C`'s bottom row already uses every
   column the 5-bit cell has, unlike the other accented capitals, which free
   row 0 for the diacritic by compressing their letterform into 6 rows. Any

@@ -426,8 +426,9 @@ pub fn is_fallback_glyph(bits: &[u8; 7]) -> bool {
 
 /// 5×7 bit pattern for a single glyph. Rows are MSB-first; bit 4 is the
 /// leftmost column. Covers ASCII (including `!`/`;`) plus the French-accented
-/// letters (both cases), the œ/Œ and æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets,
-/// curly quotes, and ellipsis needed for Latin + French text;
+/// letters (both cases), the acute/tilde/ring vowels needed for Spanish,
+/// Portuguese, and Scandinavian text (á í ó ú ã å õ, both cases), the œ/Œ and
+/// æ/Æ ligatures, ñ/Ñ, ø/Ø, ß, guillemets, curly quotes, and ellipsis;
 /// [`normalize_bitmap_char`] folds a few other codepoints (NBSP, narrow
 /// NBSP, `Ç`) onto entries here before this table is consulted. Characters
 /// with no entry below render the explicit [`FALLBACK_GLYPH`], never `'?'`
@@ -508,6 +509,18 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
         'ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
         'ÿ' => [0b10001, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+        // Acute, tilde, and ring diacritics complete Latin vowel coverage
+        // beyond French: á/í/ó/ú (Spanish, Portuguese), ã/õ (Portuguese), å
+        // (Scandinavian). Same free-ascender-row placement as the
+        // grave/circumflex/diaeresis accents above; 'í' replaces the
+        // tittle the way î/ï do.
+        'á' => [0b00010, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'í' => [0b00010, 0b00000, 0b01100, 0b00100, 0b00100, 0b00100, 0b01110],
+        'ó' => [0b00010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'ú' => [0b00010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+        'ã' => [0b01101, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'å' => [0b01110, 0b01110, 0b00001, 0b01111, 0b10001, 0b10011, 0b01101],
+        'õ' => [0b01101, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
         // French-accented capital letters: unlike lowercase, capitals have
         // no free ascender row (every row is already load-bearing for the
         // letterform — see 'A'/'E'/'I'/'O'/'U'/'Y' above). Row 0 is freed
@@ -550,6 +563,22 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         // collision while keeping the shape recognizable as 'U'.
         'Ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         'Ÿ' => [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100],
+        // Á/Í/Ú/Ã/Å/Õ: acute, tilde, and ring applied to the same compressed
+        // capital bodies as À/É/Ù/Ñ above. 'Ó'/'Õ' need their bottom row
+        // widened to 0b01111 (the same trick used for Ô/Ö) because their
+        // accent rows (0b00010 acute, 0b01101 tilde) stacked on the
+        // capital-O body would otherwise exactly reproduce lowercase
+        // 'ó'/'õ''s bits; Á/Í/Ã/Å/Ú share no such collision with their
+        // lowercase counterparts (their letterform bodies differ from
+        // a/i/u's), so they keep the unwidened O/U closing-row value
+        // instead.
+        'Á' => [0b00010, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'Í' => [0b00010, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'Ó' => [0b00010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
+        'Ú' => [0b00010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'Ã' => [0b01101, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'Å' => [0b01110, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'Õ' => [0b01101, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
         // Cedilla has no row below the baseline to sit in (row 6 is already
         // the bottom of the letter), so it is approximated as a small hook
         // extending the bottom-right of the 'c' shape rather than a true
@@ -729,7 +758,7 @@ mod tests {
     #[test]
     fn fallback_glyph_is_distinct_from_every_mapped_character() {
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØ";
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõÁÍÓÚÃÅÕ";
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
             assert!(
@@ -752,7 +781,7 @@ mod tests {
         // those two pairs, so a future addition can't reintroduce the
         // same class of bug silently.
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØ";
+            :.,;!+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸæÆñÑßøØáíóúãåõÁÍÓÚÃÅÕ";
         let mut seen: Vec<(char, [u8; 7])> = Vec::new();
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
@@ -786,6 +815,13 @@ mod tests {
             ('Û', 'U'),
             ('Ü', 'U'),
             ('Ÿ', 'Y'),
+            ('Á', 'A'),
+            ('Í', 'I'),
+            ('Ó', 'O'),
+            ('Ú', 'U'),
+            ('Ã', 'A'),
+            ('Õ', 'O'),
+            ('Å', 'A'),
         ];
         for (accented, base) in pairs {
             assert_eq!(
@@ -822,6 +858,22 @@ mod tests {
             ('Ø', 'O'),
             ('Ø', '0'),
             ('ß', '8'),
+            ('á', 'a'),
+            ('Á', 'A'),
+            ('í', 'i'),
+            ('Í', 'I'),
+            ('ó', 'o'),
+            ('Ó', 'O'),
+            ('Ó', 'ó'),
+            ('ú', 'u'),
+            ('Ú', 'U'),
+            ('ã', 'a'),
+            ('Ã', 'A'),
+            ('å', 'a'),
+            ('Å', 'A'),
+            ('õ', 'o'),
+            ('Õ', 'O'),
+            ('Õ', 'õ'),
         ];
         for (ch, lookalike) in pairs {
             assert_ne!(
@@ -919,6 +971,40 @@ mod tests {
         // their own `bitmap_glyph` entries from the start; 'æ' is covered
         // directly here rather than deferred.
         let sentences = ["« Bonjour ! »", "café ; thé", "ex æquo"];
+        let system = BitmapTextSystem::new();
+        let spec = LayoutSpec::default();
+        let fallback_image = system
+            .rasterize(cache_key_for('\u{E000}', spec.font_size_px))
+            .expect("fallback glyph must rasterize");
+
+        for sentence in sentences {
+            let runs = system.layout(sentence, &spec, None);
+            for run in &runs {
+                for glyph in &run.glyphs {
+                    let ch = char::from_u32(glyph.glyph_id).expect("glyph_id must be a valid char");
+                    let image = system
+                        .rasterize(run.cache_key(glyph))
+                        .unwrap_or_else(|e| panic!("char {ch:?} failed to rasterize: {e:?}"));
+                    if ch == ' ' {
+                        continue;
+                    }
+                    assert_ne!(
+                        image.data, fallback_image.data,
+                        "char {ch:?} in {sentence:?} rasterized as the fallback glyph"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_2_review_reported_words_rasterize_without_missing_glyphs_via_real_pipeline() {
+        // Regression test for the round-2 review finding on #184's PR: "São
+        // Paulo", "smörgås", and "Olá", run through the real `layout` ->
+        // `rasterize` pipeline, rendered the fallback box for 'ã', 'å', and
+        // 'á'. These letters (plus í/ó/ú/Ã/Å and their capitals) are now
+        // covered directly rather than deferred to #227.
+        let sentences = ["São Paulo", "smörgås", "Olá"];
         let system = BitmapTextSystem::new();
         let spec = LayoutSpec::default();
         let fallback_image = system
