@@ -122,6 +122,34 @@ breaking changes can land on minor bumps).
   panic. `BitmapTextSystem::rasterize` now normalizes before table lookup
   so this applies uniformly, including to callers (like `cache_key_for`)
   that build a `GlyphCacheKey` straight from a raw codepoint.
+- **`mkui-wgpu`: `WgpuApp::update_frame` — self-gating per-frame entry point
+  for embedding hosts (#177, E4 of #173).** Unlike `rebuild_scene_from_tree`
+  (unconditional — callers already gate it on `is_dirty()` for the winit
+  `RedrawRequested` path), `update_frame` owns its own dirty check, so a
+  host driving its own render loop can call it unconditionally, once per
+  frame, without a `RedrawRequested`-style "should I redraw" signal of its
+  own. On a frame where nothing changed it performs zero heap allocations
+  (no tree walk, no fresh `Scene`/hit-test/layout vecs) and leaves the
+  previous frame's scene in place — verified by a dedicated
+  allocation-counting test (`crates/mkui-wgpu/tests/alloc_free_frame.rs`,
+  acceptance criterion #4).
+  - `AppTree::set_text` / `AppTree::set_button_label` (`mkui-runtime`):
+    in-place content updates for already-built nodes, with a
+    compare-before-write contract — writing the same value is a no-op
+    (no `mark_dirty`, no allocation), so a host can write a HUD value
+    every frame the same way it calls `update_frame`. `AppTree` previously
+    had no way to update a node once built, only `push_*` to append new
+    ones.
+  - `WgpuApp::set_theme` now compares before assigning and only marks the
+    tree dirty on an actual change — previously it never marked dirty at
+    all, so a theme swap silently didn't force a redraw on *either* the
+    winit or the new embedded path. Folded into this change because
+    `update_frame`'s correctness depends on it.
+  - See ADR 0006 §"Update (#177)" for what this does and does not change:
+    the dirty bit stays whole-tree (eager rebuild-on-dirty, unchanged from
+    Codex round 7) — per-subtree skip, and the CPU/GPU/memory budget
+    numbers in #177's acceptance criteria, need the embedded host +
+    toy-scene example #175/#173 bring and are tracked as follow-ups.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through

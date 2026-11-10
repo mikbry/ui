@@ -311,6 +311,66 @@ impl AppTree {
         Ok(self.alloc_and_attach(parent, kind, style))
     }
 
+    // ---- in-place mutation for already-built nodes (#177) ----
+    //
+    // An embedding host that ticks the tree every frame (a HUD health
+    // value, a score counter, …) writes the same value on most frames.
+    // These setters compare before writing: an unchanged value returns
+    // `false` and never touches `mark_dirty`, so a host can call them
+    // unconditionally every frame without forcing a rebuild — and without
+    // allocating, since `content: &str` (not `impl Into<String>`) keeps
+    // the caller from allocating a `String` before the comparison runs.
+
+    /// Overwrite a `Text` node's content in place. Returns `false` (no
+    /// mutation, tree stays clean) when `content` already matches, `true`
+    /// when it changed (the tree is now dirty). `false` is also returned
+    /// if `id` is stale/missing or does not name a `Text` node.
+    pub fn set_text(&mut self, id: NodeId, content: &str) -> bool {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::Text(text) = &mut node.kind else {
+                return false;
+            };
+            if text.content == content {
+                false
+            } else {
+                text.content.clear();
+                text.content.push_str(content);
+                true
+            }
+        };
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
+    /// Overwrite a `Button` node's label in place. Same no-op-on-equal
+    /// contract as [`AppTree::set_text`].
+    pub fn set_button_label(&mut self, id: NodeId, label: &str) -> bool {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::Button(button) = &mut node.kind else {
+                return false;
+            };
+            if button.label == label {
+                false
+            } else {
+                button.label.clear();
+                button.label.push_str(label);
+                true
+            }
+        };
+        if changed {
+            self.mark_dirty();
+        }
+        changed
+    }
+
     fn alloc_and_attach(&mut self, parent: NodeId, kind: NodeKind, class: StyleClass) -> NodeId {
         assert!(
             self.get(parent).is_some(),
@@ -464,5 +524,77 @@ mod tests {
         // Root is 0,0; first user node should be 1,0.
         assert_eq!(id.index(), 1);
         assert_eq!(id.generation(), 0);
+    }
+
+    #[test]
+    fn set_text_with_unchanged_value_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let text = tree
+            .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        tree.clear_dirty();
+        assert!(!tree.set_text(text, "hp: 100"));
+        assert!(!tree.is_dirty());
+        let NodeKind::Text(t) = &tree.get(text).unwrap().kind else {
+            panic!("expected Text")
+        };
+        assert_eq!(t.content, "hp: 100");
+    }
+
+    #[test]
+    fn set_text_with_new_value_marks_dirty_and_updates() {
+        let mut tree = AppTree::new();
+        let text = tree
+            .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        tree.clear_dirty();
+        assert!(tree.set_text(text, "hp: 90"));
+        assert!(tree.is_dirty());
+        let NodeKind::Text(t) = &tree.get(text).unwrap().kind else {
+            panic!("expected Text")
+        };
+        assert_eq!(t.content, "hp: 90");
+    }
+
+    #[test]
+    fn set_text_on_non_text_node_returns_false() {
+        let mut tree = AppTree::new();
+        let view = tree.push_view(tree.root(), "").unwrap();
+        tree.clear_dirty();
+        assert!(!tree.set_text(view, "hp: 90"));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_text_on_stale_node_returns_false() {
+        let mut tree = AppTree::new();
+        let stale = NodeId::from_raw(99, 0);
+        assert!(!tree.set_text(stale, "anything"));
+    }
+
+    #[test]
+    fn set_button_label_with_unchanged_value_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let button = tree
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
+            .unwrap();
+        tree.clear_dirty();
+        assert!(!tree.set_button_label(button, "Pause"));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_button_label_with_new_value_marks_dirty_and_updates() {
+        let mut tree = AppTree::new();
+        let button = tree
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
+            .unwrap();
+        tree.clear_dirty();
+        assert!(tree.set_button_label(button, "Resume"));
+        assert!(tree.is_dirty());
+        let NodeKind::Button(b) = &tree.get(button).unwrap().kind else {
+            panic!("expected Button")
+        };
+        assert_eq!(b.label, "Resume");
     }
 }

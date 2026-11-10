@@ -103,6 +103,38 @@ observes the flag and calls `window.request_redraw()` from inside the
 event loop — **never** from inside the action closure (Sprint 4
 anti-pattern guard).
 
+#### Update (#177): a self-gating per-frame entry point for embedding hosts
+
+The winit shell above drives `rebuild_scene_from_tree` from an *external*
+dirty check (`RedrawRequested` only fires on demand, so the caller
+already knows a rebuild is due). An embedding host (#173/#175) has no
+`RedrawRequested` — it calls into mkui once per frame of its own loop,
+60 times a second, whether or not anything changed. `WgpuApp::update_frame`
+is the entry point for that shape: it owns the dirty check itself, so a
+host can call it unconditionally every frame. On a frame where nothing
+changed it performs **zero heap allocations** — no tree walk, no fresh
+`Scene` / hit-test / layout vecs — and leaves the previous frame's `scene()`
+/ hit-tests in place.
+
+This closes a real gap, not a synthetic one: before #177, `AppTree` had
+no way to *update* an already-built node — `push_text` / `push_button`
+only ever append new ones. A host redrawing a HUD health value every
+frame had nothing to call that wouldn't also grow the tree. `AppTree::set_text`
+/ `AppTree::set_button_label` fill that gap with a compare-before-write
+contract: writing the same value is recognised as a no-op (no `mark_dirty`,
+no allocation) so a host can write unconditionally, every frame, exactly
+like it calls `update_frame`.
+
+**This is not incremental diffing.** The dirty bit stays whole-tree, as
+above; `set_theme` was also folded into the same compare-before-write
+contract (a theme swap wasn't marking the tree dirty at all, a latent gap
+`update_frame` made visible). Skipping unchanged *subtrees* within a
+single dirty rebuild — the issue's headline "retained tree" framing — is
+deliberately deferred to a follow-up; see that issue for why eager
+whole-tree rebuild-on-dirty remains the right default until a performance
+baseline says otherwise (unchanged from the Codex round 7 rationale
+above).
+
 ### Closure capture
 
 Hit entries carry cloned `Option<ActionId>` handles, not references

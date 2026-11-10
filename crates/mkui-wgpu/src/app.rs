@@ -264,8 +264,20 @@ impl WgpuApp {
         &self.theme
     }
 
+    /// Swap the active theme. A no-op if `theme` is identical to the
+    /// current one (`WgpuTheme: PartialEq`). Otherwise, when the app owns
+    /// a runtime tree, marks it dirty so the next [`WgpuApp::update_frame`]
+    /// (or the winit `RedrawRequested` dirty check) picks up the new
+    /// theme on its next walk — a theme swap is not itself a tree
+    /// mutation, so without this it would silently not redraw (#177).
     pub fn set_theme(&mut self, theme: WgpuTheme) {
+        if self.theme == theme {
+            return;
+        }
         self.theme = theme;
+        if let Some(core) = self.core.as_ref() {
+            core.borrow_mut().tree_mut().mark_dirty();
+        }
     }
 
     /// Borrow the underlying core Mkui (and thus the runtime AppTree),
@@ -337,6 +349,32 @@ impl WgpuApp {
         core.borrow_mut().tree_mut().clear_dirty();
         self.scene = output.scene;
         self.hit_tests = output.hit_tests;
+    }
+
+    /// Per-frame entry point for a host that ticks mkui every frame of its
+    /// own render loop, rather than winit's on-demand `RedrawRequested`
+    /// (#177). Unlike [`WgpuApp::rebuild_scene_from_tree`], this method
+    /// owns the dirty gate itself: it is safe to call unconditionally,
+    /// every frame, and on a frame where nothing changed it returns
+    /// `false` having performed no tree walk and no heap allocation —
+    /// `self.scene` / `self.hit_tests` from the last rebuild are left in
+    /// place for the host to keep drawing.
+    ///
+    /// Returns `true` when it rebuilt (the host should re-tessellate /
+    /// re-upload against the new `scene()`), `false` otherwise. Also
+    /// `false` when the app is in scene-only mode (`with_scene`) — that
+    /// path has no tree to be dirty, and the host is already driving
+    /// `scene()` directly.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn update_frame(&mut self) -> bool {
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        if !core.borrow().tree().is_dirty() {
+            return false;
+        }
+        self.rebuild_scene_from_tree();
+        true
     }
 
     /// Update the held scene for a new viewport on `WindowEvent::Resized`,
@@ -1044,6 +1082,87 @@ mod tests {
             .iter()
             .any(|p| matches!(p, crate::types::Primitive::Text(_)));
         assert!(has_text, "walker should emit at least one text primitive");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn update_frame_rebuilds_on_a_dirty_tree_then_goes_quiet() {
+        use mkui_core::components::{Mkui as CoreMkui, Text};
+        use mkui_runtime::TextVariant;
+
+        let core = CoreMkui::new().child(Text::new("hp: 100").variant(TextVariant::Body));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+
+        // First call: the tree is dirty from construction, so it rebuilds.
+        assert!(app.update_frame());
+        // Nothing changed since: no-op, every subsequent frame.
+        assert!(!app.update_frame());
+        assert!(!app.update_frame());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn update_frame_rebuilds_again_after_a_tree_mutation() {
+        use mkui_core::components::{Mkui as CoreMkui, Text};
+        use mkui_runtime::TextVariant;
+
+        let core = CoreMkui::new().child(Text::new("hp: 100").variant(TextVariant::Body));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.update_frame();
+
+        let text_id = {
+            let core = app.core().unwrap().borrow();
+            let root = core.tree().get(core.tree().root()).unwrap();
+            root.children[0]
+        };
+        {
+            let core = app.core().unwrap();
+            let mut core = core.borrow_mut();
+            assert!(core.tree_mut().set_text(text_id, "hp: 90"));
+        }
+        assert!(app.update_frame(), "a real content change must rebuild");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn update_frame_is_a_no_op_in_scene_only_mode() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        assert!(!app.update_frame());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_theme_is_a_no_op_for_an_identical_theme() {
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.update_frame();
+
+        let theme = *app.theme();
+        app.set_theme(theme);
+        assert!(
+            !app.core().unwrap().borrow().tree().is_dirty(),
+            "re-setting the same theme must not dirty the tree"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_theme_with_a_new_theme_dirties_the_tree() {
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.update_frame();
+
+        let mut theme = *app.theme();
+        theme.panel.corner_radius += 1.0;
+        app.set_theme(theme);
+        assert!(
+            app.core().unwrap().borrow().tree().is_dirty(),
+            "a changed theme must dirty the tree so update_frame rebuilds"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
