@@ -22,6 +22,40 @@ breaking changes can land on minor bumps).
   implementation (e.g. a `web_sys`-backed host in `mkui-web`) is deferred to
   #220 — #206's acceptance criteria ask only for the trait and the no-op/test
   double.
+- **`mkui-text`: weight/italic family-variant selection and `kern`-table
+  kerning for registered SFNT faces (#181).** `SfntFace` now reads
+  `OS/2.usWeightClass` / the `fsSelection` italic bit (defaulting to
+  regular/upright when the table is absent), the typographic family name
+  (name id 16, preferred over the compatibility family, id 1, so non-RIBBI
+  statics like "Open Sans SemiBold" still group under "Open Sans"), and the
+  `kern` table's version-0 format-0 horizontal subtable. `CompositeTextSystem`
+  now registers every face a family shares under one grouping key and picks
+  among them by `FontQuery::weight`/`italic` — exact match preferred, then
+  nearest `usWeightClass` (unspecified weight is treated as 400, not
+  "whichever face registered first"), with an italic request falling back to
+  the nearest upright face when the family has no italic. `SfntProvider`
+  applies the face's kerning between consecutive Slug-mapped glyph pairs at
+  layout time (never across a bitmap-fallback boundary), folding the
+  adjustment into the pen position and, per the shaping convention, into the
+  trailing glyph's own `x_advance_px` too, so a caller that reconstructs
+  positions by summing advances agrees with `x_px`. Verified against
+  `ttf-parser` as an oracle across every one of Abel's 748 real kerning
+  pairs, plus its weight/italic reading.
+  - Scope decision: the narrow SFNT decoder still only parses TrueType
+    `glyf`/`loca` outlines — CFF-flavored OpenType (`OTTO`) fonts remain a
+    typed rejection (`SfntError::UnsupportedOutlineFormat`), unchanged by
+    this issue. Deferred to #223.
+  - Scope decision: only the legacy OpenType `kern` table is read. A font
+    that carries pair kerning exclusively through `GPOS` (common among newer
+    releases) gets no kerning from this path. Deferred to #225.
+  - Scope decision: an embedding host already registers arbitrary TTF/OTF
+    bytes with no filesystem access via the existing
+    `CompositeTextSystem::register_sfnt_face(bytes, index)` (#67); this issue
+    did not need to add a new entry point for that criterion.
+  - Scope decision: crisp rendering at ~19px/~64px and 1x/2x DPI is produced
+    by the existing resolution-independent Slug/outline pipeline (#157/#165/
+    #171) and its `device_pixel_ratio`-aware snapping (`mkui-vector2d-wgpu`,
+    `mkui-wgpu::tessellation`); no renderer change was needed or made here.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through

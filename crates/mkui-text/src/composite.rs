@@ -256,6 +256,18 @@ pub(crate) trait FontProvider: Send + Sync + 'static {
     fn as_sfnt_face(&self) -> Option<&SfntFace> {
         None
     }
+
+    /// `(weight, italic)` this provider's single face reports — the
+    /// OpenType `usWeightClass` convention (100..=900, 400 regular) and
+    /// upright/italic. The default, `(400, false)`, is "regular": correct
+    /// for the bitmap face and any provider with no notion of style. The
+    /// registry records this at [`CompositeTextSystem::register_face`] time
+    /// so [`CompositeTextSystem::resolve_font`] (#181) can pick the closest
+    /// weight/italic match among several faces sharing one family, without
+    /// re-querying providers per lookup.
+    fn style(&self) -> (u16, bool) {
+        (400, false)
+    }
 }
 
 /// Public error from [`CompositeTextSystem::register_sfnt_face`].
@@ -296,6 +308,10 @@ fn sfnt_to_text_error(err: SfntError) -> TextError {
 /// face maps stay in a `Primary` Slug run; consecutive characters it lacks are
 /// emitted as an adjacent `Fallback` run targeting the registry-validated
 /// bitmap face, with cluster order, advances, and absolute positions preserved.
+/// It also applies the face's `kern` table (#181) between consecutive
+/// Slug-mapped glyph pairs as it walks the pen position — a fallback-lane
+/// character resets the kerning context, since neither the bitmap face nor a
+/// cross-lane pair has kerning data.
 struct SfntProvider {
     face: Arc<SfntFace>,
     fallback: ValidatedFallback,
@@ -339,6 +355,10 @@ impl FontProvider for SfntProvider {
         }
     }
 
+    fn style(&self) -> (u16, bool) {
+        (self.face.weight_class(), self.face.is_italic())
+    }
+
     fn layout_local(
         &self,
         _local: LocalFontId,
@@ -361,6 +381,11 @@ impl FontProvider for SfntProvider {
         let mut runs: Vec<PendingRun> = Vec::new();
         let mut current: Option<PendingRun> = None;
         let mut pen_x = 0.0f32;
+        // The previous character's glyph id, kept only while it was itself a
+        // Slug-mapped glyph — kerning (#181) only ever applies between two
+        // consecutive glyphs this face actually maps; a bitmap-fallback
+        // character in between (or at a run start) resets it to `None`.
+        let mut prev_slug_gid: Option<u16> = None;
 
         for (cluster, ch) in text.chars().enumerate() {
             // Classify the character: mapped → Slug lane, unmapped → bitmap
@@ -374,6 +399,32 @@ impl FontProvider for SfntProvider {
                 ),
                 None => (false, normalize_bitmap_char(ch) as u32, bmp_advance),
             };
+
+            // Fold the kerning adjustment into the pen position before this
+            // glyph is placed, so it lands in the same run as its neighbour
+            // (both Slug-class) rather than opening a spurious new run. The
+            // same amount is folded back into the *previous* glyph's
+            // `x_advance_px` (the shaping convention: a kern pair's
+            // adjustment is recorded on the glyph it trails) so a caller that
+            // reconstructs positions by summing advances — rather than
+            // reading `x_px` directly — still agrees with the real pen
+            // positions computed here. `prev_slug_gid` being `Some`
+            // guarantees the previous iteration pushed into this same
+            // `current` run: a render-class change always starts a fresh
+            // `PendingRun` and resets `prev_slug_gid` to `None` first.
+            if is_slug {
+                if let Some(prev_gid) = prev_slug_gid {
+                    let kern_px = self.face.kerning(prev_gid, glyph_id as u16) as f32 * sfnt_scale;
+                    pen_x += kern_px;
+                    if let Some(prev_glyph) = current.as_mut().and_then(|run| run.glyphs.last_mut())
+                    {
+                        prev_glyph.x_advance_px += kern_px;
+                    }
+                }
+                prev_slug_gid = Some(glyph_id as u16);
+            } else {
+                prev_slug_gid = None;
+            }
 
             let want_class = if is_slug {
                 TextRenderClass::Slug
@@ -502,14 +553,25 @@ struct FaceRecord {
     generation: u32,
     render_class: TextRenderClass,
     source: FontSource,
+    /// `(weight, italic)` recorded from the provider at registration time
+    /// (#181) — the registry's copy is what `resolve_font` matches against,
+    /// so a weight/italic lookup never re-queries a provider per call.
+    weight: u16,
+    italic: bool,
 }
 
 /// Forward + reverse maps, plus a family index for `resolve_font`.
+///
+/// `by_family` maps one family name to **every** registered face sharing it,
+/// in registration order — not just the most recent — so #181's
+/// weight/italic resolution (`CompositeTextSystem::best_face_for`) can choose
+/// among a family's regular/semibold/bold/italic faces instead of the last
+/// one registered silently shadowing the rest.
 #[derive(Debug, Default)]
 struct FontRegistry {
     forward: HashMap<(ProviderId, LocalFontId), FontId>,
     reverse: HashMap<FontId, FaceRecord>,
-    by_family: HashMap<String, FontId>,
+    by_family: HashMap<String, Vec<FontId>>,
 }
 
 /// Checked `font_generation` bump.
@@ -581,12 +643,16 @@ impl CompositeTextSystem {
                 generation: 0,
                 render_class: TextRenderClass::Bitmap,
                 source: FontSource::Builtin,
+                weight: 400,
+                italic: false,
             },
         );
         system
             .registry
             .by_family
-            .insert(BITMAP_FAMILY.to_string(), FontId::BITMAP);
+            .entry(BITMAP_FAMILY.to_string())
+            .or_default()
+            .push(FontId::BITMAP);
 
         system
     }
@@ -629,6 +695,7 @@ impl CompositeTextSystem {
         }
 
         let render_class = self.providers[provider_id.0].render_class();
+        let (weight, italic) = self.providers[provider_id.0].style();
         // Mint first: if the id space is exhausted we return here, before
         // mutating either map, so the registry is left exactly as it was.
         let font_id = self
@@ -645,10 +712,20 @@ impl CompositeTextSystem {
                 generation: 0,
                 render_class,
                 source,
+                weight,
+                italic,
             },
         );
         for family in families {
-            self.registry.by_family.insert(family, font_id);
+            // Append rather than overwrite: a family can hold several faces
+            // (regular/semibold/bold/italic, #181), and `resolve_font` picks
+            // among all of them by weight/italic, not just the latest one
+            // registered under this exact name.
+            self.registry
+                .by_family
+                .entry(family)
+                .or_default()
+                .push(font_id);
         }
         Ok(font_id)
     }
@@ -762,14 +839,71 @@ impl CompositeTextSystem {
             .get(&FontId::BITMAP)
             .map_or(0, |r| r.generation)
     }
+
+    /// `(weight, italic)` recorded for a registered face at registration time
+    /// (#181), or `None` if `font_id` is unknown.
+    pub fn font_style(&self, font_id: FontId) -> Option<(u16, bool)> {
+        self.registry
+            .reverse
+            .get(&font_id)
+            .map(|r| (r.weight, r.italic))
+    }
+
+    /// Pick the best weight/italic match for `query` among `candidates` — all
+    /// faces registered under one family (#181's grouping key).
+    ///
+    /// - Candidates whose `italic` matches `query.italic` are preferred; if
+    ///   none match, every candidate is considered (a non-italic face still
+    ///   beats no face at all for an italic request the family never
+    ///   registered).
+    /// - Within that pool, the candidate whose `usWeightClass` is numerically
+    ///   closest to `query.weight` wins, ties broken by registration order.
+    ///   `query.weight == 0` (the [`FontQuery`] default, meaning
+    ///   "unspecified") is treated as the CSS/OpenType default weight, `400`
+    ///   (regular) — not as "whichever face happened to register first" —
+    ///   so a family that registers Bold before Regular still resolves an
+    ///   unqualified query to Regular.
+    ///
+    /// `candidates` is never empty in practice (`by_family` only holds
+    /// non-empty vectors), but an empty slice still resolves to `None` rather
+    /// than panicking.
+    fn best_face_for(&self, candidates: &[FontId], query: &FontQuery) -> Option<FontId> {
+        let styled: Vec<(FontId, u16, bool)> = candidates
+            .iter()
+            .filter_map(|&id| self.font_style(id).map(|(w, i)| (id, w, i)))
+            .collect();
+        if styled.is_empty() {
+            return None;
+        }
+
+        let italic_matches: Vec<(FontId, u16, bool)> = styled
+            .iter()
+            .copied()
+            .filter(|(_, _, i)| *i == query.italic)
+            .collect();
+        let pool = if italic_matches.is_empty() {
+            styled
+        } else {
+            italic_matches
+        };
+
+        let target_weight = if query.weight == 0 { 400 } else { query.weight };
+        pool.into_iter()
+            .min_by_key(|(_, w, _)| w.abs_diff(target_weight))
+            .map(|(id, _, _)| id)
+    }
 }
 
 impl TextSystem for CompositeTextSystem {
     fn resolve_font(&self, query: &FontQuery) -> Option<FontId> {
-        // Family index first: registered faces resolve directly by family.
+        // Family index first: registered faces resolve directly by family,
+        // picking among that family's weight/italic variants (#181) when it
+        // holds more than one.
         if let Some(family) = &query.family {
-            if let Some(&id) = self.registry.by_family.get(family) {
-                return Some(id);
+            if let Some(ids) = self.registry.by_family.get(family) {
+                if let Some(id) = self.best_face_for(ids, query) {
+                    return Some(id);
+                }
             }
         }
         // Otherwise ask each provider in registration order; the first to claim
@@ -1575,5 +1709,161 @@ mod tests {
         let families = sys.families();
         assert!(families.contains(&BITMAP_FAMILY.to_string()));
         assert!(families.contains(&"Extra".to_string()));
+    }
+
+    // ---- #181: weight/italic family-variant selection ---------------------
+
+    /// A synthetic one-glyph SFNT face under `family`, with the given `OS/2`
+    /// weight/italic — shared by the #181 resolution tests below.
+    fn variant_face(family: &str, weight: u16, italic: bool) -> Arc<[u8]> {
+        use crate::sfnt::test_support::{
+            os2_table, synth_font_with_extra, triangle_glyf, windows_name_table,
+        };
+        synth_font_with_extra(
+            &triangle_glyf(),
+            vec![
+                (*b"OS/2", os2_table(weight, italic)),
+                (*b"name", windows_name_table(&[(1, family)])),
+            ],
+        )
+    }
+
+    #[test]
+    fn weight_and_italic_variants_of_one_family_are_all_selectable() {
+        let mut sys = CompositeTextSystem::new();
+        // Deliberately register Bold before Regular, to prove an
+        // unspecified-weight query doesn't just take "whichever came first"
+        // (#181's `best_face_for`).
+        let bold = sys
+            .register_sfnt_face(variant_face("Variants", 700, false), 0)
+            .unwrap();
+        let regular = sys
+            .register_sfnt_face(variant_face("Variants", 400, false), 0)
+            .unwrap();
+        let semibold = sys
+            .register_sfnt_face(variant_face("Variants", 600, false), 0)
+            .unwrap();
+        let italic = sys
+            .register_sfnt_face(variant_face("Variants", 400, true), 0)
+            .unwrap();
+        assert_eq!(
+            [bold, regular, semibold, italic]
+                .iter()
+                .collect::<HashSet<_>>()
+                .len(),
+            4,
+            "each variant must mint a distinct FontId"
+        );
+
+        let q = |weight: u16, italic: bool| FontQuery {
+            family: Some("Variants".into()),
+            weight,
+            italic,
+            ..Default::default()
+        };
+
+        // Exact matches.
+        assert_eq!(sys.resolve_font(&q(400, false)), Some(regular));
+        assert_eq!(sys.resolve_font(&q(600, false)), Some(semibold));
+        assert_eq!(sys.resolve_font(&q(700, false)), Some(bold));
+        assert_eq!(sys.resolve_font(&q(400, true)), Some(italic));
+
+        // Nearest-weight: 620 is closer to 600 (semibold) than to 700 (bold);
+        // 680 is closer to 700 (bold).
+        assert_eq!(sys.resolve_font(&q(620, false)), Some(semibold));
+        assert_eq!(sys.resolve_font(&q(680, false)), Some(bold));
+
+        // Unspecified weight (the FontQuery default, 0) resolves to the face
+        // nearest 400 (regular) — not to bold, despite bold registering
+        // first.
+        assert_eq!(
+            sys.resolve_font(&FontQuery {
+                family: Some("Variants".into()),
+                ..Default::default()
+            }),
+            Some(regular)
+        );
+
+        // No bold-italic was registered: an italic request still prefers the
+        // family's only italic face over a closer-weight upright one —
+        // italic match takes priority over weight distance.
+        assert_eq!(sys.resolve_font(&q(700, true)), Some(italic));
+    }
+
+    #[test]
+    fn italic_query_falls_back_to_upright_when_family_has_no_italic_face() {
+        let mut sys = CompositeTextSystem::new();
+        let regular = sys
+            .register_sfnt_face(variant_face("UprightOnly", 400, false), 0)
+            .unwrap();
+        let bold = sys
+            .register_sfnt_face(variant_face("UprightOnly", 700, false), 0)
+            .unwrap();
+
+        // No italic face registered at all: falls back to the nearest-weight
+        // upright face rather than resolving to bitmap.
+        let q = FontQuery {
+            family: Some("UprightOnly".into()),
+            weight: 700,
+            italic: true,
+            ..Default::default()
+        };
+        assert_eq!(sys.resolve_font(&q), Some(bold));
+        assert_ne!(sys.resolve_font(&q), Some(regular));
+    }
+
+    // ---- #181: kerning through the composite's layout ----------------------
+
+    #[test]
+    fn kerning_shifts_the_second_glyph_and_folds_into_the_first_advance() {
+        use crate::sfnt::test_support::{
+            kern_table_format0, synth_font_with_extra, triangle_glyf, windows_name_table,
+        };
+
+        // The fixture's cmap maps only 'A' (to glyph 1); kern pair (1, 1)
+        // applies between two consecutive 'A's.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![
+                (*b"kern", kern_table_format0(&[(1, 1, -40)])),
+                (*b"name", windows_name_table(&[(1, "Kerned")])),
+            ],
+        );
+        let mut sys = CompositeTextSystem::new();
+        let id = sys.register_sfnt_face(bytes, 0).unwrap();
+        let face = sys.sfnt_face(id).unwrap().clone();
+
+        // font_size_px == units_per_em makes the font-unit scale exactly 1.0,
+        // so expected pixel values are the raw font-unit numbers.
+        let spec = LayoutSpec {
+            font_id: id,
+            font_size_px: face.units_per_em() as f32,
+            ..Default::default()
+        };
+        let runs = sys.layout("AA", &spec, None);
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        let advance = face.advance_width(face.glyph_index('A').unwrap()) as f32;
+
+        assert_eq!(run.glyphs[0].x_px, 0.0);
+        assert_eq!(run.glyphs[1].x_px, advance - 40.0);
+        // The kern folds into the first glyph's own advance too, so a caller
+        // summing advances lands on the same position `x_px` reports.
+        assert_eq!(run.glyphs[0].x_advance_px, advance - 40.0);
+
+        // 'A', an unmapped character, then 'A' again: no kerning carries
+        // across the bitmap-fallback boundary.
+        let runs = sys.layout("A\u{4e2d}A", &spec, None);
+        assert_eq!(runs.len(), 3, "fallback boundary splits into 3 runs");
+        // The second Slug run's origin is exactly the bitmap run's origin
+        // plus its one glyph's advance — not that, plus a leaked kern. A
+        // same-run assertion like `runs[2].glyphs[0].x_px == 0.0` would hold
+        // either way (every run's first glyph sits at its own origin by
+        // construction), so this checks the origin itself instead.
+        assert_eq!(
+            runs[2].origin_x_px,
+            runs[1].origin_x_px + runs[1].glyphs[0].x_advance_px,
+            "no kerning carried across the fallback run"
+        );
     }
 }
