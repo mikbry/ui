@@ -155,7 +155,7 @@ fn render_vector(scene: &Scene) -> Vec<u8> {
 /// RGBA target, cleared to opaque black first.
 fn render_triangulated(scene: &Scene) -> Vec<u8> {
     let renderer = harness();
-    let pipeline = build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1);
+    let pipeline = build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1, "fs_ui_triangles");
     let triangles = crate::tessellate_scene(scene);
     let vertices = gui_vertices(&triangles, W as f32, H as f32);
     let buffer = renderer

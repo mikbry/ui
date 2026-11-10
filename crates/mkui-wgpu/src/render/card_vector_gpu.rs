@@ -140,7 +140,8 @@ fn render_triangulated(rect: Rect, style: &CardStyle) -> Vec<u8> {
     let vertices = gui_vertices(&triangles, W as f32, H as f32);
 
     render_to_offscreen(|renderer, encoder| {
-        let pipeline = build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1);
+        let pipeline =
+            build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1, "fs_ui_triangles");
         let buffer = renderer
             .device()
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {

@@ -21,6 +21,7 @@ members = [
     "examples/native-showcase", # Cross-binding showcase on the wgpu backend (Sprint 5)
     "examples/text",           # Minimal Slug + bitmap text smoke binary (Sprint 7 #67)
     "examples/vector-showcase", # Sprint 8 Wave 2: vector-primitives showcase (#143)
+    "examples/host-embed-wgpu", # Host-owned GPU and frame: lit 3D scene + mkui HUD in one submission (#175)
 ]
 
 # The three backend-pinned showcase examples each enable a *different* primary
@@ -52,6 +53,7 @@ default-members = [
     "examples/headless-showcase",
     "examples/native-window",
     "examples/atoms-on-wgpu",
+    "examples/host-embed-wgpu",
 ]
 
 [workspace.package]

@@ -49,7 +49,7 @@ fn harness() -> OffscreenRenderer {
 /// pipeline, then read back the center pixel's RGBA bytes.
 fn render_center_pixel(clear: wgpu::Color, fill: Color) -> [u8; 4] {
     let renderer = harness();
-    let pipeline = build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1);
+    let pipeline = build_ui_pipeline(renderer.device(), INTERMEDIATE_FORMAT, 1, "fs_ui_triangles");
 
     // Two triangles covering the whole 32×32 target, authored in logical pixels.
     let quad = [

@@ -1,0 +1,16 @@
+[package]
+name = "host-embed-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+# The "host": owns its own wgpu instance/adapter/device/queue/surface and a
+# lit 3D cube pass, exactly like a real game/engine host would (#175).
+mkui-wgpu = { path = "../../crates/mkui-wgpu" }
+mkui-text = { path = "../../crates/mkui-text" }
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }

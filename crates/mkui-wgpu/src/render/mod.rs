@@ -91,6 +91,13 @@ enum LaneDraw {
     Slug(PreparedSlug),
 }
 
+/// Host-owned GPU and frame — borrowed-resources entry point for embedding
+/// mkui inside a third-party `wgpu` host (#175). Parallel to [`Renderer`]
+/// (which owns instance/adapter/device/queue/surface via winit): see
+/// [`embedded::EmbeddedRenderer`], which owns neither and records its pass
+/// into the host's own command encoder and texture view instead.
+pub mod embedded;
+
 /// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
 /// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
 /// ICD; the dedicated Lavapipe GPU job enables it. Reused by the #66 Slug and
@@ -340,8 +347,18 @@ impl Renderer {
         let sample_count = pick_sample_count(color_flags, MSAA_SAMPLE_COUNT_PREF);
 
         // UI + Slug lanes target the linear intermediate; the surface format is
-        // only seen by the present pass.
-        let ui_pipeline = build_ui_pipeline(&device, INTERMEDIATE_FORMAT, sample_count);
+        // only seen by the present pass. The standalone path always composites
+        // into the linear intermediate (never the swapchain directly), so it
+        // always uses the pass-through fragment entry point — see
+        // `embedded::fragment_entry_point_for` for the one other caller of
+        // `build_ui_pipeline`, which picks between the two entry points based
+        // on the *host's* target format.
+        let ui_pipeline = build_ui_pipeline(
+            &device,
+            INTERMEDIATE_FORMAT,
+            sample_count,
+            "fs_ui_triangles",
+        );
         let intermediate_view = create_intermediate_view(&device, width, height);
         let msaa_color_view = create_msaa_color_view(&device, width, height, sample_count);
 
@@ -895,10 +912,17 @@ fn pick_sample_count(color_flags: wgpu::TextureFormatFeatureFlags, preferred: u3
     }
 }
 
+/// Build the UI triangle pipeline against `format`, drawing through
+/// `fragment_entry_point` — `"fs_ui_triangles"` (pass-through linear) for the
+/// standalone path's linear intermediate, or
+/// `"fs_ui_triangles_encode_srgb"` for [`embedded::EmbeddedRenderer`] drawing
+/// directly into a host target format with no automatic sRGB encode on
+/// write. See `ui_triangles.wgsl` for both entry points.
 fn build_ui_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     sample_count: u32,
+    fragment_entry_point: &str,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("mkui-wgpu UI Shader"),
@@ -932,7 +956,7 @@ fn build_ui_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
-            entry_point: Some("fs_ui_triangles"),
+            entry_point: Some(fragment_entry_point),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             targets: &targets,
         }),
