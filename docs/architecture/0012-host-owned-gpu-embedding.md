@@ -42,7 +42,7 @@ second, parallel entry point alongside [`Renderer`] + [`WgpuApp`]'s
 `ApplicationHandler` shell. The existing winit-owned path is unchanged and
 stays the documented path for apps that don't embed in a host.
 
-- `EmbeddedRenderer::new(device: &wgpu::Device, target_format: wgpu::TextureFormat)`
+- `EmbeddedRenderer::new(device: &wgpu::Device, target_format: wgpu::TextureFormat, color_space: EmbeddedColorSpace)`
   borrows the host's device and the format of the host's own frame target.
   It creates no `wgpu::Instance`, no adapter, no `wgpu::Surface`, no window.
   It owns exactly one GPU resource: the UI render pipeline, built once
@@ -59,13 +59,22 @@ stays the documented path for apps that don't embed in a host.
   intermediate target and defers the sRGB encode to a separate present pass,
   because it picks the final surface format itself. `EmbeddedRenderer` has
   no such freedom — the host's target format is given — so it draws
-  directly into it in one pass, picking between two `ui_triangles.wgsl`
-  fragment entry points based on whether that format auto-encodes sRGB on
-  write (`fs_ui_triangles`, linear blend, the common case) or not
-  (`fs_ui_triangles_encode_srgb`, gamma-space blend — see the module docs for
-  why this one case is a documented Phase 1 simplification rather than a
-  second intermediate-plus-blit pass, which would itself be the "extra
-  texture copy" the embedding contract rules out).
+  directly into it in one pass. `target_format.is_srgb()` alone cannot pick
+  the right fragment entry point: formats where it's `false` split into two
+  groups needing *opposite* handling — a plain 8-bit UNORM format
+  (`Bgra8Unorm`) stores encoded sRGB bytes and needs a manual OETF, while a
+  linear float format (`Rgba16Float`, an HDR intermediate) stores
+  already-linear values and needs no encode at all. An initial version of
+  this renderer inferred the choice from `is_srgb()` alone and silently
+  mishandled linear float targets (caught in review before merge); the
+  shipped API instead takes an explicit `EmbeddedColorSpace` — `Linear` or
+  `EncodedUnorm` — so the host, which alone knows what its target format
+  means, decides. `Linear` draws through `fs_ui_triangles` (pass-through,
+  linear blend); `EncodedUnorm` draws through `fs_ui_triangles_encode_srgb`
+  (manual OETF, gamma-space blend — see the module docs for why this one
+  case is a documented Phase 1 simplification rather than a second
+  intermediate-plus-blit pass, which would itself be the "extra texture
+  copy" the embedding contract rules out).
 - Phase 1 scope: the triangle lane only (UI shapes, bitmap text, borders —
   everything every component renders through today).
   `Primitive::SlugGlyph` / `Primitive::VectorPath` primitives are silently
@@ -90,12 +99,14 @@ stays the documented path for apps that don't embed in a host.
   `mkui-vector2d-wgpu` now has a second, independent precedent one layer up,
   reinforcing it as the workspace's general answer to "a GPU-resource type
   that must not own the surface/instance/window" rather than a one-off.
-- Embedded hosts whose frame target is a plain UNORM (non-sRGB) format get
+- Embedded hosts that declare `EmbeddedColorSpace::EncodedUnorm` get
   gamma-space alpha blending for the UI lane instead of the standalone
   path's physically-linear blending — a known, narrow simplification, not a
   silent inconsistency (documented in `embedded.rs` and tested by the
-  `gpu-tests` acceptance suite, which exercises exactly that non-sRGB case
-  since the offscreen harness's target format is `Rgba8Unorm`).
+  `gpu-tests` acceptance suite, which exercises exactly that case since the
+  offscreen harness's target format is `Rgba8Unorm`). A host with a linear
+  float target declares `Linear` instead and keeps physically-correct
+  blending, matching the standalone path.
 - Linux/Vulkan is not structurally excluded: `EmbeddedRenderer::new` takes a
   borrowed `wgpu::Device` and format with no backend-specific branch, and the
   `gpu-tests` acceptance suite already runs it on the Vulkan/Lavapipe CI
@@ -123,6 +134,14 @@ stays the documented path for apps that don't embed in a host.
   one — a host that needs linear blending into a UNORM target can configure
   an sRGB-format view instead, which `wgpu` supports on most swapchains via
   `view_formats`.
+- **Infer the color-space handling from `target_format.is_srgb()` alone,
+  with no separate parameter.** Tried first, rejected in review before
+  merge: `is_srgb() == false` covers two groups needing opposite treatment
+  (encoded 8-bit UNORM vs. linear float), and `wgpu::TextureFormat` has no
+  general predicate that tells them apart — any such heuristic silently
+  mishandles whichever group it didn't anticipate. An explicit
+  `EmbeddedColorSpace` moves that decision to the one party who actually
+  knows what the target format means: the host.
 - **Fold Slug/vector-path lane support into this same PR.** Rejected per the
   issue's own scope discipline: the hosting contract (no owned
   instance/surface/window, one submission, no extra copy) is the load-

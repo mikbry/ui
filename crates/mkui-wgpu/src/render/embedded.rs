@@ -27,7 +27,7 @@
 //! those kinds are silently skipped (the same no-op [`crate::tessellate_primitives`]
 //! already gives them on an unselected lane), not rejected. Follow-up:
 //! extending the embedded path to the Slug/vector lane is tracked
-//! separately so Phase 1 stays scoped to the hosting contract itself.
+//! separately (#234) so Phase 1 stays scoped to the hosting contract itself.
 //!
 //! ## Color space
 //!
@@ -36,22 +36,42 @@
 //! §"Color space + blending"), because the final surface format is picked by
 //! `Renderer::new` itself. `EmbeddedRenderer` has no such freedom — the
 //! host's target format is whatever the host already uses for its own frame
-//! — so it draws directly into it in one pass:
+//! — so it draws directly into it in one pass.
 //!
-//! - **Host target is an sRGB format** (the common case — most engines
-//!   present through an sRGB-format view): the UI pipeline writes the same
-//!   linear vertex colors [`super::gui_vertices`] already produces, and the
-//!   hardware's sRGB encode-on-write does the rest. Alpha blending stays
-//!   physically correct, in linear light, identical in spirit to the
+//! `target_format.is_srgb()` alone cannot decide how to draw into it: it only
+//! tells us whether the GPU applies a hardware sRGB encode on write. Formats
+//! where that's `false` split into two groups that need *opposite* handling —
+//! a plain 8-bit UNORM format (`Bgra8Unorm`) stores perceptually-encoded sRGB
+//! bytes with no hardware transform and needs a manual encode, while a linear
+//! float format (`Rgba16Float`, an HDR intermediate) stores already-linear
+//! values and needs **no** encode at all — encoding it would be the same bug
+//! class as not encoding a UNORM target. Inferring the right answer from the
+//! format alone silently mishandles whichever group the heuristic didn't
+//! anticipate (filed and fixed as part of #175's review — see the module
+//! tests), so [`EmbeddedRenderer::new`] takes an explicit
+//! [`EmbeddedColorSpace`] instead of guessing:
+//!
+//! - [`EmbeddedColorSpace::Linear`] — the target either auto-encodes sRGB on
+//!   write (`target_format.is_srgb()`) or is itself a linear store that
+//!   expects already-linear values (e.g. `Rgba16Float`). Either way,
+//!   `render_into` writes the same linear vertex colors
+//!   [`super::gui_vertices`] already produces, untouched, through
+//!   `ui_triangles.wgsl`'s `fs_ui_triangles` entry point. Alpha blending
+//!   stays physically correct, in linear light — identical in spirit to the
 //!   standalone path.
-//! - **Host target is a plain UNORM format** (no automatic encode): the
-//!   pipeline draws through `ui_triangles.wgsl`'s `fs_ui_triangles_encode_srgb`
-//!   entry point instead, which applies the linear -> sRGB OETF before the
-//!   fixed-function blend stage. Blending then happens in gamma space rather
-//!   than linear light — a documented Phase 1 simplification for that one
-//!   target-format case, accepted because inserting a linear intermediate +
-//!   present blit here would itself be the "extra texture copy" the
-//!   embedding contract rules out.
+//! - [`EmbeddedColorSpace::EncodedUnorm`] — the target is a plain non-sRGB
+//!   UNORM format that stores perceptually-encoded sRGB bytes directly, with
+//!   no hardware transform on write (e.g. `Bgra8Unorm`). `render_into` draws
+//!   through `fs_ui_triangles_encode_srgb` instead, which applies the linear
+//!   -> sRGB OETF before the fixed-function blend stage. Blending then
+//!   happens in gamma space rather than linear light — a documented Phase 1
+//!   simplification for that one target-kind, accepted because inserting a
+//!   linear intermediate + present blit here would itself be the "extra
+//!   texture copy" the embedding contract rules out.
+//!
+//! The host, which alone knows what its target format actually means, picks
+//! between the two — `EmbeddedRenderer` never inspects `target_format` to
+//! decide.
 
 use mkui_text::TextSystem;
 
@@ -61,21 +81,37 @@ use super::{build_ui_pipeline, gui_vertices};
 
 use wgpu::util::DeviceExt;
 
-/// Picks the UI fragment entry point for a host target format. See the
-/// module docs' "Color space" section.
-fn fragment_entry_point_for(format: wgpu::TextureFormat) -> &'static str {
-    if format.is_srgb() {
-        "fs_ui_triangles"
-    } else {
-        "fs_ui_triangles_encode_srgb"
+/// How [`EmbeddedRenderer`] should treat the host's target format for color
+/// output. See the module docs' "Color space" section for why this must be
+/// declared explicitly rather than inferred from `wgpu::TextureFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedColorSpace {
+    /// The target auto-encodes sRGB on write, or is itself a linear store
+    /// (e.g. an `Rgba16Float` HDR intermediate) that expects already-linear
+    /// values with no encoding at all. Draws through `fs_ui_triangles`.
+    Linear,
+    /// The target is a plain non-sRGB UNORM format that stores
+    /// perceptually-encoded sRGB bytes directly, with no hardware transform
+    /// on write. Draws through `fs_ui_triangles_encode_srgb`.
+    EncodedUnorm,
+}
+
+impl EmbeddedColorSpace {
+    /// Picks the UI fragment entry point for this color space. See the
+    /// module docs' "Color space" section.
+    fn fragment_entry_point(self) -> &'static str {
+        match self {
+            EmbeddedColorSpace::Linear => "fs_ui_triangles",
+            EmbeddedColorSpace::EncodedUnorm => "fs_ui_triangles_encode_srgb",
+        }
     }
 }
 
 /// Host-owned GPU and frame entry point (#175). Owns only the UI render
 /// pipeline — no instance, no adapter, no device, no queue, no surface, no
-/// window. Built once against the host's borrowed device and target format;
-/// [`EmbeddedRenderer::render_into`] is then called once per frame, recording
-/// into the host's own encoder and view.
+/// window. Built once against the host's borrowed device, target format, and
+/// declared color space; [`EmbeddedRenderer::render_into`] is then called
+/// once per frame, recording into the host's own encoder and view.
 #[derive(Debug)]
 pub struct EmbeddedRenderer {
     ui_pipeline: wgpu::RenderPipeline,
@@ -83,20 +119,22 @@ pub struct EmbeddedRenderer {
 }
 
 impl EmbeddedRenderer {
-    /// Build the UI pipeline against the host's borrowed `device` and
+    /// Build the UI pipeline against the host's borrowed `device`,
     /// `target_format` — the format of the texture view the host will later
-    /// pass to [`render_into`](Self::render_into). Always single-sampled
-    /// (`sample_count = 1`): the embedded renderer has no owned MSAA
-    /// attachment to resolve into, matching how the host's own frame target
-    /// is whatever the host configured (ADR 0007's "borrowed, never owned"
-    /// discipline — see the module docs).
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        let ui_pipeline = build_ui_pipeline(
-            device,
-            target_format,
-            1,
-            fragment_entry_point_for(target_format),
-        );
+    /// pass to [`render_into`](Self::render_into) — and `color_space`, which
+    /// the host (not this renderer) decides; see the module docs' "Color
+    /// space" section for why `target_format` alone is not enough. Always
+    /// single-sampled (`sample_count = 1`): the embedded renderer has no
+    /// owned MSAA attachment to resolve into, matching how the host's own
+    /// frame target is whatever the host configured (ADR 0007's "borrowed,
+    /// never owned" discipline — see the module docs).
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        color_space: EmbeddedColorSpace,
+    ) -> Self {
+        let ui_pipeline =
+            build_ui_pipeline(device, target_format, 1, color_space.fragment_entry_point());
         Self {
             ui_pipeline,
             target_format,
@@ -177,25 +215,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fragment_entry_picks_pass_through_for_srgb_targets() {
+    fn linear_color_space_always_passes_through_regardless_of_format() {
+        // The regression this guards: the fragment entry point must be a
+        // function of the explicit `EmbeddedColorSpace`, never of
+        // `wgpu::TextureFormat::is_srgb()`. A linear float format like
+        // `Rgba16Float` is NOT sRGB, but a host declaring it `Linear` (the
+        // correct choice — see the module docs) must still get the
+        // pass-through entry point, not the encode one a format-based
+        // heuristic would have picked.
         assert_eq!(
-            fragment_entry_point_for(wgpu::TextureFormat::Bgra8UnormSrgb),
-            "fs_ui_triangles"
-        );
-        assert_eq!(
-            fragment_entry_point_for(wgpu::TextureFormat::Rgba8UnormSrgb),
+            EmbeddedColorSpace::Linear.fragment_entry_point(),
             "fs_ui_triangles"
         );
     }
 
     #[test]
-    fn fragment_entry_picks_encode_for_unorm_targets() {
+    fn encoded_unorm_color_space_always_applies_the_oetf() {
         assert_eq!(
-            fragment_entry_point_for(wgpu::TextureFormat::Bgra8Unorm),
-            "fs_ui_triangles_encode_srgb"
-        );
-        assert_eq!(
-            fragment_entry_point_for(wgpu::TextureFormat::Rgba8Unorm),
+            EmbeddedColorSpace::EncodedUnorm.fragment_entry_point(),
             "fs_ui_triangles_encode_srgb"
         );
     }
@@ -217,7 +254,7 @@ mod tests {
             .expect("ui_triangles.wgsl must pass naga validation");
     }
 
-    // ---- GPU acceptance test (#175): the host-embedding contract end to end.
+    // ---- GPU acceptance tests (#175): the host-embedding contract end to end.
     //
     // Reuses the #106 surfaceless offscreen harness to stand in for "the
     // host's device/queue/target" — `OffscreenRenderer` already exposes
@@ -226,7 +263,7 @@ mod tests {
     // only (no `slug` dependency — Phase 1 is the triangle lane).
     #[cfg(feature = "gpu-tests")]
     mod gpu {
-        use crate::render::embedded::EmbeddedRenderer;
+        use crate::render::embedded::{EmbeddedColorSpace, EmbeddedRenderer};
         use crate::render::offscreen::OffscreenRenderer;
         use crate::Scene;
         use mkui_text::BitmapTextSystem;
@@ -237,22 +274,29 @@ mod tests {
             )
         }
 
-        fn hud_scene(viewport: crate::Size) -> Scene {
-            let mut scene = Scene::new(viewport);
-            scene.push(crate::Primitive::Quad(crate::Quad {
-                rect: crate::Rect::new(
-                    crate::Point::new(0.0, 0.0),
-                    crate::Size::new(viewport.width, viewport.height),
-                ),
-                fill: crate::Color::rgba(0.0, 1.0, 0.0, 1.0),
-                corner_radii: crate::CornerRadii::all(0.0),
-                stroke: None,
-            }));
-            scene
+        /// Read the RGBA8 texel at `(x, y)` out of a tightly-packed
+        /// `read_rgba()` buffer of the given `width`.
+        fn pixel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
+            let idx = ((y * width + x) * 4) as usize;
+            [rgba[idx], rgba[idx + 1], rgba[idx + 2], rgba[idx + 3]]
+        }
+
+        fn assert_close(actual: [u8; 4], expected: [u8; 4], tolerance: u8, what: &str) {
+            for channel in 0..4 {
+                let diff = actual[channel].abs_diff(expected[channel]);
+                assert!(
+                    diff <= tolerance,
+                    "{what}: channel {channel} was {} (expected ~{}, tolerance {tolerance})",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
         }
 
         #[test]
-        fn render_into_preserves_host_content_outside_the_ui_and_draws_on_top() {
+        fn render_into_leaves_untouched_pixels_alone_and_alpha_blends_covered_ones() {
+            // `OffscreenRenderer::format()` is `Rgba8Unorm` — a plain non-sRGB
+            // UNORM store, so this is `EmbeddedColorSpace::EncodedUnorm`.
             let size = 64u32;
             let host = host(size, size);
 
@@ -270,15 +314,37 @@ mod tests {
                 "precondition: host content is the solid red clear"
             );
 
+            // A partial, translucent quad covering only the left half of the
+            // target — proves two things at once: pixels the quad never
+            // touches must survive `LoadOp::Load` byte-for-byte (the
+            // preservation contract), and pixels it does cover must show a
+            // real alpha-blended composite, not a full overwrite (the
+            // draw-on-top contract) — an opaque, full-viewport quad (the
+            // original version of this test) could not distinguish "loads
+            // then blends" from "clears then overwrites".
+            let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+            scene.push(crate::Primitive::Quad(crate::Quad {
+                rect: crate::Rect::new(
+                    crate::Point::new(0.0, 0.0),
+                    crate::Size::new(size as f32 / 2.0, size as f32),
+                ),
+                fill: crate::Color::rgba(0.0, 1.0, 0.0, 0.5),
+                corner_radii: crate::CornerRadii::all(0.0),
+                stroke: None,
+            }));
+
             // One encoder, one submission — the host's — carrying both the
             // (already-recorded) host content and mkui's UI pass.
-            let embedded = EmbeddedRenderer::new(host.device(), host.format());
+            let embedded = EmbeddedRenderer::new(
+                host.device(),
+                host.format(),
+                EmbeddedColorSpace::EncodedUnorm,
+            );
             let mut encoder =
                 host.device()
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("host+mkui embedded test encoder"),
                     });
-            let scene = hud_scene(crate::Size::new(size as f32, size as f32));
             embedded.render_into(
                 host.device(),
                 &mut encoder,
@@ -290,28 +356,42 @@ mod tests {
             host.queue().submit(Some(encoder.finish()));
 
             let after = host.read_rgba().expect("post-UI readback");
-            assert_ne!(
-                after, before,
-                "the UI pass must have changed pixels (LoadOp::Load, not a no-op)"
+
+            // Untouched: a pixel well inside the right (uncovered) half must
+            // be byte-identical to the host's pristine clear — `LoadOp::Load`
+            // preserved it, nothing re-cleared or overwrote it.
+            let untouched = pixel_at(&after, size, (size * 3) / 4, size / 2);
+            assert_eq!(
+                untouched,
+                [255, 0, 0, 255],
+                "a pixel outside the UI quad must survive untouched"
             );
-            // `OffscreenRenderer::format()` is `Rgba8Unorm` (non-sRGB), so
-            // `EmbeddedRenderer` draws through `fs_ui_triangles_encode_srgb`.
-            // A fully-covering opaque green(0,1,0,1) quad over the red clear
-            // replaces every texel with sRGB-encoded green.
-            assert!(
-                after.chunks_exact(4).all(|px| px == [0, 255, 0, 255]),
-                "a full-coverage opaque quad must fully replace the host's clear color"
+
+            // Blended: a pixel inside the covered (left) half must be the
+            // 50%-alpha "over" composite of the UI's green onto the host's
+            // red — half red, half green, full coverage alpha — not a flat
+            // overwrite and not the untouched red.
+            let covered = pixel_at(&after, size, size / 4, size / 2);
+            assert_close(
+                covered,
+                [128, 128, 0, 255],
+                2,
+                "blended pixel under the UI quad",
             );
         }
 
         #[test]
-        fn render_into_is_a_single_pass_no_op_on_an_empty_scene() {
+        fn render_into_leaves_content_untouched_on_an_empty_scene() {
             let size = 32u32;
             let host = host(size, size);
             host.clear(wgpu::Color::BLACK);
             let before = host.read_rgba().expect("baseline readback");
 
-            let embedded = EmbeddedRenderer::new(host.device(), host.format());
+            let embedded = EmbeddedRenderer::new(
+                host.device(),
+                host.format(),
+                EmbeddedColorSpace::EncodedUnorm,
+            );
             let mut encoder =
                 host.device()
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {

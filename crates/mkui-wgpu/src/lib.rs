@@ -50,10 +50,10 @@
 //!   staying a loose pile of scene helpers.
 //! - [`EmbeddedRenderer`] — the host-owned GPU and frame entry point (#175):
 //!   no instance / surface / window of its own, built from a borrowed
-//!   `wgpu::Device` + target format, drawing into the host's own command
-//!   encoder and texture view. Parallel to [`app`]/[`render::Renderer`]'s
-//!   winit-owned "standalone" shell, not a replacement for it — see
-//!   `docs/architecture/0012-host-owned-gpu-embedding.md`.
+//!   `wgpu::Device` + target format + an explicit [`EmbeddedColorSpace`],
+//!   drawing into the host's own command encoder and texture view. Parallel
+//!   to [`app`]/[`render::Renderer`]'s winit-owned "standalone" shell, not a
+//!   replacement for it — see `docs/architecture/0012-host-owned-gpu-embedding.md`.
 //! - [`prelude`]      — one-glob import for scene builders: builder, theme
 //!   variants, geometry. Target shape is `use mkui_wgpu::prelude::*;`
 //!   so scene-based hosts read like `mkui::prelude::*` consumers.
@@ -94,7 +94,7 @@ pub use bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable, WgpuRendererR
 pub use high_level::Mkui;
 pub use pointer::{hit_test, ClickHit, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
-pub use render::embedded::EmbeddedRenderer;
+pub use render::embedded::{EmbeddedColorSpace, EmbeddedRenderer};
 #[cfg(all(not(target_arch = "wasm32"), feature = "gpu-tests"))]
 pub use render::offscreen::{OffscreenError, OffscreenRenderer};
 #[cfg(not(target_arch = "wasm32"))]

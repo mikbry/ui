@@ -36,7 +36,10 @@ use winit::{
 };
 
 use mkui_text::BitmapTextSystem;
-use mkui_wgpu::{Color, CornerRadii, EmbeddedRenderer, Point, Primitive, Quad, Rect, Scene, Size};
+use mkui_wgpu::{
+    Color, CornerRadii, EmbeddedColorSpace, EmbeddedRenderer, Point, Primitive, Quad, Rect, Scene,
+    Size,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -360,8 +363,12 @@ impl Gpu {
 
         // The one borrow: mkui never sees the instance, the adapter, or the
         // surface above — only the device it already negotiated and the
-        // format it already picked for its own frame target (#175).
-        let embedded = EmbeddedRenderer::new(&device, format);
+        // format it already picked for its own frame target (#175). `format`
+        // was chosen above to prefer an sRGB surface format, so this host
+        // declares `Linear` explicitly — never infer this from `format`
+        // alone; see `EmbeddedColorSpace`'s docs for why a format-based
+        // heuristic is unsound for e.g. a linear HDR intermediate.
+        let embedded = EmbeddedRenderer::new(&device, format, EmbeddedColorSpace::Linear);
 
         Self {
             surface,
@@ -510,7 +517,6 @@ struct HostApp {
     hud_scene: Scene,
     text_system: BitmapTextSystem,
     start: Instant,
-    headless: bool,
 }
 
 impl HostApp {
@@ -521,19 +527,12 @@ impl HostApp {
             hud_scene: build_hud_scene(Size::new(960.0, 720.0)),
             text_system: BitmapTextSystem::new(),
             start: Instant::now(),
-            headless: std::env::var_os("HEADLESS").is_some(),
         }
     }
 }
 
 impl ApplicationHandler for HostApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // CI smoke (no display server): build the HUD scene, then exit
-        // before touching winit's window/surface machinery at all.
-        if self.headless {
-            event_loop.exit();
-            return;
-        }
         if self.window.is_some() {
             return;
         }
@@ -596,6 +595,16 @@ impl ApplicationHandler for HostApp {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // CI smoke (no display server): build the HUD scene once, then return
+    // *before* `EventLoop::new()` — not inside `resumed`. On a displayless
+    // Linux host (no X11, no Wayland) `EventLoop::new()` itself fails, so
+    // `resumed` never runs to reach a headless check placed there; the
+    // check has to happen before the event loop is constructed at all.
+    if std::env::var_os("HEADLESS").is_some() {
+        let _ = build_hud_scene(Size::new(960.0, 720.0));
+        return Ok(());
+    }
+
     let event_loop = EventLoop::new()?;
     let mut app = HostApp::new();
     event_loop.run_app(&mut app)?;
