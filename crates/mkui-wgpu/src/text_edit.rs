@@ -31,11 +31,11 @@
 //!
 //! 1. The selection anchor is `None` whenever it would coincide with the
 //!    caret, or whenever a composition is in progress (composing owns the
-//!    caret exclusively while it's active — see [`TextEditState::normalize`]).
+//!    caret exclusively while it's active — see `normalize`).
 //! 2. The composing range is always valid relative to the *current* `text`
 //!    — no method that changes `text`'s content mutates it without first
 //!    resolving any stale composing range (see
-//!    [`TextEditState::resolve_composing_before_edit`]).
+//!    `resolve_composing_before_edit`).
 //!
 //! An earlier version of this module maintained these ad hoc, at whichever
 //! call sites a review happened to catch; fixing one case (a collapsed
@@ -169,8 +169,8 @@ impl TextEditState {
 
     /// Delete the current selection, if any, collapsing the caret to its
     /// start. Returns the removed text. Never needs to call
-    /// [`Self::resolve_composing_before_edit`] itself: a selection can't
-    /// coexist with an in-progress composition ([`Self::normalize`]
+    /// `resolve_composing_before_edit` itself: a selection can't
+    /// coexist with an in-progress composition (`normalize`
     /// enforces that), so whenever this actually mutates `text`, composing
     /// is already `None`.
     fn delete_selection(&mut self) -> Option<String> {
@@ -231,7 +231,7 @@ impl TextEditState {
 
     /// The selected text, without mutating. `None` if there's no selection
     /// — always the case while composing, since a selection can't coexist
-    /// with an in-progress composition ([`Self::normalize`]). The
+    /// with an in-progress composition (`normalize` enforces that). The
     /// host-provided clipboard (#206) stores the result; this never
     /// touches an OS clipboard itself.
     pub fn copy(&self) -> Option<String> {
