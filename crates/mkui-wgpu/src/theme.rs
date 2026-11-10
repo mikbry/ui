@@ -231,6 +231,12 @@ pub struct InputStyle {
     pub corner_radius: f32,
     pub stroke_width: f32,
     pub padding: Insets,
+    /// Background of the selection highlight drawn behind selected text
+    /// (#185). Translucent so the text color remains legible on top.
+    pub selection_fill: Color,
+    /// Color of the caret bar and of the underline drawn beneath an
+    /// in-progress IME composition (#185).
+    pub caret_color: Color,
 }
 
 /// Concrete, resolved scrollbar look-and-feel. The caller supplies the
@@ -498,6 +504,8 @@ impl WgpuTheme {
                 corner_radius: self.tokens.spacing.radius_compact,
                 stroke_width: self.tokens.spacing.stroke_width_hairline,
                 padding: Insets::symmetric(6.0, 1.0),
+                selection_fill: self.tokens.primary.multiply_alpha(0.4),
+                caret_color: self.tokens.primary_ring,
             }
         } else {
             InputStyle {
@@ -507,6 +515,8 @@ impl WgpuTheme {
                 text_style: self.body_style(),
                 corner_radius: self.tokens.spacing.radius_compact,
                 stroke_width: self.tokens.spacing.stroke_width_hairline,
+                selection_fill: self.tokens.primary.multiply_alpha(0.4),
+                caret_color: self.tokens.primary_ring,
                 padding: Insets::symmetric(6.0, 1.0),
             }
         }
