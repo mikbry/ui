@@ -176,7 +176,7 @@ mod tests {
         Primitive::Text(Text {
             rect: Rect::new(Point::new(0.0, 0.0), Size::new(50.0, 10.0)),
             content: "hi".to_string(),
-            style: WgpuTheme::default().body_style,
+            style: WgpuTheme::default().body_style(),
         })
     }
 

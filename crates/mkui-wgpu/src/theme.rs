@@ -34,24 +34,37 @@ pub struct ShadowStyle {
     pub spread: f32,
 }
 
-/// Root theme for the wgpu UI backend. Holds panel / text baseline and a
-/// small palette of semantic tokens (`primary`, `muted`, `destructive`) that
-/// variant resolvers combine with size tokens into concrete widget styles.
+/// Root theme for the wgpu UI backend. A thin wrapper around [`ThemeTokens`]
+/// — `tokens` is the *only* stored state. `panel_compact` / `panel_style` /
+/// `title_style` / `body_style` / `button_style` / … are all methods that
+/// derive their result from `self.tokens` on every call, never a cached
+/// field, so swapping `self.tokens` (directly, or by assigning a whole new
+/// `WgpuTheme`) can never leave some other field stale (issue #205 Codex
+/// round 1 — an earlier revision cached `panel`/`title_style`/`body_style`
+/// as plain fields computed once in `Default::default()`, which went stale
+/// the moment a caller swapped only `tokens`).
 ///
 /// The defaults target a warm editorial control-surface look; a future
-/// light-mode or per-product palette swap would only need to replace this
-/// struct.
+/// light-mode or per-product palette swap only needs a different
+/// `ThemeTokens` value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WgpuTheme {
-    pub panel: PanelStyle,
-    pub title_style: TextStyle,
-    pub body_style: TextStyle,
     pub tokens: ThemeTokens,
 }
 
 /// Semantic color + geometry tokens that variant resolvers consume. Mirrors
 /// the shadcn CSS variable palette (`--primary`, `--muted`, `--ring`, …) in
 /// struct form — no utility-string parsing, no runtime theming layer yet.
+///
+/// Every color or spacing value a `WgpuTheme` resolver method
+/// (`button_style`, `badge_style`, `panel_style`, …) hands a widget comes
+/// from one of this struct's fields — never an inline literal — so a host
+/// can swap the active palette by constructing a different `ThemeTokens`
+/// and handing it to [`WgpuTheme`] (see issue #205). The only values a
+/// resolver may still reach for outside `self.tokens` are
+/// [`Color::TRANSPARENT`] (the "no paint" sentinel, not a themed value)
+/// and widget-intrinsic size-ladder numbers (e.g. [`DotSize::diameter`])
+/// that are a function of the size enum, not the palette.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThemeTokens {
     pub primary: Color,
@@ -72,7 +85,53 @@ pub struct ThemeTokens {
     pub warning_foreground: Color,
     pub card_fill: Color,
     pub card_border: Color,
+    /// Base tone for body copy; `Body`/`Muted`/`Caption` text variants are
+    /// this color at different alpha.
+    pub body_foreground: Color,
+    /// `ButtonVariant::Default`'s idle fill/label — distinct enough from
+    /// `card_fill` / `muted_foreground` to warrant its own tokens rather
+    /// than a derived alpha.
+    pub button_default_idle_fill: Color,
+    pub button_default_idle_label: Color,
+    pub button_secondary_idle_fill: Color,
+    pub button_ghost_idle_fill: Color,
+    pub button_ghost_active_fill: Color,
+    /// Dark caption color painted on top of an active/primary fill.
+    pub caption_on_primary: Color,
+    /// Brighter fill used by a selected [`CardStyle`] and an active
+    /// [`InputStyle`] — an "elevated surface" tone.
+    pub card_selected_fill: Color,
+    pub input_active_fill: Color,
+    /// Recessed-surface tone shared by the slider track and an idle
+    /// (unfocused) text input.
+    pub surface_sunken: Color,
+    pub scrollbar_track: Color,
+    pub swatch_stroke: Color,
     pub shadow: ShadowStyle,
+    /// Named geometry scale (corner radii, hairline stroke width, panel
+    /// padding) — the "spacing" half of issue #205's color-and-spacing
+    /// token set.
+    pub spacing: SpacingTokens,
+}
+
+/// Named geometry scale consumed by [`WgpuTheme`]'s resolver methods in
+/// place of inline corner-radius / stroke-width / padding literals. Values
+/// mirror a small Tailwind-style scale (`rounded-sm` .. `rounded-2xl`)
+/// rather than one bespoke number per widget, so most widgets share one of
+/// a handful of named radii.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpacingTokens {
+    /// Hairline border/stroke width used by nearly every stroked widget.
+    pub stroke_width_hairline: f32,
+    pub radius_tight: f32,
+    pub radius_compact: f32,
+    pub radius_card: f32,
+    pub radius_relaxed: f32,
+    pub radius_swatch: f32,
+    pub radius_panel: f32,
+    pub padding_panel: f32,
+    pub radius_panel_roomy: f32,
+    pub padding_panel_roomy: f32,
 }
 
 /// Two-state marker for interactive widgets. `Active` means "currently
@@ -279,7 +338,18 @@ pub struct DotStyle {
 
 impl Default for WgpuTheme {
     fn default() -> Self {
-        let font = FontFaceId(0);
+        let spacing = SpacingTokens {
+            stroke_width_hairline: 1.0,
+            radius_tight: 4.0,
+            radius_compact: 6.0,
+            radius_card: 8.0,
+            radius_relaxed: 10.0,
+            radius_swatch: 3.0,
+            radius_panel: 14.0,
+            padding_panel: 14.0,
+            radius_panel_roomy: 16.0,
+            padding_panel_roomy: 16.0,
+        };
         let tokens = ThemeTokens {
             primary: Color::rgba(0.94, 0.79, 0.48, 0.92),
             primary_foreground: Color::rgba(0.12, 0.09, 0.06, 1.0),
@@ -299,43 +369,71 @@ impl Default for WgpuTheme {
             warning_foreground: Color::rgba(0.20, 0.13, 0.04, 1.0),
             card_fill: Color::rgba(0.12, 0.10, 0.09, 0.92),
             card_border: Color::rgba(0.96, 0.93, 0.88, 0.08),
+            body_foreground: Color::rgba(0.92, 0.88, 0.82, 1.0),
+            button_default_idle_fill: Color::rgba(0.14, 0.12, 0.11, 0.92),
+            button_default_idle_label: Color::rgba(0.98, 0.94, 0.88, 0.96),
+            button_secondary_idle_fill: Color::rgba(0.18, 0.15, 0.12, 0.95),
+            button_ghost_idle_fill: Color::rgba(0.20, 0.16, 0.12, 0.96),
+            button_ghost_active_fill: Color::rgba(0.28, 0.22, 0.16, 0.96),
+            caption_on_primary: Color::rgba(0.16, 0.10, 0.04, 1.0),
+            card_selected_fill: Color::rgba(0.22, 0.18, 0.13, 0.96),
+            input_active_fill: Color::rgba(0.22, 0.18, 0.12, 0.98),
+            surface_sunken: Color::rgba(0.08, 0.06, 0.05, 0.96),
+            scrollbar_track: Color::rgba(0.04, 0.03, 0.02, 0.55),
+            swatch_stroke: Color::rgba(0.0, 0.0, 0.0, 0.35),
             shadow: ShadowStyle {
                 color: Color::rgba(0.0, 0.0, 0.0, 0.38),
                 blur_radius: 24.0,
                 spread: 0.0,
             },
+            spacing,
         };
-        Self {
-            panel: PanelStyle {
-                fill: tokens.surface,
-                stroke: Stroke {
-                    color: tokens.border,
-                    width: 1.0,
-                },
-                shadow: tokens.shadow,
-                corner_radius: 14.0,
-                padding: Insets::all(14.0),
-            },
-            title_style: TextStyle {
-                font,
-                font_size_px: 15.0,
-                line_height_px: 20.0,
-                color: tokens.surface_foreground,
-                align: TextAlign::Start,
-            },
-            body_style: TextStyle {
-                font,
-                font_size_px: 13.0,
-                line_height_px: 18.0,
-                color: Color::rgba(0.92, 0.88, 0.82, 0.92),
-                align: TextAlign::Start,
-            },
-            tokens,
-        }
+        Self { tokens }
     }
 }
 
 impl WgpuTheme {
+    /// Compact panel chrome (`radius_panel` / `padding_panel` — 14px by
+    /// default): the baseline used by `info_list` / `titled_panel` call
+    /// sites that want a tighter chrome than [`Self::panel_style`]'s
+    /// roomier 16px preset. Both derive live from `self.tokens`.
+    pub fn panel_compact(&self) -> PanelStyle {
+        PanelStyle {
+            fill: self.tokens.surface,
+            stroke: Stroke {
+                color: self.tokens.border,
+                width: self.tokens.spacing.stroke_width_hairline,
+            },
+            shadow: self.tokens.shadow,
+            corner_radius: self.tokens.spacing.radius_panel,
+            padding: Insets::all(self.tokens.spacing.padding_panel),
+        }
+    }
+
+    /// Heading-ladder text style (used as the panel title). Derives live
+    /// from `self.tokens` — see the [`WgpuTheme`] doc comment.
+    pub fn title_style(&self) -> TextStyle {
+        TextStyle {
+            font: FontFaceId(0),
+            font_size_px: 15.0,
+            line_height_px: 20.0,
+            color: self.tokens.surface_foreground,
+            align: TextAlign::Start,
+        }
+    }
+
+    /// Default paragraph body text style. Derives live from `self.tokens`
+    /// — see the [`WgpuTheme`] doc comment.
+    pub fn body_style(&self) -> TextStyle {
+        TextStyle {
+            font: FontFaceId(0),
+            font_size_px: 13.0,
+            line_height_px: 18.0,
+            color: self.tokens.body_foreground.with_alpha(0.92),
+            align: TextAlign::Start,
+        }
+    }
+
     /// Baseline panel chrome (inspector, explorer, hint bar, toolbar, and
     /// other surface containers). Callers override padding / corner_radius as
     /// needed.
@@ -344,11 +442,11 @@ impl WgpuTheme {
             fill: self.tokens.surface,
             stroke: Stroke {
                 color: self.tokens.border,
-                width: 1.0,
+                width: self.tokens.spacing.stroke_width_hairline,
             },
             shadow: self.tokens.shadow,
-            corner_radius: 16.0,
-            padding: Insets::all(16.0),
+            corner_radius: self.tokens.spacing.radius_panel_roomy,
+            padding: Insets::all(self.tokens.spacing.padding_panel_roomy),
         }
     }
 
@@ -358,8 +456,8 @@ impl WgpuTheme {
         CardStyle {
             fill: self.tokens.card_fill,
             stroke: self.tokens.card_border,
-            stroke_width: 1.0,
-            corner_radius: 8.0,
+            stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_card,
         }
     }
 
@@ -367,21 +465,21 @@ impl WgpuTheme {
     /// row reads as picked.
     pub fn card_selected(&self) -> CardStyle {
         CardStyle {
-            fill: Color::rgba(0.22, 0.18, 0.13, 0.96),
+            fill: self.tokens.card_selected_fill,
             stroke: self.tokens.border.multiply_alpha(3.4),
-            stroke_width: 1.0,
-            corner_radius: 8.0,
+            stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_card,
         }
     }
 
     /// Default slider look. A "primary"-tinted fill bar on a dark track.
     pub fn slider(&self) -> SliderStyle {
         SliderStyle {
-            track_fill: Color::rgba(0.08, 0.06, 0.05, 0.96),
-            track_stroke: Color::rgba(0.96, 0.93, 0.88, 0.18),
-            track_stroke_width: 1.0,
-            track_corner_radius: 4.0,
-            filled_fill: Color::rgba(0.94, 0.79, 0.48, 0.88),
+            track_fill: self.tokens.surface_sunken,
+            track_stroke: self.tokens.border.with_alpha(0.18),
+            track_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            track_corner_radius: self.tokens.spacing.radius_tight,
+            filled_fill: self.tokens.primary.with_alpha(0.88),
             thumb_fill: self.tokens.primary_ring,
             thumb_stroke: self.tokens.surface,
             thumb_diameter: 14.0,
@@ -393,22 +491,22 @@ impl WgpuTheme {
     pub fn input(&self, active: bool) -> InputStyle {
         if active {
             InputStyle {
-                fill: Color::rgba(0.22, 0.18, 0.12, 0.98),
+                fill: self.tokens.input_active_fill,
                 stroke: self.tokens.primary,
-                text_color: Color::rgba(0.99, 0.95, 0.88, 1.0),
-                text_style: self.body_style,
-                corner_radius: 6.0,
-                stroke_width: 1.0,
+                text_color: self.tokens.muted_foreground.with_alpha(1.0),
+                text_style: self.body_style(),
+                corner_radius: self.tokens.spacing.radius_compact,
+                stroke_width: self.tokens.spacing.stroke_width_hairline,
                 padding: Insets::symmetric(6.0, 1.0),
             }
         } else {
             InputStyle {
-                fill: Color::rgba(0.08, 0.06, 0.05, 0.96),
-                stroke: Color::rgba(0.96, 0.93, 0.88, 0.22),
-                text_color: Color::rgba(0.99, 0.95, 0.88, 1.0),
-                text_style: self.body_style,
-                corner_radius: 6.0,
-                stroke_width: 1.0,
+                fill: self.tokens.surface_sunken,
+                stroke: self.tokens.border.with_alpha(0.22),
+                text_color: self.tokens.muted_foreground.with_alpha(1.0),
+                text_style: self.body_style(),
+                corner_radius: self.tokens.spacing.radius_compact,
+                stroke_width: self.tokens.spacing.stroke_width_hairline,
                 padding: Insets::symmetric(6.0, 1.0),
             }
         }
@@ -417,17 +515,17 @@ impl WgpuTheme {
     /// Default scrollbar look. Pill thumb on a faint channel.
     pub fn scrollbar(&self) -> ScrollbarStyle {
         ScrollbarStyle {
-            track_fill: Color::rgba(0.04, 0.03, 0.02, 0.55),
-            thumb_fill: Color::rgba(0.96, 0.93, 0.88, 0.55),
+            track_fill: self.tokens.scrollbar_track,
+            thumb_fill: self.tokens.border.with_alpha(0.55),
         }
     }
 
     /// Default swatch chrome.
     pub fn swatch(&self) -> SwatchStyle {
         SwatchStyle {
-            stroke: Color::rgba(0.0, 0.0, 0.0, 0.35),
-            stroke_width: 1.0,
-            corner_radius: 3.0,
+            stroke: self.tokens.swatch_stroke,
+            stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_swatch,
         }
     }
 
@@ -435,11 +533,24 @@ impl WgpuTheme {
     /// are combined cva-style: the variant picks the color palette, the size
     /// picks corner radius / stroke width / label text style.
     pub fn button_style(&self, variant: ButtonVariant, size: ButtonSize) -> ButtonStyle {
+        let hairline = self.tokens.spacing.stroke_width_hairline;
         let (corner_radius, stroke_width, label_size) = match size {
-            ButtonSize::Default => (8.0, 1.0, self.body_style),
-            ButtonSize::Sm => (6.0, 1.0, self.body_style),
-            ButtonSize::Lg => (10.0, 1.0, self.body_style),
-            ButtonSize::Icon => (4.0, 1.0, self.body_style),
+            ButtonSize::Default => (self.tokens.spacing.radius_card, hairline, self.body_style()),
+            ButtonSize::Sm => (
+                self.tokens.spacing.radius_compact,
+                hairline,
+                self.body_style(),
+            ),
+            ButtonSize::Lg => (
+                self.tokens.spacing.radius_relaxed,
+                hairline,
+                self.body_style(),
+            ),
+            ButtonSize::Icon => (
+                self.tokens.spacing.radius_tight,
+                hairline,
+                self.body_style(),
+            ),
         };
         let label_style = TextStyle {
             align: TextAlign::Center,
@@ -448,9 +559,9 @@ impl WgpuTheme {
 
         match variant {
             ButtonVariant::Default => ButtonStyle {
-                idle_fill: Color::rgba(0.14, 0.12, 0.11, 0.92),
-                idle_stroke: Color::rgba(0.96, 0.93, 0.88, 0.14),
-                idle_label: Color::rgba(0.98, 0.94, 0.88, 0.96),
+                idle_fill: self.tokens.button_default_idle_fill,
+                idle_stroke: self.tokens.border.with_alpha(0.14),
+                idle_label: self.tokens.button_default_idle_label,
                 active_fill: self.tokens.primary,
                 active_stroke: self.tokens.primary_ring,
                 active_label: self.tokens.primary_foreground,
@@ -471,31 +582,31 @@ impl WgpuTheme {
             },
             ButtonVariant::Outline => ButtonStyle {
                 idle_fill: self.tokens.muted,
-                idle_stroke: Color::rgba(0.96, 0.93, 0.88, 0.22),
+                idle_stroke: self.tokens.border.with_alpha(0.22),
                 idle_label: self.tokens.muted_foreground,
                 active_fill: self.tokens.primary.multiply_alpha(0.96),
                 active_stroke: self.tokens.surface,
                 active_label: self.tokens.primary_foreground,
-                corner_radius: corner_radius.max(10.0),
+                corner_radius: corner_radius.max(self.tokens.spacing.radius_relaxed),
                 stroke_width,
                 label_style,
             },
             ButtonVariant::Secondary => ButtonStyle {
-                idle_fill: Color::rgba(0.18, 0.15, 0.12, 0.95),
-                idle_stroke: Color::rgba(0.96, 0.93, 0.88, 0.24),
+                idle_fill: self.tokens.button_secondary_idle_fill,
+                idle_stroke: self.tokens.border.with_alpha(0.24),
                 idle_label: self.tokens.surface_foreground,
                 active_fill: self.tokens.primary,
                 active_stroke: self.tokens.primary_ring,
                 active_label: self.tokens.primary_foreground,
-                corner_radius: corner_radius.max(6.0),
+                corner_radius: corner_radius.max(self.tokens.spacing.radius_compact),
                 stroke_width,
                 label_style,
             },
             ButtonVariant::Ghost => ButtonStyle {
-                idle_fill: Color::rgba(0.20, 0.16, 0.12, 0.96),
-                idle_stroke: Color::rgba(0.96, 0.93, 0.88, 0.22),
-                idle_label: Color::rgba(0.99, 0.95, 0.88, 1.0),
-                active_fill: Color::rgba(0.28, 0.22, 0.16, 0.96),
+                idle_fill: self.tokens.button_ghost_idle_fill,
+                idle_stroke: self.tokens.border.with_alpha(0.22),
+                idle_label: self.tokens.muted_foreground.with_alpha(1.0),
+                active_fill: self.tokens.button_ghost_active_fill,
                 active_stroke: self.tokens.primary_ring,
                 // Ghost keeps a dark active fill, so the label must stay on
                 // a light token — `surface` would collapse to dark-on-dark
@@ -506,11 +617,11 @@ impl WgpuTheme {
                 label_style,
             },
             ButtonVariant::Link => ButtonStyle {
-                idle_fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                idle_stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                idle_fill: Color::TRANSPARENT,
+                idle_stroke: Color::TRANSPARENT,
                 idle_label: self.tokens.primary,
-                active_fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                active_stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                active_fill: Color::TRANSPARENT,
+                active_stroke: Color::TRANSPARENT,
                 active_label: self.tokens.primary_ring,
                 corner_radius: 0.0,
                 stroke_width: 0.0,
@@ -525,21 +636,21 @@ impl WgpuTheme {
     pub fn badge_style(&self, variant: BadgeVariant, size: BadgeSize) -> BadgeStyle {
         let (corner_radius, padding, label_text) = match size {
             BadgeSize::Default => (
-                6.0,
+                self.tokens.spacing.radius_compact,
                 Insets::symmetric(8.0, 2.0),
                 TextStyle {
                     align: TextAlign::Center,
-                    ..self.body_style
+                    ..self.body_style()
                 },
             ),
             BadgeSize::Sm => (
-                4.0,
+                self.tokens.spacing.radius_tight,
                 Insets::symmetric(6.0, 1.0),
                 TextStyle {
                     font_size_px: 10.0,
                     line_height_px: 12.0,
                     align: TextAlign::Center,
-                    ..self.body_style
+                    ..self.body_style()
                 },
             ),
         };
@@ -547,7 +658,7 @@ impl WgpuTheme {
         match variant {
             BadgeVariant::Default => BadgeStyle {
                 fill: self.tokens.primary,
-                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: Color::TRANSPARENT,
                 stroke_width: 0.0,
                 label_color: self.tokens.primary_foreground,
                 corner_radius,
@@ -556,7 +667,7 @@ impl WgpuTheme {
             },
             BadgeVariant::Destructive => BadgeStyle {
                 fill: self.tokens.destructive,
-                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: Color::TRANSPARENT,
                 stroke_width: 0.0,
                 label_color: self.tokens.destructive_foreground,
                 corner_radius,
@@ -564,9 +675,9 @@ impl WgpuTheme {
                 label_style: label_text,
             },
             BadgeVariant::Outline => BadgeStyle {
-                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                fill: Color::TRANSPARENT,
                 stroke: self.tokens.border,
-                stroke_width: 1.0,
+                stroke_width: self.tokens.spacing.stroke_width_hairline,
                 label_color: self.tokens.muted_foreground,
                 corner_radius,
                 padding,
@@ -574,7 +685,7 @@ impl WgpuTheme {
             },
             BadgeVariant::Secondary => BadgeStyle {
                 fill: self.tokens.secondary,
-                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                stroke: Color::TRANSPARENT,
                 stroke_width: 0.0,
                 label_color: self.tokens.secondary_foreground,
                 corner_radius,
@@ -582,8 +693,8 @@ impl WgpuTheme {
                 label_style: label_text,
             },
             BadgeVariant::Ghost => BadgeStyle {
-                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                fill: Color::TRANSPARENT,
+                stroke: Color::TRANSPARENT,
                 stroke_width: 0.0,
                 label_color: self.tokens.muted_foreground,
                 corner_radius,
@@ -594,8 +705,8 @@ impl WgpuTheme {
             // current bitmap fallback in `tessellation.rs` has no underline
             // primitive). Colours + structure match shadcn's Button Link.
             BadgeVariant::Link => BadgeStyle {
-                fill: Color::rgba(0.0, 0.0, 0.0, 0.0),
-                stroke: Color::rgba(0.0, 0.0, 0.0, 0.0),
+                fill: Color::TRANSPARENT,
+                stroke: Color::TRANSPARENT,
                 stroke_width: 0.0,
                 label_color: self.tokens.primary,
                 corner_radius: 0.0,
@@ -625,22 +736,22 @@ impl WgpuTheme {
     /// Resolve a semantic [`TextVariant`] to a concrete [`TextStyle`].
     pub fn text_style(&self, variant: TextVariant) -> TextStyle {
         match variant {
-            TextVariant::Heading => self.title_style,
+            TextVariant::Heading => self.title_style(),
             TextVariant::Subheading => TextStyle {
                 color: self.tokens.primary_ring,
-                ..self.title_style
+                ..self.title_style()
             },
-            TextVariant::Body => self.body_style,
+            TextVariant::Body => self.body_style(),
             TextVariant::Muted => TextStyle {
-                color: Color::rgba(0.92, 0.88, 0.82, 0.72),
-                ..self.body_style
+                color: self.tokens.body_foreground.with_alpha(0.72),
+                ..self.body_style()
             },
             TextVariant::Caption => TextStyle {
-                color: Color::rgba(0.92, 0.88, 0.82, 0.65),
+                color: self.tokens.body_foreground.with_alpha(0.65),
                 font_size_px: 10.0,
                 line_height_px: 12.0,
                 align: TextAlign::End,
-                ..self.body_style
+                ..self.body_style()
             },
         }
     }
@@ -652,7 +763,7 @@ impl WgpuTheme {
         let base = self.text_style(variant);
         match variant {
             TextVariant::Caption => TextStyle {
-                color: Color::rgba(0.16, 0.10, 0.04, 0.85),
+                color: self.tokens.caption_on_primary.with_alpha(0.85),
                 ..base
             },
             _ => TextStyle {
@@ -729,5 +840,208 @@ mod tests {
                 "{variant:?}: active label luma {label_luma:.3} too close to fill luma {fill_luma:.3}"
             );
         }
+    }
+
+    /// A second, fully distinct token set — every color and every spacing
+    /// value differs from [`WgpuTheme::default`]. Lives only in this test
+    /// module: issue #205 asks for the swap *mechanism*, not a second
+    /// built-in palette, so this "neon" set is never exposed as public API.
+    fn alt_theme() -> WgpuTheme {
+        let spacing = SpacingTokens {
+            stroke_width_hairline: 2.0,
+            radius_tight: 1.0,
+            radius_compact: 2.0,
+            radius_card: 3.0,
+            radius_relaxed: 5.0,
+            radius_swatch: 1.0,
+            radius_panel: 7.0,
+            padding_panel: 9.0,
+            radius_panel_roomy: 11.0,
+            padding_panel_roomy: 13.0,
+        };
+        let tokens = ThemeTokens {
+            primary: Color::rgba(0.10, 0.50, 0.90, 1.0),
+            primary_foreground: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            primary_ring: Color::rgba(0.20, 0.60, 1.0, 1.0),
+            muted: Color::rgba(0.85, 0.85, 0.90, 1.0),
+            muted_foreground: Color::rgba(0.10, 0.10, 0.15, 1.0),
+            surface: Color::rgba(0.95, 0.95, 0.98, 1.0),
+            surface_foreground: Color::rgba(0.05, 0.05, 0.08, 1.0),
+            border: Color::rgba(0.60, 0.60, 0.65, 1.0),
+            destructive: Color::rgba(0.95, 0.10, 0.10, 1.0),
+            destructive_foreground: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            secondary: Color::rgba(0.80, 0.80, 0.85, 1.0),
+            secondary_foreground: Color::rgba(0.05, 0.05, 0.10, 1.0),
+            success: Color::rgba(0.10, 0.80, 0.30, 1.0),
+            success_foreground: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            warning: Color::rgba(0.95, 0.60, 0.05, 1.0),
+            warning_foreground: Color::rgba(0.0, 0.0, 0.0, 1.0),
+            card_fill: Color::rgba(0.90, 0.92, 0.97, 1.0),
+            card_border: Color::rgba(0.55, 0.55, 0.60, 1.0),
+            body_foreground: Color::rgba(0.15, 0.15, 0.20, 1.0),
+            button_default_idle_fill: Color::rgba(0.70, 0.75, 0.90, 1.0),
+            button_default_idle_label: Color::rgba(0.02, 0.02, 0.05, 1.0),
+            button_secondary_idle_fill: Color::rgba(0.65, 0.68, 0.80, 1.0),
+            button_ghost_idle_fill: Color::rgba(0.88, 0.90, 0.95, 1.0),
+            button_ghost_active_fill: Color::rgba(0.55, 0.60, 0.80, 1.0),
+            caption_on_primary: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            card_selected_fill: Color::rgba(0.75, 0.80, 0.95, 1.0),
+            input_active_fill: Color::rgba(0.85, 0.88, 0.98, 1.0),
+            surface_sunken: Color::rgba(0.80, 0.82, 0.90, 1.0),
+            scrollbar_track: Color::rgba(0.75, 0.75, 0.80, 1.0),
+            swatch_stroke: Color::rgba(0.30, 0.30, 0.35, 1.0),
+            shadow: ShadowStyle {
+                color: Color::rgba(0.20, 0.20, 0.30, 0.50),
+                blur_radius: 6.0,
+                spread: 2.0,
+            },
+            spacing,
+        };
+        WgpuTheme { tokens }
+    }
+
+    /// Acceptance criterion #205.2: swapping the active `ThemeTokens` must
+    /// change every resolver's output with no code change at the call
+    /// site — the same `button_style`/`badge_style`/… functions, called
+    /// with a different `WgpuTheme`, must paint differently.
+    #[test]
+    fn swapping_token_set_changes_every_resolver_output() {
+        let default_theme = WgpuTheme::default();
+        let swapped = alt_theme();
+        assert_ne!(
+            default_theme, swapped,
+            "the two token sets must actually differ"
+        );
+
+        assert_ne!(default_theme.panel_style(), swapped.panel_style());
+        assert_ne!(default_theme.panel_compact(), swapped.panel_compact());
+        assert_ne!(default_theme.title_style(), swapped.title_style());
+        assert_ne!(default_theme.body_style(), swapped.body_style());
+        assert_ne!(default_theme.card(), swapped.card());
+        assert_ne!(default_theme.card_selected(), swapped.card_selected());
+        assert_ne!(default_theme.slider(), swapped.slider());
+        assert_ne!(default_theme.input(true), swapped.input(true));
+        assert_ne!(default_theme.input(false), swapped.input(false));
+        assert_ne!(default_theme.scrollbar(), swapped.scrollbar());
+        assert_ne!(default_theme.swatch(), swapped.swatch());
+
+        for variant in [
+            ButtonVariant::Default,
+            ButtonVariant::Destructive,
+            ButtonVariant::Outline,
+            ButtonVariant::Secondary,
+            ButtonVariant::Ghost,
+            ButtonVariant::Link,
+        ] {
+            for size in [
+                ButtonSize::Default,
+                ButtonSize::Sm,
+                ButtonSize::Lg,
+                ButtonSize::Icon,
+            ] {
+                assert_ne!(
+                    default_theme.button_style(variant, size),
+                    swapped.button_style(variant, size),
+                    "button_style({variant:?}, {size:?}) did not change on swap"
+                );
+            }
+        }
+
+        for variant in [
+            BadgeVariant::Default,
+            BadgeVariant::Destructive,
+            BadgeVariant::Outline,
+            BadgeVariant::Secondary,
+            BadgeVariant::Ghost,
+            BadgeVariant::Link,
+        ] {
+            for size in [BadgeSize::Default, BadgeSize::Sm] {
+                assert_ne!(
+                    default_theme.badge_style(variant, size),
+                    swapped.badge_style(variant, size),
+                    "badge_style({variant:?}, {size:?}) did not change on swap"
+                );
+            }
+        }
+
+        for variant in [
+            DotVariant::Ok,
+            DotVariant::Warn,
+            DotVariant::Danger,
+            DotVariant::Neutral,
+        ] {
+            for size in [DotSize::Sm, DotSize::Md] {
+                assert_ne!(
+                    default_theme.dot_style(variant, size),
+                    swapped.dot_style(variant, size),
+                    "dot_style({variant:?}, {size:?}) did not change on swap"
+                );
+            }
+        }
+
+        for variant in [
+            TextVariant::Heading,
+            TextVariant::Subheading,
+            TextVariant::Body,
+            TextVariant::Muted,
+            TextVariant::Caption,
+        ] {
+            assert_ne!(
+                default_theme.text_style(variant),
+                swapped.text_style(variant),
+                "text_style({variant:?}) did not change on swap"
+            );
+            assert_ne!(
+                default_theme.text_style_active(variant),
+                swapped.text_style_active(variant),
+                "text_style_active({variant:?}) did not change on swap"
+            );
+        }
+    }
+
+    /// Regression (Codex round 1 on #205/PR #238): an earlier revision
+    /// cached `panel` / `title_style` / `body_style` as plain `WgpuTheme`
+    /// fields, computed once in `Default::default()`. Mutating only
+    /// `theme.tokens` — the obvious way to "swap just the colors/spacing"
+    /// — left those three stale, because nothing re-derived them. Unlike
+    /// `swapping_token_set_changes_every_resolver_output` above (which
+    /// swaps in a whole second `WgpuTheme` built the same way `Default`
+    /// builds one), this test mutates `tokens` *in place* on a single
+    /// theme, exactly as the review reproduced it, and must see every
+    /// dependent style change.
+    #[test]
+    fn mutating_only_tokens_keeps_derived_styles_in_sync() {
+        let mut theme = WgpuTheme::default();
+        let before_body_color = theme.body_style().color;
+        let before_title_color = theme.title_style().color;
+        let before_panel_padding = theme.panel_compact().padding;
+
+        theme.tokens.body_foreground = Color::rgba(0.0, 1.0, 0.0, 1.0);
+        theme.tokens.surface_foreground = Color::rgba(1.0, 0.0, 1.0, 1.0);
+        theme.tokens.spacing.padding_panel = 42.0;
+
+        assert_ne!(
+            theme.body_style().color,
+            before_body_color,
+            "body_style() must re-derive from the mutated body_foreground token"
+        );
+        assert_eq!(
+            theme.body_style().color,
+            theme.tokens.body_foreground.with_alpha(0.92)
+        );
+
+        assert_ne!(
+            theme.title_style().color,
+            before_title_color,
+            "title_style() must re-derive from the mutated surface_foreground token"
+        );
+        assert_eq!(theme.title_style().color, theme.tokens.surface_foreground);
+
+        assert_ne!(
+            theme.panel_compact().padding,
+            before_panel_padding,
+            "panel_compact() must re-derive from the mutated spacing.padding_panel token"
+        );
+        assert_eq!(theme.panel_compact().padding, Insets::all(42.0));
     }
 }

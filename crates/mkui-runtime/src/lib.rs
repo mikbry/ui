@@ -46,5 +46,5 @@ pub mod snapshot;
 
 pub use actions::{ActionId, ActionRegistry, LocalAction, RuntimeCtx, RuntimeSignal};
 pub use props::{ButtonVariant, ButtonVariantParseError, TextVariant, TextVariantParseError};
-pub use style::{ClassParseError, ResolvedStyle, StyleClass};
+pub use style::{ClassParseError, ColorRole, ResolvedStyle, StyleClass};
 pub use tree::{AppTree, ButtonProps, Node, NodeId, NodeKind, TextProps, ViewProps};
