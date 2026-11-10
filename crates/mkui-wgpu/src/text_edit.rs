@@ -24,6 +24,28 @@
 //! (`crate::components::text_field::text_field_editable`) pending #182's
 //! glyph-measurement API — that's a rendering-layer approximation the
 //! logical model here doesn't need to know about.
+//!
+//! ## Invariants
+//!
+//! Two invariants hold after every mutating method returns:
+//!
+//! 1. The selection anchor is `None` whenever it would coincide with the
+//!    caret, or whenever a composition is in progress (composing owns the
+//!    caret exclusively while it's active — see [`TextEditState::normalize`]).
+//! 2. The composing range is always valid relative to the *current* `text`
+//!    — no method that changes `text`'s content mutates it without first
+//!    resolving any stale composing range (see
+//!    [`TextEditState::resolve_composing_before_edit`]).
+//!
+//! An earlier version of this module maintained these ad hoc, at whichever
+//! call sites a review happened to catch; fixing one case (a collapsed
+//! selection) left another (an active composition) unguarded, because
+//! nothing forced every mutating method to maintain both. Every mutating
+//! method now ends by calling `normalize()`, and every method that edits
+//! `text` directly (outside the composing lifecycle itself) starts by
+//! calling `resolve_composing_before_edit()` — so a new mutating method
+//! added later only has to remember "call these," not re-derive the
+//! invariants from scratch.
 
 /// Cursor/selection/composition state for a single-line editable text field.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -92,13 +114,7 @@ impl TextEditState {
             self.anchor = None;
         }
         self.caret = pos;
-        // A shift+arrow move back to the anchor must drop the anchor, not
-        // just leave it coincident with the caret — otherwise it resurfaces
-        // as a selection (with stale byte offsets) once a later edit moves
-        // the caret away again. See the #228 review regression tests.
-        if self.anchor == Some(self.caret) {
-            self.anchor = None;
-        }
+        self.normalize();
     }
 
     /// Move the caret one char left. A plain (non-extending) move with an
@@ -109,6 +125,7 @@ impl TextEditState {
             if let Some((start, _)) = self.selection() {
                 self.anchor = None;
                 self.caret = start;
+                self.normalize();
                 return;
             }
         }
@@ -123,6 +140,7 @@ impl TextEditState {
             if let Some((_, end)) = self.selection() {
                 self.anchor = None;
                 self.caret = end;
+                self.normalize();
                 return;
             }
         }
@@ -141,23 +159,27 @@ impl TextEditState {
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.text.len();
-        if self.anchor == Some(self.caret) {
-            self.anchor = None;
-        }
+        self.normalize();
     }
 
     pub fn clear_selection(&mut self) {
         self.anchor = None;
+        self.normalize();
     }
 
     /// Delete the current selection, if any, collapsing the caret to its
-    /// start. Returns the removed text.
+    /// start. Returns the removed text. Never needs to call
+    /// [`Self::resolve_composing_before_edit`] itself: a selection can't
+    /// coexist with an in-progress composition ([`Self::normalize`]
+    /// enforces that), so whenever this actually mutates `text`, composing
+    /// is already `None`.
     fn delete_selection(&mut self) -> Option<String> {
         let (start, end) = self.selection()?;
         let removed = self.text[start..end].to_string();
         self.text.replace_range(start..end, "");
         self.caret = start;
         self.anchor = None;
+        self.normalize();
         Some(removed)
     }
 
@@ -167,11 +189,18 @@ impl TextEditState {
     /// flattened onto one line rather than silently violating the
     /// single-line caret/selection rendering contract.
     pub fn insert_str(&mut self, s: &str) {
-        self.end_composing_in_place();
         let s = strip_line_breaks(s);
+        // Only resolve composing when this will actually change `text` —
+        // an empty insert with nothing selected is a true no-op and must
+        // not have the side effect of silently ending an unrelated
+        // in-progress composition.
+        if !s.is_empty() || self.selection().is_some() {
+            self.resolve_composing_before_edit();
+        }
         self.delete_selection();
         self.text.insert_str(self.caret, &s);
         self.caret += s.len();
+        self.normalize();
     }
 
     pub fn insert_char(&mut self, c: char) {
@@ -181,33 +210,29 @@ impl TextEditState {
 
     /// Delete the selection, or the char before the caret.
     pub fn backspace(&mut self) {
-        self.end_composing_in_place();
-        if self.delete_selection().is_some() {
-            return;
+        if self.delete_selection().is_none() && self.caret != 0 {
+            self.resolve_composing_before_edit();
+            let start = prev_char_boundary(&self.text, self.caret);
+            self.text.replace_range(start..self.caret, "");
+            self.caret = start;
         }
-        if self.caret == 0 {
-            return;
-        }
-        let start = prev_char_boundary(&self.text, self.caret);
-        self.text.replace_range(start..self.caret, "");
-        self.caret = start;
+        self.normalize();
     }
 
     /// Delete the selection, or the char after the caret.
     pub fn delete(&mut self) {
-        self.end_composing_in_place();
-        if self.delete_selection().is_some() {
-            return;
+        if self.delete_selection().is_none() && self.caret != self.text.len() {
+            self.resolve_composing_before_edit();
+            let end = next_char_boundary(&self.text, self.caret);
+            self.text.replace_range(self.caret..end, "");
         }
-        if self.caret == self.text.len() {
-            return;
-        }
-        let end = next_char_boundary(&self.text, self.caret);
-        self.text.replace_range(self.caret..end, "");
+        self.normalize();
     }
 
-    /// The selected text, without mutating. `None` if there's no selection.
-    /// The host-provided clipboard (#206) stores the result; this never
+    /// The selected text, without mutating. `None` if there's no selection
+    /// — always the case while composing, since a selection can't coexist
+    /// with an in-progress composition ([`Self::normalize`]). The
+    /// host-provided clipboard (#206) stores the result; this never
     /// touches an OS clipboard itself.
     pub fn copy(&self) -> Option<String> {
         let (start, end) = self.selection()?;
@@ -215,6 +240,10 @@ impl TextEditState {
     }
 
     /// Remove and return the selected text, for the host clipboard (#206).
+    /// Always `None` while composing, for the same reason as [`Self::copy`]
+    /// — and since it then never touches `text`, it must never touch
+    /// `composing` either (unlike [`Self::insert_str`] / [`Self::backspace`]
+    /// / [`Self::delete`], a no-op `cut` is not an edit).
     pub fn cut(&mut self) -> Option<String> {
         self.delete_selection()
     }
@@ -246,6 +275,7 @@ impl TextEditState {
         self.composing = Some((start, end));
         let cursor = cursor.unwrap_or(preedit.len()).min(preedit.len());
         self.caret = start + cursor;
+        self.normalize();
     }
 
     /// Commit the in-progress composition as final text — or, for an IME
@@ -260,6 +290,7 @@ impl TextEditState {
         } else {
             self.insert_str(commit_text);
         }
+        self.normalize();
     }
 
     /// Cancel an in-progress composition, removing the preedit text
@@ -270,18 +301,48 @@ impl TextEditState {
             self.text.replace_range(start..end, "");
             self.caret = start;
         }
+        self.normalize();
     }
 
-    /// Resolve an in-progress IME composition in place before any edit that
-    /// isn't itself part of the composition lifecycle: stop tracking its
-    /// range (the preedit text already live in `text` just becomes ordinary
-    /// committed text). Without this, an intervening insert/backspace/delete
-    /// can move the caret or change `text`'s length while a stale
-    /// `composing` range still points at the old positions, so a later
-    /// `commit_composing`/`cancel_composing` slices out of bounds and
-    /// panics.
-    fn end_composing_in_place(&mut self) {
+    /// Resolve an in-progress IME composition in place — stop tracking its
+    /// range, leaving the preedit text already live in `text` as ordinary
+    /// committed text — before any edit that changes `text`'s content and
+    /// isn't itself part of the composition lifecycle ([`Self::set_composing`]
+    /// / [`Self::commit_composing`] / [`Self::cancel_composing`], which
+    /// manage `composing` directly). Without this, such an edit can shift
+    /// or shrink `text` while a stale `composing` range still points at the
+    /// old positions, so a later `commit_composing` / `cancel_composing`
+    /// slices out of bounds and panics. [`Self::insert_str`],
+    /// [`Self::backspace`], and [`Self::delete`] call this right before any
+    /// point where they're about to mutate `text` directly outside the
+    /// composition lifecycle itself. ([`Self::cut`] doesn't need to: a
+    /// selection can't coexist with an in-progress composition, so its only
+    /// text mutation, via [`Self::delete_selection`], never runs while
+    /// composing is active.)
+    fn resolve_composing_before_edit(&mut self) {
         self.composing = None;
+    }
+
+    /// Enforce the invariants every mutating method must leave true — see
+    /// the module-level "Invariants" doc. Every mutating method ends by
+    /// calling this.
+    fn normalize(&mut self) {
+        // A selection collapsed back onto its anchor (e.g. shift+right back
+        // to where shift+left started) must drop the anchor, not just leave
+        // it coincident with the caret — otherwise it resurfaces as a
+        // selection, with byte offsets that are no longer valid, once a
+        // later edit moves the caret away again.
+        if self.anchor == Some(self.caret) {
+            self.anchor = None;
+        }
+        // A selection and an in-progress composition are mutually
+        // exclusive: the composition owns the caret position while it's
+        // active, so any anchor set while composing (e.g. a shift+arrow or
+        // select_all while an IME composition is in progress) is dropped
+        // rather than left to coexist with it.
+        if self.composing.is_some() {
+            self.anchor = None;
+        }
     }
 }
 
@@ -689,6 +750,131 @@ mod tests {
         assert_eq!(state.text(), "ab");
         state.commit_composing("c\r\nd");
         assert_eq!(state.text(), "cd");
+    }
+
+    // --- Structural audit regressions (#228 review follow-up): fixing the
+    // selection/composing interaction above one call site at a time missed
+    // others. These exercise every remaining text/caret/selection-mutating
+    // method against both invariants (anchor collapses when it would
+    // coincide with the caret or while composing; composing never outlives
+    // a text edit that doesn't itself resolve it).
+
+    #[test]
+    fn delete_during_composition_resolves_composing_before_edit() {
+        let mut state = TextEditState::new("");
+        state.set_composing("x", None);
+        state.move_home(false); // caret before the preedit, so delete() hits it
+        state.delete();
+        assert_eq!(state.text(), "");
+        assert!(!state.is_composing());
+        // Would previously panic: a stale `composing` range past the end.
+        state.cancel_composing();
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn paste_during_composition_resolves_composing_before_edit() {
+        let mut state = TextEditState::new("");
+        state.set_composing("xx", None);
+        state.paste("y");
+        // The preedit "xx" is already live in `text`; resolving composing
+        // in place leaves it as ordinary text, so "y" lands after it.
+        assert_eq!(state.text(), "xxy");
+        assert!(!state.is_composing());
+        // Would previously panic: a stale `composing` range past content
+        // that's since shifted/grown.
+        state.cancel_composing();
+        assert_eq!(state.text(), "xxy");
+    }
+
+    #[test]
+    fn empty_paste_during_composition_does_not_disturb_composing() {
+        // Unlike a real insert, an empty insert changes nothing — it must
+        // not have the side effect of silently ending an unrelated
+        // in-progress composition.
+        let mut state = TextEditState::new("");
+        state.set_composing("x", None);
+        state.paste("");
+        assert_eq!(state.text(), "x");
+        assert!(state.is_composing(), "empty paste must not end composing");
+    }
+
+    #[test]
+    fn backspace_at_start_during_composition_does_not_disturb_composing() {
+        // A backspace that deletes nothing (caret at the very start, no
+        // selection) must not have the side effect of silently ending an
+        // unrelated in-progress composition.
+        let mut state = TextEditState::new("");
+        state.set_composing("x", None);
+        state.move_home(false);
+        state.backspace();
+        assert_eq!(state.text(), "x");
+        assert!(
+            state.is_composing(),
+            "no-op backspace must not end composing"
+        );
+    }
+
+    #[test]
+    fn delete_at_end_during_composition_does_not_disturb_composing() {
+        let mut state = TextEditState::new("");
+        state.set_composing("x", None);
+        state.move_end(false);
+        state.delete();
+        assert_eq!(state.text(), "x");
+        assert!(state.is_composing(), "no-op delete must not end composing");
+    }
+
+    #[test]
+    fn select_all_while_composing_does_not_create_a_selection() {
+        // A selection and an in-progress composition are mutually
+        // exclusive — the composition owns the caret while it's active.
+        let mut state = TextEditState::new("ab");
+        state.move_left(false);
+        state.set_composing("x", None);
+        state.select_all();
+        assert_eq!(
+            state.selection(),
+            None,
+            "select_all must not create a selection during composition"
+        );
+        assert!(state.is_composing(), "composing must survive select_all");
+    }
+
+    #[test]
+    fn shift_arrow_while_composing_does_not_create_a_selection() {
+        let mut state = TextEditState::new("ab");
+        state.move_left(false);
+        state.set_composing("x", None);
+        state.move_left(true);
+        assert_eq!(
+            state.selection(),
+            None,
+            "shift+arrow must not create a selection during composition"
+        );
+    }
+
+    #[test]
+    fn cut_and_copy_while_composing_return_none_and_leave_composing_untouched() {
+        // No selection can exist while composing (enforced by `normalize`),
+        // so cut/copy during composition always have nothing to act on —
+        // and, unlike insert_str/backspace/delete, a no-op cut is not an
+        // edit, so it must not end the composition as a side effect.
+        let mut state = TextEditState::new("ab");
+        state.move_left(false);
+        state.set_composing("x", None);
+        state.select_all(); // still no selection — composing excludes it
+        assert_eq!(state.copy(), None);
+        assert_eq!(state.cut(), None);
+        assert_eq!(
+            state.text(),
+            "axb",
+            "cut must not touch text with nothing to cut"
+        );
+        assert!(
+            state.is_composing(),
+            "cut/copy must not disturb an unrelated composition"
+        );
     }
 
     #[test]
