@@ -278,6 +278,7 @@ impl Renderer {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| MkuiError::initialization(format!("request_adapter failed: {e}")))?;
@@ -314,6 +315,7 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode,
@@ -688,7 +690,7 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         drop(view);
-        frame.present();
+        self.queue.present(frame);
         if reconfigure_after_present {
             self.surface.configure(&self.device, &self.config);
         }
@@ -919,7 +921,7 @@ fn build_ui_pipeline(
             module: &shader,
             entry_point: Some("vs_ui_triangles"),
             compilation_options: wgpu::PipelineCompilationOptions::default(),
-            buffers: &[Vertex::layout()],
+            buffers: &[Some(Vertex::layout())],
         },
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
