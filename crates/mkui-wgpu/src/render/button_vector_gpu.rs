@@ -16,12 +16,13 @@
 //! exactly the pre-#140 `Quad` emission — rather than obtained from a second
 //! call to the real function.
 //!
-//! The comparison needs no antialiasing heuristics: the triangle tessellator
-//! ignores `Quad::corner_radii` entirely (every triangulated component always
-//! has, and still has, square corners — corner radius was decorative data,
-//! never consumed), so the outer corner of the bounding rect is unambiguous —
-//! opaque chrome in triangulated mode, the untouched clear color in vector
-//! mode.
+//! Since #212, the triangle tessellator facets `Quad::corner_radii` into a
+//! many-sided polygon instead of ignoring it, so the bounding rect's outer
+//! corner is now excluded on *both* lanes (the probe point sits ~2.6px
+//! outside the radius-8 arc, far past the faceted polygon's sub-pixel
+//! deviation from a true arc) — the remaining, still-genuine difference is
+//! that the triangulated lane's edges stay hard/binary while the vector
+//! lane's curved boundary is anti-aliased.
 
 use bytemuck::cast_slice;
 use wgpu::util::DeviceExt;
@@ -188,15 +189,16 @@ fn button_vector_vs_triangulated() {
     );
 
     // The outer corner of the bounding rect (screen (8, 8), the button's
-    // top-left-most pixel): triangulated draws a square corner — covered by
-    // both the top and left 1px-wide border strips, which start exactly at
-    // the rect's origin — while the vector path's rounded corner (radius
-    // `style.corner_radius` == 8.0, well clear of this probe point) excludes
-    // it entirely, leaving the clear color untouched.
-    assert_ne!(
+    // top-left-most pixel): its center (8.5, 8.5) is ~10.61px from the
+    // radius-8 arc's own center (16, 16) — 2.6px outside the radius, far
+    // past the faceted polygon's sub-pixel deviation from a true arc — so
+    // since #212 the triangulated lane's rounded corner excludes this point
+    // too, the same as the vector lane's.
+    assert_eq!(
         texel(&tri_pixels, 8, 8),
         clear,
-        "triangulated button's square corner must be opaque chrome"
+        "triangulated button's rounded corner (#212) must leave this pixel \
+         the untouched clear color"
     );
     assert_eq!(
         texel(&vec_pixels, 8, 8),

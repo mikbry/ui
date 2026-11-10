@@ -9,16 +9,17 @@
 //!
 //! The rounded-rect fill + border forks on the `slug` feature, resolved at
 //! compile time in [`emit_chrome`] (two separate definitions below, each
-//! `#[cfg]`-gated): off, it is the pre-existing triangulated [`Quad`] (byte-
-//! identical to v0.10.0); on, it is two [`Primitive::VectorPath`]s — a
-//! fill-only rounded rect at the full rect size, and a stroke-only rounded
-//! rect inset by half the border width (Sprint 8 Wave 2 — `card`/`dot` follow
-//! the same shape in #141/#142). The inset keeps the border's *outer* edge
-//! flush with `rect`, matching the triangulated tessellator (its border
-//! strips start exactly at `rect.origin` and never extend past it) — a plain
-//! shared centreline would stroke outward past `rect` by half the border
-//! width (#213 Codex round 1). `button`/`button_with`'s own signatures never
-//! change — the fork is entirely internal.
+//! `#[cfg]`-gated): off, it is the pre-existing triangulated [`Quad`], its
+//! corners faceted by the native tessellator (#212); on, it is two
+//! [`Primitive::VectorPath`]s — a fill-only rounded rect at the full rect
+//! size, and a stroke-only rounded rect inset by half the border width
+//! (Sprint 8 Wave 2 — `card`/`dot` follow the same shape in #141/#142). The
+//! inset keeps the border's *outer* edge flush with `rect`, matching the
+//! triangulated tessellator (its border ring starts exactly at `rect`'s own
+//! boundary and never extends past it) — a plain shared centreline would
+//! stroke outward past `rect` by half the border width (#213 Codex round 1).
+//! `button`/`button_with`'s own signatures never change — the fork is
+//! entirely internal.
 
 use crate::theme::{ButtonSize, ButtonState, ButtonStyle, ButtonVariant, WgpuTheme};
 use crate::types::{Color, Point, Rect, Scene, Size, TextAlign, TextStyle};
@@ -87,10 +88,10 @@ pub fn button(
     button_with(scene, rect, label_text, state, &style);
 }
 
-/// Triangulated rounded-rect fill + border (v0.10.0 behavior, unchanged).
-/// `corner_radii` is accepted by [`Quad`] but — like every other triangulated
-/// component — the tessellator draws a plain rectangle (see
-/// `tessellation::tessellate_quad`); this is exactly the pre-#140 output.
+/// Triangulated rounded-rect fill + border. `corner_radii` is faceted into a
+/// many-sided polygon by `tessellation::tessellate_quad` (#212) — rounded,
+/// but with hard, non-anti-aliased edges, unlike the vector lane's true
+/// curve below.
 #[cfg(not(feature = "slug"))]
 fn emit_chrome(
     scene: &mut Scene,

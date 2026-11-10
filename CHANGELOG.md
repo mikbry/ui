@@ -16,11 +16,11 @@ breaking changes can land on minor bumps).
   circle. The left column is a showcase-local faceted-polygon approximation
   of the same shape (`rounded_rect_polygon` + `push_faceted_polygon_fill`,
   3 segments per 90° corner, rasterized as many 1px `Quad` rows) — **not**
-  the shared `Quad`/`tessellate_quad` path real components use, which still
-  renders a rounded `Quad` as a plain square (#212; see the scope note
-  below). Sizes (button 18px radius, card 36px radius, dot 55px radius) sit
-  well above the theme-token scale so the comparison reads at 1x window
-  scale with no zoom.
+  the shared `Quad`/`tessellate_quad` path real components use, which at the
+  time only rendered a rounded `Quad` as a plain square (#212; see the scope
+  note below — fixed below, same issue). Sizes (button 18px radius, card
+  36px radius, dot 55px radius) sit well above the theme-token scale so the
+  comparison reads at 1x window scale with no zoom.
   - `cargo run -p vector-showcase --release --features slug` — both columns
     live.
   - `cargo run -p vector-showcase --release` (no `slug`) — the vector column
@@ -530,6 +530,46 @@ breaking changes can land on minor bumps).
   `mkui-core`, `mkui-web`, the `mkui` bridge's `web` backend, and
   `web-showcase` for `wasm32-unknown-unknown`, so the web/WASM path can't rot
   undetected again.
+- **`mkui-wgpu`'s native tessellator honors `Quad::corner_radii` (#212).**
+  `tessellate_quad` now facets a rounded `Quad`'s fill and stroke into a
+  many-sided polygon (`CORNER_ARC_SEGMENTS` = 8 segments per 90° corner)
+  instead of silently drawing a plain rectangle — the gap the #143
+  showcase surfaced and the earlier `fa7452d` attempt (reverted as `79f7a8c`,
+  see that showcase entry above) fixed for fill only, then backed out. This
+  fix covers both fill and stroke in one change: the stroke now bends around
+  the same rounded corners instead of the four straight 1px-strip rectangles
+  it used before, via a ring tessellated between the outer and an
+  inset-and-re-radiused inner boundary. A zero-radius `Quad` still takes the
+  original plain-rect / 4-strip fast path, byte-identical to before.
+  - Scope decision: shipped both fill and stroke (the issue's "suggested
+    scope," not just the fill half a parallel PR had narrowed this issue
+    to) because this worktree's `tessellate_quad` had neither — the fill fix
+    referenced in the issue's narrowing comment was not present on this
+    branch's base.
+  - Scope decision: also updated the `button_vector_gpu.rs` (#140) and
+    `card_vector_gpu.rs` (#141) cross-consumer GPU acceptance tests, not just
+    `dot_vector_gpu.rs` (#142) as the issue named explicitly — all three hand-
+    built a triangulated reference assuming square corners as their test
+    oracle, and all three break the same way once corners actually round.
+  - `dot_vector_gpu.rs`'s dot uses a full-radius `Quad` (radius == half the
+    side), so its triangulated fallback is now itself a circle
+    approximation (52 of the square's 64 pixel centers fall within the
+    radius), not a square: its corner-vs-circle probe now expects *both*
+    lanes to exclude the probe point, and its coverage-area ratio band
+    moved from ~pi/4 (square vs. circle) to ~0.97 (circle vs. circle, ~50.3
+    analytic px² over 52 sampled px), since the only genuine remaining
+    difference is the triangulated lane's flat/hard edges vs. the vector
+    lane's per-fragment AA.
+  - Scope decision: `button_vector_gpu.rs`'s corner probe no longer
+    distinguishes the two lanes (both now exclude it) — `dot_vector_gpu.rs`'s
+    anti-aliasing scan is the remaining cross-consumer AA-vs-hard-edge
+    discriminator.
+  - Known gap, deferred: `panel`'s `Shadow` (and `card`/`titled_panel`'s,
+    both built on `panel`) carries its own `corner_radii`, but
+    `tessellate_shadow` still ignores it and always expands to a plain
+    rect. A rounded panel's shadow now visibly pokes square corners past
+    its newly-rounded fill — previously hidden because both were square.
+    Tracked as a follow-up issue (#219).
 
 ### Changed
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
