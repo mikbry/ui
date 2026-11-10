@@ -401,6 +401,42 @@ fn slug_lane_caps_at_max_lines_and_ellipsizes_the_tail() {
     );
 }
 
+/// Regression for the ellipsis-glyph-identity-loss-through-bitmap-fallback
+/// bug: a synthesized ellipsis glyph does not correspond to any position in
+/// the source text, so it must carry an out-of-range sentinel `cluster`
+/// (`chars.len()`) rather than borrowing a real content character's index.
+/// An earlier revision borrowed the last kept content character's cluster
+/// "so a glyph that falls back to the bitmap lane still resolves to a real
+/// character instead of panicking" — but every downstream cluster consumer
+/// already guards with `.get`/`.min(chars.len())`, so that borrowing only
+/// swapped a not-actually-needed panic guard for silent misrendering: a
+/// renderer reconstructing bitmap-fallback text from `chars[cluster]` would
+/// draw whatever real character sat at the borrowed cluster instead of a
+/// dot/ellipsis. See `crates/mkui-wgpu/src/slug_text.rs`'s
+/// `expand_text_primitive`, which now reconstructs bitmap-fallback text from
+/// each glyph's own `glyph_id` instead, precisely because this cluster can
+/// no longer be trusted to index real content.
+#[test]
+fn ellipsized_tail_glyphs_carry_an_out_of_range_sentinel_cluster() {
+    let (sys, id) = registered();
+    let text = "one two three four five six seven eight nine ten";
+    let char_count = text.chars().count() as u32;
+    let spec = LayoutSpec {
+        max_lines: Some(1),
+        ..slug_spec(id, 16.0)
+    };
+    // Narrow enough that the single allowed line must truncate + ellipsize.
+    let runs = sys.layout(text, &spec, Some(60.0));
+
+    let last_run = runs.last().unwrap();
+    let last_glyph = last_run.glyphs.last().unwrap();
+    assert_eq!(
+        last_glyph.cluster, char_count,
+        "the ellipsis glyph's cluster must be the out-of-range sentinel \
+         (chars.len()), not a borrowed real content index"
+    );
+}
+
 /// No panic across the degenerate inputs an autonomous layout caller might
 /// legitimately hit: a box narrower than a single glyph, non-finite/zero
 /// width, `max_lines = Some(0)`, and a run of blank lines.

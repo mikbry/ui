@@ -379,8 +379,18 @@ impl SfntProvider {
     /// bounded, shrinking the kept content until it plus the ellipsis fits —
     /// the width-based analogue of the bitmap lane's `ellipsize_line`.
     /// Returns `(cluster, Shaped)` pairs; the ellipsis glyphs themselves
-    /// carry the last kept cluster so a glyph that falls back to the bitmap
-    /// lane still resolves to a real character instead of panicking.
+    /// carry `chars.len()` — an out-of-range sentinel cluster — because they
+    /// are synthetic and correspond to **no** position in the source text.
+    /// An earlier revision instead borrowed the last kept content
+    /// character's cluster, on the theory that a glyph falling back to the
+    /// bitmap lane should "resolve to a real character instead of
+    /// panicking" — but every downstream cluster lookup already guards with
+    /// `.get`/`.min(chars.len())`, so that borrowing only replaced a
+    /// not-actually-needed panic guard with silent corruption: a dot/ellipsis
+    /// glyph that fell back to the bitmap lane rendered whatever real
+    /// character happened to sit at the borrowed cluster instead of a dot.
+    /// The sentinel lets every consumer tell "no literal source character
+    /// here" apart from "this is index 0 of the text".
     fn ellipsize_range(
         &self,
         chars: &[char],
@@ -409,14 +419,10 @@ impl SfntProvider {
             }
         }
 
-        let fallback_cluster = if end > range.start {
-            (end - 1) as u32
-        } else {
-            range.start as u32
-        };
+        let synthetic_cluster = chars.len() as u32;
         let mut out: Vec<(u32, Shaped)> =
             (range.start..end).map(|i| (i as u32, shaped[i])).collect();
-        out.extend(ellipsis.into_iter().map(|s| (fallback_cluster, s)));
+        out.extend(ellipsis.into_iter().map(|s| (synthetic_cluster, s)));
         out
     }
 }

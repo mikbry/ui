@@ -44,7 +44,12 @@ use crate::types::{Color, Point, Primitive, Rect, Size, Text, TextAlign, TextSty
 pub struct BitmapFallbackGlyph {
     /// Index into the source text's `chars()` (the run's
     /// [`LayoutGlyph::cluster`](mkui_text::LayoutGlyph::cluster)) — recovers
-    /// the character to rasterize through the bitmap lane.
+    /// the character to rasterize through the bitmap lane. A synthesized
+    /// glyph with no corresponding source-text position (e.g. one of #182's
+    /// ellipsis dots) carries an out-of-range sentinel here instead of a
+    /// real index, so the lookup at the call site below finds nothing and
+    /// the glyph is dropped rather than mis-rendered as whatever character
+    /// happens to sit at a neighboring cluster.
     pub cluster: u32,
     /// Pen x-position of the glyph cell, already offset by the caller's
     /// `box_origin_px` and the run's origin — the same absolute coordinate
@@ -316,13 +321,22 @@ fn expand_text_primitive(
             }
         } else {
             // A run the composite router itself routed to bitmap (e.g. #67's
-            // layout-time character fallback: an emoji the SFNT face doesn't
-            // map) — draw its exact cluster span through the untouched
-            // bitmap lane, one `Primitive::Text` per run.
-            if let (Some(first), Some(last)) = (run.glyphs.first(), run.glyphs.last()) {
-                let start = (first.cluster as usize).min(chars.len());
-                let end = (last.cluster as usize + 1).min(chars.len());
-                let span: String = chars[start..end].iter().collect();
+            // layout-time character fallback for an emoji the SFNT face
+            // doesn't map, or #182's synthesized ellipsis dots when the face
+            // maps neither '…' nor '.') — rebuild the text to draw from each
+            // glyph's own `glyph_id`, not from `cluster`. `SfntProvider::
+            // classify` always sets a bitmap-class glyph's `glyph_id` to
+            // `normalize_bitmap_char` of the character it represents, so
+            // recovering a `char` from it is exact for a genuine fallback
+            // character (where it matches the source text) and, crucially,
+            // also correct for a synthesized ellipsis glyph — whose
+            // `cluster` is an out-of-range sentinel precisely because it has
+            // no corresponding position in the source text at all.
+            // Reconstructing from `chars[cluster]` instead would have
+            // silently drawn whichever real character happened to sit at a
+            // neighboring cluster in place of a dot.
+            let span = bitmap_fallback_span(&run.glyphs);
+            if !span.is_empty() {
                 out.push(bitmap_text_primitive(
                     text,
                     text.rect.origin.x + run.origin_x_px,
@@ -334,6 +348,22 @@ fn expand_text_primitive(
         }
     }
     out
+}
+
+/// Reconstruct the literal text a Bitmap-class run's glyphs represent from
+/// each glyph's own `glyph_id`, not from `cluster`/the source text. Every
+/// bitmap-class `glyph_id` is `normalize_bitmap_char` of the character it
+/// stands for (see `SfntProvider::classify`/`ellipsis_glyphs` in
+/// `mkui-text`), so this is exact for a genuine per-character fallback
+/// (where it matches the source text 1:1) and, crucially, also for a
+/// synthesized glyph with no source-text position at all — e.g. one of
+/// #182's ellipsis dots, whose `cluster` is an out-of-range sentinel for
+/// exactly this reason.
+fn bitmap_fallback_span(glyphs: &[mkui_text::LayoutGlyph]) -> String {
+    glyphs
+        .iter()
+        .filter_map(|g| char::from_u32(g.glyph_id))
+        .collect()
 }
 
 /// Build a narrowed, `Start`-aligned bitmap [`Primitive::Text`] at
@@ -368,7 +398,9 @@ fn bitmap_text_primitive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkui_text::{CompositeTextSystem, LayoutSpec};
+    use mkui_text::{
+        normalize_bitmap_char, CompositeTextSystem, GlyphFormat, LayoutGlyph, LayoutSpec,
+    };
     use mkui_vector2d::SlugConfig;
 
     const ABEL: &[u8] = include_bytes!("../../mkui-text/tests/fixtures/abel/Abel-Regular.ttf");
@@ -601,6 +633,38 @@ mod tests {
         // advance, inside the original box — never re-anchored at the box
         // origin (which would overlap the Slug glyph).
         assert!(bitmap_texts[0].rect.origin.x > 4.0);
+    }
+
+    #[test]
+    fn bitmap_fallback_span_reads_glyph_identity_not_a_borrowed_cluster() {
+        // Regression for the ellipsis-glyph-identity-loss-through-bitmap-
+        // fallback bug: reproduces, without needing a font that lacks a '.'
+        // glyph, the exact shape `SfntProvider::ellipsize_range` used to
+        // produce — three dot glyphs (`is_slug: false`, so `glyph_id =
+        // normalize_bitmap_char('.')`) all sharing one borrowed cluster that
+        // points at a real, *different* character ('o', say, from the kept
+        // content). The pre-fix renderer rebuilt its bitmap-fallback text
+        // from `chars[cluster]` and would have drawn "o" three times (or
+        // "ooo", depending on dedup) instead of "...". `bitmap_fallback_span`
+        // must ignore `cluster` entirely and read each glyph's own
+        // `glyph_id`, which already carries the correct identity.
+        let dot_glyph_id = normalize_bitmap_char('.') as u32;
+        let wrong_cluster = 5; // some real position in a hypothetical source string
+        let glyphs: Vec<LayoutGlyph> = (0..3)
+            .map(|i| LayoutGlyph {
+                glyph_id: dot_glyph_id,
+                x_px: i as f32 * 4.0,
+                y_px: 0.0,
+                x_advance_px: 4.0,
+                x_offset_px: 0.0,
+                y_offset_px: 0.0,
+                cluster: wrong_cluster,
+                subpixel_variant: 0,
+                format: GlyphFormat::Alpha,
+            })
+            .collect();
+
+        assert_eq!(bitmap_fallback_span(&glyphs), "...");
     }
 
     #[test]
