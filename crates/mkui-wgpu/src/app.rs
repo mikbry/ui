@@ -322,11 +322,28 @@ impl WgpuApp {
     /// running the full event loop.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn rebuild_scene_from_tree(&mut self) {
+        self.try_rebuild_scene_from_tree();
+    }
+
+    /// Same work as [`WgpuApp::rebuild_scene_from_tree`], but reports
+    /// whether the scene was actually replaced. `false` on a
+    /// `walk_app_tree` error: the previous `scene` / `hit_tests` are left
+    /// in place and the tree's dirty bit is deliberately **not** cleared,
+    /// so the next call retries rather than silently going quiet.
+    ///
+    /// [`WgpuApp::update_frame`] needs this bool (#177 review P2) — it
+    /// must not report "rebuilt" to the host when nothing was actually
+    /// replaced, or a custom-renderer error would make an embedded host
+    /// believe its old frame is current and stop re-uploading it, or
+    /// (if it instead always re-uploaded) spin re-uploading the same
+    /// stale scene every frame on a false "changed" signal.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn try_rebuild_scene_from_tree(&mut self) -> bool {
         let Some(core) = self.core.as_ref() else {
-            return;
+            return false;
         };
         let Some(registry) = self.registry.as_ref() else {
-            return;
+            return false;
         };
         let options = WalkOptions {
             viewport: self.scene.viewport,
@@ -334,13 +351,11 @@ impl WgpuApp {
         };
         let output = {
             let core_ref = core.borrow();
-            // v0.6.0 never returns Err from the walker; surface a render
-            // error if a future extension renderer changes that.
             match walk_app_tree(core_ref.tree(), registry, &options) {
                 Ok(out) => out,
                 Err(err) => {
                     eprintln!("mkui-wgpu: walk_app_tree error: {err}");
-                    return;
+                    return false;
                 }
             }
         };
@@ -349,6 +364,7 @@ impl WgpuApp {
         core.borrow_mut().tree_mut().clear_dirty();
         self.scene = output.scene;
         self.hit_tests = output.hit_tests;
+        true
     }
 
     /// Per-frame entry point for a host that ticks mkui every frame of its
@@ -360,11 +376,12 @@ impl WgpuApp {
     /// `self.scene` / `self.hit_tests` from the last rebuild are left in
     /// place for the host to keep drawing.
     ///
-    /// Returns `true` when it rebuilt (the host should re-tessellate /
-    /// re-upload against the new `scene()`), `false` otherwise. Also
-    /// `false` when the app is in scene-only mode (`with_scene`) — that
-    /// path has no tree to be dirty, and the host is already driving
-    /// `scene()` directly.
+    /// Returns `true` only when the scene was actually replaced (the host
+    /// should re-tessellate / re-upload against the new `scene()`).
+    /// Returns `false` when the tree is clean, when the app is in
+    /// scene-only mode (`with_scene` — no tree to be dirty), and when a
+    /// custom renderer's `walk_app_tree` call errors (the tree stays
+    /// dirty in that case, so the next frame's call retries).
     #[cfg(not(target_arch = "wasm32"))]
     pub fn update_frame(&mut self) -> bool {
         let Some(core) = self.core.as_ref() else {
@@ -373,8 +390,7 @@ impl WgpuApp {
         if !core.borrow().tree().is_dirty() {
             return false;
         }
-        self.rebuild_scene_from_tree();
-        true
+        self.try_rebuild_scene_from_tree()
     }
 
     /// Update the held scene for a new viewport on `WindowEvent::Resized`,
@@ -1127,6 +1143,56 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn update_frame_reports_false_and_stays_dirty_on_a_walker_error() {
+        // #177 review P2: a custom renderer erroring out of `walk_app_tree`
+        // must not make `update_frame` report "rebuilt" — the old scene
+        // and hit-tests are left in place, and the tree must stay dirty
+        // so a future frame retries instead of going silently quiet.
+        use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable};
+        use mkui_core::components::Mkui as CoreMkui;
+        use mkui_core::error::MkuiError;
+        use mkui_runtime::Node;
+
+        struct FailingWidget;
+        impl WgpuRenderable for FailingWidget {
+            fn type_name(&self) -> &str {
+                "failing_widget"
+            }
+            fn render(
+                &self,
+                _node: &Node,
+                _props: &serde_json::Value,
+                _ctx: &mut WgpuRenderCtx<'_>,
+            ) -> Result<WgpuRenderOutcome, MkuiError> {
+                Err(MkuiError::rendering("boom"))
+            }
+        }
+
+        let core = CoreMkui::new();
+        let mut registry = WgpuRendererRegistry::with_defaults();
+        registry.register(FailingWidget);
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        {
+            let core = app.core().unwrap();
+            let mut core = core.borrow_mut();
+            let root = core.tree().root();
+            core.tree_mut()
+                .push_custom(root, "failing_widget", serde_json::Value::Null, "")
+                .unwrap();
+        }
+
+        assert!(
+            !app.update_frame(),
+            "a walker error must not be reported as a successful rebuild"
+        );
+        assert!(
+            app.core().unwrap().borrow().tree().is_dirty(),
+            "the tree must stay dirty so a future frame retries"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn update_frame_is_a_no_op_in_scene_only_mode() {
         let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
         assert!(!app.update_frame());
@@ -1157,7 +1223,7 @@ mod tests {
         app.update_frame();
 
         let mut theme = *app.theme();
-        theme.panel.corner_radius += 1.0;
+        theme.tokens.spacing.radius_panel += 1.0;
         app.set_theme(theme);
         assert!(
             app.core().unwrap().borrow().tree().is_dirty(),

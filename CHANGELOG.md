@@ -150,6 +150,16 @@ breaking changes can land on minor bumps).
     Codex round 7) — per-subtree skip, and the CPU/GPU/memory budget
     numbers in #177's acceptance criteria, need the embedded host +
     toy-scene example #175/#173 bring and are tracked as follow-ups.
+  - PR review fixes: `update_frame` now reports `false` (not `true`) when
+    a custom renderer's `walk_app_tree` call errors — it returns the
+    actual "did the scene get replaced" outcome from a new
+    `try_rebuild_scene_from_tree` instead of unconditionally returning
+    `true` after calling the unconditional `rebuild_scene_from_tree`,
+    which would have told a host to re-upload a scene that was never
+    replaced. Covered by a regression test using a `WgpuRenderable` that
+    always errors. `tests/alloc_free_frame.rs` also gained a file-level
+    `#![cfg(not(target_arch = "wasm32"))]` guard — `update_frame` is
+    native-only, so the file failed a `wasm32-unknown-unknown` check.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through

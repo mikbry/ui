@@ -9,6 +9,13 @@
 //! tests` inside `src/`) because `#[global_allocator]` is process-wide:
 //! installing a counting allocator here must not affect `mkui-wgpu`'s
 //! other unit tests, which run in a separate test binary.
+//!
+//! File-level native-target guard (#177 review P2): `WgpuApp::update_frame`
+//! is itself `#[cfg(not(target_arch = "wasm32"))]` (wasm32 has no
+//! `RedrawRequested`-less host loop to serve), so a `wasm32-unknown-unknown`
+//! check of this file errored with three E0599s before this guard existed.
+
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
