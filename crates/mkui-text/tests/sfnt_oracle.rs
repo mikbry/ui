@@ -146,6 +146,48 @@ fn advance_parity_for_ascii_set() {
 }
 
 #[test]
+fn weight_and_italic_parity() {
+    // #181: `OS/2.usWeightClass` / `fsSelection` italic bit, cross-checked
+    // against the oracle's own convenience accessors.
+    let ours = ours();
+    let oracle = oracle();
+    assert_eq!(ours.weight_class(), oracle.weight().to_number());
+    assert_eq!(ours.is_italic(), oracle.is_italic());
+}
+
+#[test]
+fn kerning_parity_for_every_abel_kern_pair() {
+    // #181: every pair in Abel's real `kern` table (not a hand-picked one),
+    // checked against the oracle's own format-0 subtable decoder.
+    let ours = ours();
+    let oracle = oracle();
+    let kern = oracle.tables().kern.expect("Abel has a kern table");
+
+    let mut checked = 0usize;
+    for sub in kern.subtables {
+        if !sub.horizontal || sub.has_cross_stream {
+            continue;
+        }
+        if let ttf_parser::kern::Format::Format0(s0) = sub.format {
+            for pair in s0.pairs {
+                let left = pair.left().0;
+                let right = pair.right().0;
+                assert_eq!(
+                    ours.kerning(left, right),
+                    pair.value,
+                    "kern divergence for glyph pair ({left}, {right})"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked > 0,
+        "expected Abel's kern table to carry usable horizontal format-0 pairs"
+    );
+}
+
+#[test]
 fn malformed_and_truncated_inputs_rejected_like_oracle() {
     // A range of truncation points: both parsers must reject every one. (A
     // healthy full parse is the control that the harness itself is sound.)

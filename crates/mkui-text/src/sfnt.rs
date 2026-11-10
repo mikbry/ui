@@ -14,7 +14,17 @@
 //! - the SFNT table directory, validated for in-bounds offsets/lengths,
 //! - `head` / `maxp` / `hhea` / `hmtx` for metrics, `cmap` **format 4** (the
 //!   format the fixture's Unicode subtable uses), `loca` + `glyf` for simple
-//!   TrueType quadratic outlines, and minimal `name` data for the family,
+//!   TrueType quadratic outlines, and minimal `name` data for the family
+//!   (typographic family, name id 16, preferred over the compatibility
+//!   family, id 1, when both are present — #181's grouping key for
+//!   weight/style variants of one family),
+//! - an optional `OS/2` table's `usWeightClass` / `fsSelection` italic bit
+//!   (#181: selecting regular/semibold/bold/italic variants), defaulting to
+//!   regular/upright (400, non-italic) when the table is absent or
+//!   unreadable — never a hard parse failure,
+//! - an optional `kern` table's version-0 format-0 horizontal subtable
+//!   (#181: pairwise kerning), silently reporting no kerning when the table
+//!   is absent or in an unsupported format — never a hard parse failure,
 //! - Unicode scalar → glyph id for the ASCII/Latin showcase set,
 //! - advances and simple quadratic outlines, y-up in font units.
 //!
@@ -123,6 +133,24 @@ impl TableRecord {
     }
 }
 
+/// A located, validated `kern` version-0 format-0 horizontal subtable:
+/// `nPairs` sorted `(left, right, value)` triples immediately following the
+/// format-0 header, ready for binary search. Never constructed for a missing
+/// `kern` table or an unsupported subtable (vertical, cross-stream, minimum,
+/// or a format other than 0) — those degrade to "no kerning data" rather than
+/// a parse failure. `override_values` (coverage bit 3) is retained — it
+/// changes how [`SfntFace::kerning`] combines this subtable's contribution
+/// with earlier ones, not whether the subtable is usable at all.
+#[derive(Debug, Clone, Copy)]
+struct KernSubtable {
+    /// Offset of the first `(left, right, value)` triple.
+    pairs_offset: usize,
+    n_pairs: u16,
+    /// Coverage bit 3: a pair value found here replaces the running total
+    /// rather than adding to it (OpenType "override" semantics).
+    override_values: bool,
+}
+
 /// A decoded SFNT face — the narrow TrueType slice the fixture exercises.
 ///
 /// Owns its backing bytes via `Arc<[u8]>` so the parsed face is
@@ -144,6 +172,17 @@ pub struct SfntFace {
     glyf: TableRecord,
     hmtx: TableRecord,
     family_name: Option<String>,
+    /// `OS/2.usWeightClass`, or `400` (regular) when the table is absent or
+    /// unreadable.
+    weight_class: u16,
+    /// `OS/2.fsSelection` bit 0, or `false` when the table is absent or
+    /// unreadable.
+    italic: bool,
+    /// The `kern` table's usable format-0 horizontal subtables, in file
+    /// order (empty if the face has none). [`SfntFace::kerning`] combines
+    /// all of them per OpenType accumulation/override rules, not just the
+    /// first.
+    kern: Vec<KernSubtable>,
 }
 
 /// Resolved horizontal/vertical line metrics for the face, in font units.
@@ -219,6 +258,12 @@ impl SfntFace {
 
         let cmap_format4 = Self::find_unicode_cmap_format4(&bytes, cmap)?;
         let family_name = find(b"name").and_then(|name| Self::read_family_name(&bytes, name).ok());
+        let (weight_class, italic) = find(b"OS/2")
+            .and_then(|os2| Self::read_os2(&bytes, os2).ok())
+            .unwrap_or((400, false));
+        let kern = find(b"kern")
+            .and_then(|k| Self::find_kern_subtables(&bytes, k).ok())
+            .unwrap_or_default();
 
         Ok(Self {
             data: bytes,
@@ -234,6 +279,9 @@ impl SfntFace {
             glyf,
             hmtx,
             family_name,
+            weight_class,
+            italic,
+            kern,
         })
     }
 
@@ -334,10 +382,29 @@ impl SfntFace {
         })
     }
 
-    /// Read the family name (name id 1) as UTF-8, preferring a Windows
-    /// UTF-16BE record then a Macintosh Roman record. Best-effort: a font with
-    /// an unreadable name table simply reports `None`.
+    /// Read the grouping family name: the typographic family (name id 16) —
+    /// which groups weight/style variants beyond the four RIBBI styles
+    /// (regular/bold/italic/bold-italic) under one caller-facing name, e.g.
+    /// "Open Sans" for both its Regular and SemiBold statics — preferred over
+    /// the compatibility family (name id 1), which several non-RIBBI statics
+    /// instead bake the style into (e.g. "Open Sans SemiBold"). Either way,
+    /// prefers a Windows UTF-16BE record then a Macintosh Roman record.
+    /// Best-effort: a font with an unreadable name table simply reports
+    /// `None`.
     fn read_family_name(data: &[u8], name: TableRecord) -> Result<String, SfntError> {
+        if let Ok(typographic) = Self::read_name_record(data, name, 16) {
+            return Ok(typographic);
+        }
+        Self::read_name_record(data, name, 1)
+    }
+
+    /// Read one `name` table record (by name id) as UTF-8, preferring a
+    /// Windows UTF-16BE record then a Macintosh Roman record.
+    fn read_name_record(
+        data: &[u8],
+        name: TableRecord,
+        target_id: u16,
+    ) -> Result<String, SfntError> {
         let base = name.offset;
         let count = read_u16(data, base + 2)? as usize;
         let string_offset = base + read_u16(data, base + 4)? as usize;
@@ -347,7 +414,7 @@ impl SfntFace {
             let platform = read_u16(data, rec)?;
             let _encoding = read_u16(data, rec + 2)?;
             let name_id = read_u16(data, rec + 6)?;
-            if name_id != 1 {
+            if name_id != target_id {
                 continue;
             }
             let length = read_u16(data, rec + 8)? as usize;
@@ -380,7 +447,104 @@ impl SfntFace {
                 _ => {}
             }
         }
-        mac_fallback.ok_or(SfntError::MissingTable("name id 1"))
+        mac_fallback.ok_or(SfntError::MissingTable("name record"))
+    }
+
+    /// Read `OS/2.usWeightClass` (offset 4) and the italic bit of
+    /// `fsSelection` (offset 62, bit 0), the OpenType conventions for a
+    /// face's numeric weight and upright/italic style. Requires the table to
+    /// be at least 64 bytes (through `fsSelection`) — every OS/2 version
+    /// since the original 1.0 spec satisfies this.
+    fn read_os2(data: &[u8], os2: TableRecord) -> Result<(u16, bool), SfntError> {
+        let bytes = os2.slice(data, "OS/2")?;
+        if bytes.len() < 64 {
+            return Err(SfntError::Malformed("OS/2 too short"));
+        }
+        let weight_class = read_u16(bytes, 4)?;
+        let fs_selection = read_u16(bytes, 62)?;
+        let italic = fs_selection & 0x0001 != 0;
+        Ok((weight_class, italic))
+    }
+
+    /// Locate every usable `kern` subtable: version-0 header, format-0,
+    /// flagged horizontal, and neither cross-stream nor minimum. Unlike a
+    /// kerning subtable, a **minimum** subtable (coverage bit 1) defines a
+    /// floor the glyphs' natural advance must not fall below, not an
+    /// adjustment to apply — folding its value in as if it were ordinary
+    /// kerning would apply that floor as a kern instead, over-tightening the
+    /// pair. This decoder doesn't implement minimum-constraint semantics, so
+    /// those subtables are skipped entirely (degrading to "no kerning data
+    /// from this subtable") rather than misread.
+    ///
+    /// Vertical, cross-stream, or non-format-0 subtables are skipped too.
+    /// Every other subtable is collected, in file order: OpenType defines a
+    /// `kern` table's subtables as cumulative (see [`SfntFace::kerning`]),
+    /// not "first match wins" — a font can legitimately ship more than one
+    /// horizontal format-0 subtable (e.g. a base set plus an
+    /// override/supplement).
+    fn find_kern_subtables(data: &[u8], kern: TableRecord) -> Result<Vec<KernSubtable>, SfntError> {
+        let base = kern.offset;
+        let table_end = base + kern.length;
+        let version = read_u16(data, base)?;
+        if version != 0 {
+            // The legacy Apple `kern` table (version 1.0, i.e. a leading
+            // `0x0001_0000`) uses an entirely different subtable layout this
+            // narrow decoder does not parse.
+            return Err(SfntError::Malformed("kern.version"));
+        }
+        let n_tables = read_u16(data, base + 2)?;
+        let mut cursor = base + 4;
+        let mut subtables = Vec::new();
+        for _ in 0..n_tables {
+            if cursor + 6 > table_end {
+                return Err(SfntError::Malformed("kern subtable header"));
+            }
+            let sub_version = read_u16(data, cursor)?;
+            let length = read_u16(data, cursor + 2)? as usize;
+            let coverage = read_u16(data, cursor + 4)?;
+            let sub_end = cursor
+                .checked_add(length)
+                .ok_or(SfntError::Malformed("kern subtable length"))?;
+            // `6` (subtable header) is the floor for any subtable; a format-0
+            // body additionally needs its own 8-byte header
+            // (nPairs/searchRange/entrySelector/rangeShift), checked below
+            // only on the branch that reads it.
+            if length < 6 || sub_end > table_end {
+                return Err(SfntError::Malformed("kern subtable bounds"));
+            }
+
+            // Coverage: bit 0 horizontal, bit 1 minimum, bit 2 cross-stream,
+            // bit 3 override; bits 8-15 hold the subtable format for a
+            // version-0 `kern` table.
+            let horizontal = coverage & 0x0001 != 0;
+            let minimum = coverage & 0x0002 != 0;
+            let cross_stream = coverage & 0x0004 != 0;
+            let override_values = coverage & 0x0008 != 0;
+            let format = coverage >> 8;
+            if sub_version == 0 && format == 0 && horizontal && !cross_stream && !minimum {
+                let format0_base = cursor + 6;
+                // The format-0 header itself (nPairs + 3 reserved fields) must
+                // fit before `nPairs` is trusted.
+                if format0_base + 8 > sub_end {
+                    return Err(SfntError::Malformed("kern format-0 header"));
+                }
+                let n_pairs = read_u16(data, format0_base)?;
+                let pairs_offset = format0_base + 8; // skip nPairs/searchRange/entrySelector/rangeShift
+                let pairs_end = pairs_offset
+                    .checked_add(n_pairs as usize * 6)
+                    .ok_or(SfntError::Malformed("kern pairs length"))?;
+                if pairs_end > sub_end {
+                    return Err(SfntError::Malformed("kern pairs out of bounds"));
+                }
+                subtables.push(KernSubtable {
+                    pairs_offset,
+                    n_pairs,
+                    override_values,
+                });
+            }
+            cursor = sub_end;
+        }
+        Ok(subtables)
     }
 
     /// Font design units per em.
@@ -406,6 +570,66 @@ impl SfntFace {
     /// The family name from the `name` table, if it was readable.
     pub fn family_name(&self) -> Option<&str> {
         self.family_name.as_deref()
+    }
+
+    /// `OS/2.usWeightClass` (OpenType convention: 100 thin .. 900 black, 400
+    /// regular). `400` when the face carries no `OS/2` table.
+    pub fn weight_class(&self) -> u16 {
+        self.weight_class
+    }
+
+    /// Whether `OS/2.fsSelection`'s italic bit is set. `false` when the face
+    /// carries no `OS/2` table.
+    pub fn is_italic(&self) -> bool {
+        self.italic
+    }
+
+    /// Kerning adjustment (font design units, added to the pen position
+    /// between `left` and `right`) from the face's `kern` table, or `0` if
+    /// the face has no usable kerning data or no entry for this pair in any
+    /// subtable. Negative values pull the pair closer (the common case).
+    ///
+    /// Every usable subtable (minimum subtables excluded, see the parse-time
+    /// subtable scan) is consulted, in file order, and combined per
+    /// OpenType's accumulation rule: a subtable with no entry for this pair
+    /// contributes nothing; an
+    /// ordinary subtable's value is *added* to the running total; an
+    /// "override" subtable's value (coverage bit 3) *replaces* it instead of
+    /// adding to it. A font with a single subtable — the common case — sees
+    /// no behavioral change from this accumulation.
+    pub fn kerning(&self, left: u16, right: u16) -> i16 {
+        let key = ((left as u32) << 16) | (right as u32);
+        let mut total: i32 = 0;
+        for sub in &self.kern {
+            if let Some(value) = Self::lookup_kern_pair(&self.data, sub, key) {
+                if sub.override_values {
+                    total = value as i32;
+                } else {
+                    total += value as i32;
+                }
+            }
+        }
+        total.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    }
+
+    /// Binary search `sub`'s sorted `(left, right, value)` triples for
+    /// `key` (`left << 16 | right`), returning the pair's value if present.
+    fn lookup_kern_pair(data: &[u8], sub: &KernSubtable, key: u32) -> Option<i16> {
+        let mut lo = 0usize;
+        let mut hi = sub.n_pairs as usize;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let off = sub.pairs_offset + mid * 6;
+            let entry_left = read_u16(data, off).unwrap_or(0);
+            let entry_right = read_u16(data, off + 2).unwrap_or(0);
+            let entry_key = ((entry_left as u32) << 16) | (entry_right as u32);
+            match entry_key.cmp(&key) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(read_i16(data, off + 4).unwrap_or(0)),
+            }
+        }
+        None
     }
 
     /// Map a Unicode scalar to a glyph id via the format-4 cmap, or `None` if
@@ -787,20 +1011,25 @@ pub(crate) fn apply_transform(outline: &mut GlyphOutline, transform: Affine2Fixe
     outline.ink_bounds = bounds_of(&outline.commands);
 }
 
+/// Synthetic-SFNT test fixtures, shared with `composite.rs`'s tests (#181's
+/// weight/italic/kerning resolution needs more than one hand-built face, and
+/// duplicating this byte-assembly in two files would drift). `pub(crate)` and
+/// `#[cfg(test)]`-gated: invisible outside the crate and absent from a
+/// non-test build.
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
 
-    fn push16(b: &mut Vec<u8>, v: u16) {
+    pub(crate) fn push16(b: &mut Vec<u8>, v: u16) {
         b.extend_from_slice(&v.to_be_bytes());
     }
-    fn push32(b: &mut Vec<u8>, v: u32) {
+    pub(crate) fn push32(b: &mut Vec<u8>, v: u32) {
         b.extend_from_slice(&v.to_be_bytes());
     }
 
     /// A minimal format-4 cmap mapping `'A'` (U+0041) to glyph id 1, plus the
     /// mandatory `0xFFFF` terminator segment.
-    fn cmap_a_to_1() -> Vec<u8> {
+    pub(crate) fn cmap_a_to_1() -> Vec<u8> {
         let mut c = Vec::new();
         push16(&mut c, 0); // version
         push16(&mut c, 1); // numTables
@@ -830,7 +1059,62 @@ mod tests {
     /// Assemble a minimal but valid two-glyph TrueType font (glyph 0 blank,
     /// glyph 1 = `glyf`) around the shared header/metric/cmap tables. `glyf`
     /// must have even length (short-loca half-offset constraint).
-    fn synth_font(glyf: &[u8]) -> Arc<[u8]> {
+    pub(crate) fn synth_font(glyf: &[u8]) -> Arc<[u8]> {
+        synth_font_with_extra(glyf, Vec::new())
+    }
+
+    /// A minimal `OS/2` table (version 0, zero-filled) with `usWeightClass`
+    /// and the `fsSelection` italic bit set.
+    pub(crate) fn os2_table(weight_class: u16, italic: bool) -> Vec<u8> {
+        let mut os2 = vec![0u8; 64];
+        os2[4..6].copy_from_slice(&weight_class.to_be_bytes());
+        let fs_selection: u16 = if italic { 0x0001 } else { 0x0000 };
+        os2[62..64].copy_from_slice(&fs_selection.to_be_bytes());
+        os2
+    }
+
+    /// A minimal `kern` table (version 0) with one format-0 horizontal
+    /// subtable holding `pairs`, pre-sorted by `(left, right)` as the format
+    /// requires.
+    pub(crate) fn kern_table_format0(pairs: &[(u16, u16, i16)]) -> Vec<u8> {
+        kern_table_multi(&[(0, pairs)])
+    }
+
+    /// One format-0 subtable's `(extra_coverage, pairs)` input to
+    /// [`kern_table_multi`]: `extra_coverage` ORed onto the mandatory
+    /// horizontal bit, and `pairs` pre-sorted by `(left, right)`.
+    pub(crate) type KernSubtableSpec<'a> = (u16, &'a [(u16, u16, i16)]);
+
+    /// A `kern` table (version 0) with one or more format-0 subtables —
+    /// `extra_coverage` is ORed onto the mandatory horizontal bit (`0x0001`),
+    /// e.g. `0x0002` (minimum) or `0x0008` (override) — shared by the
+    /// subtable-accumulation/override/minimum-skip regression tests below.
+    pub(crate) fn kern_table_multi(subtables: &[KernSubtableSpec]) -> Vec<u8> {
+        let mut kern = Vec::new();
+        push16(&mut kern, 0); // kern table version
+        push16(&mut kern, subtables.len() as u16); // nTables
+        for &(extra_coverage, pairs) in subtables {
+            let mut sub = Vec::new();
+            push16(&mut sub, pairs.len() as u16); // nPairs
+            push16(&mut sub, 0); // searchRange
+            push16(&mut sub, 0); // entrySelector
+            push16(&mut sub, 0); // rangeShift
+            for &(left, right, value) in pairs {
+                push16(&mut sub, left);
+                push16(&mut sub, right);
+                sub.extend_from_slice(&value.to_be_bytes());
+            }
+            push16(&mut kern, 0); // subtable version
+            push16(&mut kern, (6 + sub.len()) as u16); // length (header + body)
+            push16(&mut kern, 0x0001 | extra_coverage); // coverage: horizontal + extra
+            kern.extend_from_slice(&sub);
+        }
+        kern
+    }
+
+    /// As [`synth_font`], with additional tables (e.g. `OS/2`, `kern`)
+    /// appended beside the required set.
+    pub(crate) fn synth_font_with_extra(glyf: &[u8], extra: Vec<([u8; 4], Vec<u8>)>) -> Arc<[u8]> {
         assert_eq!(glyf.len() % 2, 0, "glyf length must be even for short loca");
 
         let mut head = vec![0u8; 54];
@@ -856,7 +1140,7 @@ mod tests {
         push16(&mut loca, 0); // gid1 start
         push16(&mut loca, (glyf.len() / 2) as u16); // end
 
-        let tables: Vec<([u8; 4], Vec<u8>)> = vec![
+        let mut tables: Vec<([u8; 4], Vec<u8>)> = vec![
             (*b"cmap", cmap_a_to_1()),
             (*b"glyf", glyf.to_vec()),
             (*b"head", head),
@@ -865,6 +1149,7 @@ mod tests {
             (*b"loca", loca),
             (*b"maxp", maxp),
         ];
+        tables.extend(extra);
 
         let num = tables.len();
         let mut out = Vec::new();
@@ -893,7 +1178,7 @@ mod tests {
     }
 
     /// A simple triangular glyph: three on-curve points (0,0)->(100,0)->(0,100).
-    fn triangle_glyf() -> Vec<u8> {
+    pub(crate) fn triangle_glyf() -> Vec<u8> {
         let mut g = Vec::new();
         push16(&mut g, 1); // numberOfContours
         push16(&mut g, 0); // xMin
@@ -918,6 +1203,46 @@ mod tests {
         }
         g
     }
+
+    /// A minimal Windows-platform `name` table with one UTF-16BE record per
+    /// `(name_id, value)` pair.
+    pub(crate) fn windows_name_table(entries: &[(u16, &str)]) -> Vec<u8> {
+        let strings: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(_, s)| s.encode_utf16().flat_map(|u| u.to_be_bytes()).collect())
+            .collect();
+
+        let mut header = Vec::new();
+        push16(&mut header, 0); // format
+        push16(&mut header, entries.len() as u16); // count
+        let records_len = entries.len() * 12;
+        push16(&mut header, (6 + records_len) as u16); // stringOffset
+
+        let mut records = Vec::new();
+        let mut string_storage = Vec::new();
+        let mut string_cursor = 0u16;
+        for ((name_id, _), bytes) in entries.iter().zip(&strings) {
+            push16(&mut records, 3); // platform: Windows
+            push16(&mut records, 1); // encoding: UTF-16BE
+            push16(&mut records, 0x0409); // language: en-US
+            push16(&mut records, *name_id);
+            push16(&mut records, bytes.len() as u16);
+            push16(&mut records, string_cursor);
+            string_storage.extend_from_slice(bytes);
+            string_cursor += bytes.len() as u16;
+        }
+
+        let mut out = header;
+        out.extend_from_slice(&records);
+        out.extend_from_slice(&string_storage);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn synthetic_font_decodes_units_advance_and_cmap() {
@@ -1022,5 +1347,164 @@ mod tests {
             SfntFace::parse(synth_font(&triangle_glyf()), 1).unwrap_err(),
             SfntError::FaceIndexOutOfRange(1)
         );
+    }
+
+    // ---- #181: weight / italic from OS/2 ----------------------------------
+
+    #[test]
+    fn weight_and_italic_default_to_regular_without_os2() {
+        let face = SfntFace::parse(synth_font(&triangle_glyf()), 0).unwrap();
+        assert_eq!(face.weight_class(), 400);
+        assert!(!face.is_italic());
+    }
+
+    #[test]
+    fn weight_and_italic_read_from_os2() {
+        let bytes = synth_font_with_extra(&triangle_glyf(), vec![(*b"OS/2", os2_table(600, true))]);
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.weight_class(), 600);
+        assert!(face.is_italic());
+    }
+
+    #[test]
+    fn upright_os2_reports_non_italic() {
+        let bytes =
+            synth_font_with_extra(&triangle_glyf(), vec![(*b"OS/2", os2_table(700, false))]);
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.weight_class(), 700);
+        assert!(!face.is_italic());
+    }
+
+    // ---- #181: kerning -----------------------------------------------------
+
+    #[test]
+    fn kerning_defaults_to_zero_without_kern_table() {
+        let face = SfntFace::parse(synth_font(&triangle_glyf()), 0).unwrap();
+        assert_eq!(face.kerning(1, 1), 0);
+    }
+
+    #[test]
+    fn kerning_pair_is_found_by_binary_search() {
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_format0(&[(0, 1, -5), (1, 0, -20), (1, 1, -40)]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -5);
+        assert_eq!(face.kerning(1, 0), -20);
+        assert_eq!(face.kerning(1, 1), -40);
+        // Unlisted pair: no kerning, not an error.
+        assert_eq!(face.kerning(5, 6), 0);
+    }
+
+    #[test]
+    fn minimum_subtable_is_not_applied_as_kerning() {
+        // Coverage 0x0002 (minimum) ORed onto the mandatory horizontal bit
+        // 0x0001 yields 0x0003: a minimum-constraint subtable, not a
+        // kerning one. Its -200 must not land as a kerning adjustment.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(*b"kern", kern_table_multi(&[(0x0002, &[(0, 1, -200)])]))],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), 0);
+    }
+
+    #[test]
+    fn two_ordinary_subtables_accumulate() {
+        // Two independent horizontal format-0 subtables both carrying the
+        // same pair: OpenType defines accumulation (sum), not "first wins".
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0, &[(0, 1, -20)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -30);
+    }
+
+    #[test]
+    fn override_subtable_replaces_rather_than_adds() {
+        // Coverage bit 3 (0x0008) on the second subtable: its value for the
+        // pair replaces the running total instead of adding to it.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0x0008, &[(0, 1, -5)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -5);
+    }
+
+    #[test]
+    fn override_subtable_without_a_matching_pair_leaves_the_total_untouched() {
+        // The override subtable has no entry for (0, 1): it must not zero
+        // out or otherwise disturb the first subtable's contribution.
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"kern",
+                kern_table_multi(&[(0, &[(0, 1, -10)]), (0x0008, &[(2, 3, -99)])]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), -10);
+    }
+
+    // ---- #181: typographic family (name id 16) grouping -------------------
+
+    #[test]
+    fn typographic_family_is_preferred_over_compatibility_family() {
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(
+                *b"name",
+                windows_name_table(&[(1, "Open Sans SemiBold"), (16, "Open Sans")]),
+            )],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.family_name(), Some("Open Sans"));
+    }
+
+    #[test]
+    fn compatibility_family_is_used_when_no_typographic_family() {
+        let bytes = synth_font_with_extra(
+            &triangle_glyf(),
+            vec![(*b"name", windows_name_table(&[(1, "Abel")]))],
+        );
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.family_name(), Some("Abel"));
+    }
+
+    #[test]
+    fn kern_table_with_only_a_vertical_subtable_yields_no_kerning() {
+        // coverage = 0x0000: horizontal bit clear.
+        let mut sub = Vec::new();
+        push16(&mut sub, 1); // nPairs
+        push16(&mut sub, 0);
+        push16(&mut sub, 0);
+        push16(&mut sub, 0);
+        push16(&mut sub, 0); // left
+        push16(&mut sub, 1); // right
+        sub.extend_from_slice(&(-9i16).to_be_bytes());
+
+        let mut kern = Vec::new();
+        push16(&mut kern, 0); // version
+        push16(&mut kern, 1); // nTables
+        push16(&mut kern, 0); // subtable version
+        push16(&mut kern, (6 + sub.len()) as u16); // length
+        push16(&mut kern, 0x0000); // coverage: vertical (horizontal bit clear)
+        kern.extend_from_slice(&sub);
+
+        let bytes = synth_font_with_extra(&triangle_glyf(), vec![(*b"kern", kern)]);
+        let face = SfntFace::parse(bytes, 0).unwrap();
+        assert_eq!(face.kerning(0, 1), 0);
     }
 }

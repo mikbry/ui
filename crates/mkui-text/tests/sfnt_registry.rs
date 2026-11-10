@@ -131,13 +131,23 @@ fn fully_supported_text_is_one_slug_run_in_cluster_order() {
     assert_eq!(run.render_class, TextRenderClass::Slug);
     assert_eq!(run.glyphs.len(), 3);
 
-    // Cluster order preserved and glyph ids are the SFNT ids.
+    // Cluster order preserved and glyph ids are the SFNT ids. Each glyph's
+    // reported `x_advance_px` is its own metric *plus* any kerning (#181)
+    // Abel's `kern` table applies before the next glyph — the shaping
+    // convention of recording a pair adjustment on the glyph it trails, so a
+    // caller summing advances lands on the same position `x_px` reports.
+    let text: Vec<char> = "Mag".chars().collect();
     let scale = 24.0 / face.units_per_em() as f32;
-    for (i, ch) in "Mag".chars().enumerate() {
+    for (i, &ch) in text.iter().enumerate() {
         let gid = face.glyph_index(ch).unwrap();
         assert_eq!(run.glyphs[i].cluster, i as u32);
         assert_eq!(run.glyphs[i].glyph_id, gid as u32);
-        let want_adv = face.advance_width(gid) as f32 * scale;
+        let mut want_adv = face.advance_width(gid) as f32 * scale;
+        if let Some(&next_ch) = text.get(i + 1) {
+            if let Some(next_gid) = face.glyph_index(next_ch) {
+                want_adv += face.kerning(gid, next_gid) as f32 * scale;
+            }
+        }
         assert!((run.glyphs[i].x_advance_px - want_adv).abs() < 1e-3);
     }
 }
@@ -197,6 +207,38 @@ fn mixed_text_splits_into_positioned_slug_and_bitmap_runs() {
     assert!(runs
         .iter()
         .all(|r| (r.line_y_baseline_px - baseline).abs() < 1e-3));
+}
+
+#[test]
+fn abel_kern_table_is_applied_between_mapped_glyphs() {
+    // Abel's real `kern` table carries a `"` -> `A` pair (glyphs 5, 36) worth
+    // -123 font units — #181's kerning path applied through the full
+    // composite registry + layout pipeline, not a synthetic fixture.
+    let (sys, id) = registered();
+    let face = sys.sfnt_face(id).unwrap().clone();
+    let quote_gid = face.glyph_index('"').unwrap();
+    let a_gid = face.glyph_index('A').unwrap();
+    let kern = face.kerning(quote_gid, a_gid);
+    assert_eq!(
+        kern, -123,
+        "fixture's known kerning pair changed underneath this test"
+    );
+
+    let spec = slug_spec(id, 24.0);
+    let runs = sys.layout("\"A", &spec, None);
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    assert_eq!(run.glyphs.len(), 2);
+
+    let scale = 24.0 / face.units_per_em() as f32;
+    let quote_advance = face.advance_width(quote_gid) as f32 * scale;
+    let kern_px = kern as f32 * scale;
+
+    // The second glyph's position includes the kerning gap...
+    assert!((run.glyphs[1].x_px - (quote_advance + kern_px)).abs() < 1e-3);
+    // ...and it is folded into the first glyph's reported advance too (the
+    // shaping convention), so summing advances agrees with the position.
+    assert!((run.glyphs[0].x_advance_px - (quote_advance + kern_px)).abs() < 1e-3);
 }
 
 #[test]
