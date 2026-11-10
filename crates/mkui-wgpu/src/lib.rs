@@ -78,6 +78,7 @@ pub mod prelude;
 pub mod render;
 pub mod render_command;
 pub mod renderer;
+pub mod text_edit;
 pub mod theme;
 pub mod types;
 pub mod walker;
@@ -101,6 +102,7 @@ pub use render::offscreen::{OffscreenError, OffscreenRenderer};
 pub use render::{RenderOutcome, Renderer};
 pub use render_command::{build_render_commands, classify_primitive, RenderCommand, RenderLane};
 pub use renderer::WgpuRenderer;
+pub use text_edit::TextEditState;
 pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
 
 // Native Slug adapter re-exports (#66), available only when the `slug` feature
