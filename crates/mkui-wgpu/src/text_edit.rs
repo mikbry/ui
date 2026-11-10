@@ -92,6 +92,13 @@ impl TextEditState {
             self.anchor = None;
         }
         self.caret = pos;
+        // A shift+arrow move back to the anchor must drop the anchor, not
+        // just leave it coincident with the caret — otherwise it resurfaces
+        // as a selection (with stale byte offsets) once a later edit moves
+        // the caret away again. See the #228 review regression tests.
+        if self.anchor == Some(self.caret) {
+            self.anchor = None;
+        }
     }
 
     /// Move the caret one char left. A plain (non-extending) move with an
@@ -134,6 +141,9 @@ impl TextEditState {
     pub fn select_all(&mut self) {
         self.anchor = Some(0);
         self.caret = self.text.len();
+        if self.anchor == Some(self.caret) {
+            self.anchor = None;
+        }
     }
 
     pub fn clear_selection(&mut self) {
@@ -152,10 +162,15 @@ impl TextEditState {
     }
 
     /// Insert `s` at the caret, replacing the selection if any. The caret
-    /// lands just after the inserted text.
+    /// lands just after the inserted text. Line breaks are stripped — this
+    /// is a single-line field, so pasted or typed multi-line text is
+    /// flattened onto one line rather than silently violating the
+    /// single-line caret/selection rendering contract.
     pub fn insert_str(&mut self, s: &str) {
+        self.end_composing_in_place();
+        let s = strip_line_breaks(s);
         self.delete_selection();
-        self.text.insert_str(self.caret, s);
+        self.text.insert_str(self.caret, &s);
         self.caret += s.len();
     }
 
@@ -166,6 +181,7 @@ impl TextEditState {
 
     /// Delete the selection, or the char before the caret.
     pub fn backspace(&mut self) {
+        self.end_composing_in_place();
         if self.delete_selection().is_some() {
             return;
         }
@@ -179,6 +195,7 @@ impl TextEditState {
 
     /// Delete the selection, or the char after the caret.
     pub fn delete(&mut self) {
+        self.end_composing_in_place();
         if self.delete_selection().is_some() {
             return;
         }
@@ -216,6 +233,7 @@ impl TextEditState {
     /// caret position *within* `preedit`, in bytes, defaulting to
     /// `preedit.len()` when the host doesn't supply one.
     pub fn set_composing(&mut self, preedit: &str, cursor: Option<usize>) {
+        let preedit = strip_line_breaks(preedit);
         let start = if let Some((start, end)) = self.composing.take() {
             self.text.replace_range(start..end, "");
             start
@@ -223,7 +241,7 @@ impl TextEditState {
             self.delete_selection();
             self.caret
         };
-        self.text.insert_str(start, preedit);
+        self.text.insert_str(start, &preedit);
         let end = start + preedit.len();
         self.composing = Some((start, end));
         let cursor = cursor.unwrap_or(preedit.len()).min(preedit.len());
@@ -236,7 +254,8 @@ impl TextEditState {
     /// committed text.
     pub fn commit_composing(&mut self, commit_text: &str) {
         if let Some((start, end)) = self.composing.take() {
-            self.text.replace_range(start..end, commit_text);
+            let commit_text = strip_line_breaks(commit_text);
+            self.text.replace_range(start..end, &commit_text);
             self.caret = start + commit_text.len();
         } else {
             self.insert_str(commit_text);
@@ -251,6 +270,32 @@ impl TextEditState {
             self.text.replace_range(start..end, "");
             self.caret = start;
         }
+    }
+
+    /// Resolve an in-progress IME composition in place before any edit that
+    /// isn't itself part of the composition lifecycle: stop tracking its
+    /// range (the preedit text already live in `text` just becomes ordinary
+    /// committed text). Without this, an intervening insert/backspace/delete
+    /// can move the caret or change `text`'s length while a stale
+    /// `composing` range still points at the old positions, so a later
+    /// `commit_composing`/`cancel_composing` slices out of bounds and
+    /// panics.
+    fn end_composing_in_place(&mut self) {
+        self.composing = None;
+    }
+}
+
+/// Strip `\r` and `\n` from `s`. [`TextEditState`] is a single-line field —
+/// both its logical model (one `caret`/selection along one axis) and
+/// [`crate::components::text_field::text_field_editable`]'s rendering
+/// assume text never breaks across lines, so any line breaks arriving via
+/// paste, typed input, or IME commit/preedit are flattened onto one line
+/// rather than silently producing a caret model the renderer can't place.
+fn strip_line_breaks(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains(['\r', '\n']) {
+        std::borrow::Cow::Owned(s.chars().filter(|c| *c != '\r' && *c != '\n').collect())
+    } else {
+        std::borrow::Cow::Borrowed(s)
     }
 }
 
@@ -571,6 +616,79 @@ mod tests {
         state.commit_composing("X");
         assert_eq!(state.text(), "aXb");
         assert_eq!(state.caret(), 2);
+    }
+
+    #[test]
+    fn shift_left_then_shift_right_back_to_anchor_does_not_resurrect_selection() {
+        // Regression for #228 review P1: collapsing a selection back onto
+        // its anchor via shift+arrow must drop the anchor, not just leave
+        // it coincident with the caret.
+        let mut state = TextEditState::new("abc");
+        state.move_left(true);
+        state.move_right(true);
+        assert_eq!(state.selection(), None);
+
+        state.insert_char('d');
+        state.insert_char('e');
+        assert_eq!(state.text(), "abcde");
+
+        // Previously panicked: a stale anchor from the collapsed selection
+        // above would be reinterpreted as a real selection once the caret
+        // moved away, and `delete_selection` would slice past the now-
+        // shorter string.
+        state.backspace();
+        state.backspace();
+        assert_eq!(state.text(), "abc");
+    }
+
+    #[test]
+    fn backspace_during_composition_resolves_composing_before_edit() {
+        // Regression for #228 review P1: an ordinary edit (backspace) while
+        // composing must not leave a stale `composing` range pointing past
+        // the now-shorter text, or a later cancel/commit panics slicing it.
+        let mut state = TextEditState::new("");
+        state.set_composing("x", None);
+        assert_eq!(state.text(), "x");
+        state.backspace();
+        assert_eq!(state.text(), "");
+        assert!(!state.is_composing());
+        // Previously panicked: `composing` was still `Some((0, 1))` here,
+        // one byte past the end of the now-empty string.
+        state.cancel_composing();
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn insert_during_composition_resolves_composing_before_edit() {
+        let mut state = TextEditState::new("ab");
+        state.move_left(false);
+        state.set_composing("x", None);
+        assert_eq!(state.text(), "axb");
+        state.insert_char('y');
+        assert_eq!(state.text(), "axyb");
+        assert!(!state.is_composing());
+        // No-op: composing was already resolved by the insert above.
+        state.cancel_composing();
+        assert_eq!(state.text(), "axyb");
+    }
+
+    #[test]
+    fn paste_strips_line_breaks_to_stay_single_line() {
+        // Regression for #228 review P2: this is a single-line field, so a
+        // multi-line paste is flattened onto one line rather than breaking
+        // the caret/selection model's one-line assumption.
+        let mut state = TextEditState::new("");
+        state.paste("first\r\nsecond");
+        assert_eq!(state.text(), "firstsecond");
+    }
+
+    #[test]
+    fn ime_composing_and_commit_strip_line_breaks() {
+        let mut state = TextEditState::new("");
+        state.set_composing("a\nb", None);
+        assert_eq!(state.text(), "ab");
+        state.commit_composing("c\r\nd");
+        assert_eq!(state.text(), "cd");
     }
 
     #[test]
