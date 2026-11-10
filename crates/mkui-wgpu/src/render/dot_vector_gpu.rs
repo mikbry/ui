@@ -12,19 +12,24 @@
 //!   [`vector_path_paints`](super::vector_path_paints)) and draws it with the
 //!   real [`SlugAdapter`].
 //! - **triangulated**: the exact v0.10.0 quad `dot()` emits *off* the `slug`
-//!   feature — a plain square `Quad` (the renderer does not round quad
-//!   corners, see `components::dot`'s module docs). Hand-built here because
-//!   this test binary is compiled *with* `slug`, so the real `dot()` only
-//!   ever gives this test the vector arm. Tessellated with the real
+//!   feature — a `Quad` with `corner_radii` set to the full radius. Since
+//!   #212, the native tessellator facets that into a many-sided polygon
+//!   (`CORNER_ARC_SEGMENTS` segments per corner, 32 total at this radius),
+//!   not the plain square it used to be. Hand-built here because this test
+//!   binary is compiled *with* `slug`, so the real `dot()` only ever gives
+//!   this test the vector arm. Tessellated with the real
 //!   [`tessellate_scene`](crate::tessellate_scene) and drawn with the real
 //!   [`build_ui_pipeline`](super::build_ui_pipeline).
 //!
-//! The acceptance criterion is that the vector circle is a true round shape
-//! with per-fragment AA coverage at its boundary, while the triangulated
-//! fallback is visibly polygonal (here: literally square). Concretely, a
-//! point that lies inside the square's bounding box but outside the circle —
-//! the corner a circle doesn't have — is covered by the triangulated
-//! primitive and not by the vector one.
+//! The acceptance criterion (pre-#212) was that the vector circle is a true
+//! round shape with per-fragment AA coverage at its boundary, while the
+//! triangulated fallback is visibly polygonal (here: literally square). Now
+//! that the triangulated fallback also rounds its corners, the two shapes
+//! agree geometrically almost everywhere at this radius (4px) and segment
+//! count (32-gon inscribed in the circle) — the remaining, still-genuine
+//! difference is that the triangulated lane's edges stay hard/binary (no
+//! per-fragment AA; see `tessellation::tessellate_quad`'s flat-color
+//! triangles) while the vector lane's curved boundary is anti-aliased.
 
 use bytemuck::cast_slice;
 use wgpu::util::DeviceExt;
@@ -219,11 +224,16 @@ fn full_coverage_green(buf: &[u8]) -> f32 {
 
 #[test]
 fn dot_vector_vs_triangulated_diagonal_corner() {
-    // A point inside the square's bounding box (|dx|, |dy| < RADIUS) but
-    // outside the circle (dx^2 + dy^2 > RADIUS^2): the corner a circle
-    // doesn't have. `0.875 * RADIUS` on both axes sits comfortably inside the
-    // square while its Euclidean distance (~1.237 * RADIUS) clears the
-    // circle boundary well beyond the ~0.5px AA dilation margin.
+    // Pre-#212 this probe distinguished the two lanes: the triangulated
+    // quad was a plain square, so this point (inside the square's bounding
+    // box but outside the circle) was filled on the square and excluded by
+    // the circle. Since #212 the triangulated quad's full-radius corners
+    // facet into a 32-gon that, at this radius (4px) and segment count,
+    // excludes this same point too — `0.875 * RADIUS` on both axes puts it
+    // ~0.95px outside RADIUS, far past the faceted polygon's sub-pixel
+    // (~0.02px) deviation from a true circle. Kept as a regression guard:
+    // the "rounded" corner must actually exclude this point on *both*
+    // lanes, not silently stay square on one of them.
     let offset = (RADIUS * 0.875) as u32;
     let cx = CENTER as u32 + offset;
     let cy = CENTER as u32 + offset;
@@ -236,8 +246,9 @@ fn dot_vector_vs_triangulated_diagonal_corner() {
     full_coverage_green(&vector);
 
     assert!(
-        is_drawn(pixel(&triangulated, cx, cy)),
-        "the square's corner must be filled (it has no curved boundary to exclude it)"
+        !is_drawn(pixel(&triangulated, cx, cy)),
+        "the triangulated lane's rounded corner (#212) must exclude this point, \
+         the same as the circle it now approximates"
     );
     assert!(
         !is_drawn(pixel(&vector, cx, cy)),
@@ -255,8 +266,9 @@ fn dot_vector_vs_triangulated_boundary_antialiasing() {
     // every texel with *partial* coverage (strictly between background and
     // the shape's own full-coverage value), which must be nonzero somewhere
     // around a curved boundary and exactly zero around the triangulated
-    // quad's hard, binary edges (`push_rect` emits flat per-vertex color, no
-    // AA at all).
+    // quad's hard, binary edges — faceted into a 32-gon since #212, but
+    // still flat per-vertex color with no AA at all (`push_rounded_rect_fill`
+    // fans the same flat triangles `push_rect` always emitted).
     let vector = render_vector(&vector_scene());
     let triangulated = render_triangulated(&triangulated_scene());
 
@@ -293,9 +305,10 @@ fn dot_vector_vs_triangulated_coverage_area() {
     // Integrated coverage (each texel's green channel as a fraction of the
     // shape's own full-coverage value), not a binary "is it drawn" pixel
     // count — a binary count folds the whole AA fringe ring into the
-    // circle's area, which overshoots the analytic pi/4 (~0.785) this
-    // integrates to, and more so the smaller the radius (the fringe is a
-    // larger share of a small circle's area).
+    // measured area, which would overshoot the ~0.97 ratio expected below
+    // (see the comment past the `coverage_area` calls), and more so the
+    // smaller the radius (the fringe is a larger share of a small circle's
+    // area).
     let vector = render_vector(&vector_scene());
     let triangulated = render_triangulated(&triangulated_scene());
 
@@ -312,14 +325,19 @@ fn dot_vector_vs_triangulated_coverage_area() {
     let vector_area = coverage_area(&vector, vector_full);
     let triangulated_area = coverage_area(&triangulated, triangulated_full);
 
-    // Square area is exactly (2*RADIUS)^2 = 64 px^2 (grid-aligned, no AA);
-    // circle area is pi*RADIUS^2 ~= 50.3 px^2 — a ratio of pi/4 ~= 0.785.
+    // Pre-#212 the triangulated quad was a plain (2*RADIUS)^2 = 64 px^2
+    // square and the circle's pi*RADIUS^2 ~= 50.3 px^2 area gave a ratio of
+    // pi/4 ~= 0.785. Since #212 the triangulated quad's full-radius corners
+    // make it a 32-gon inscribed in that same circle, so both areas should
+    // now track each other closely (ratio ~1.0) — the only expected gap is
+    // the triangulated lane's binary point-sampling at this small a radius
+    // versus the vector lane's fractional per-fragment AA coverage, hence
+    // the still-generous (not tight-analytic) band below.
     let ratio = vector_area / triangulated_area;
     assert!(
-        (0.65..=0.90).contains(&ratio),
+        (0.8..=1.25).contains(&ratio),
         "integrated-coverage area ratio (vector/triangulated) should track \
-         pi/4 (~0.785) within a generous band (pixel-grid quantization at \
-         this small a radius), got {ratio} (vector_area={vector_area}, \
-         triangulated_area={triangulated_area})"
+         ~1.0 now both lanes approximate the same circle, got {ratio} \
+         (vector_area={vector_area}, triangulated_area={triangulated_area})"
     );
 }

@@ -6,15 +6,24 @@
 //! [`LayoutRun`]s, then rasterizes each glyph into an `Alpha` `GlyphImage`
 //! and emits one quad per non-zero source pixel.
 
+use std::f32::consts::PI;
+
 use mkui_text::{
     BitmapTextSystem, FontId, GlyphFormat, HintingMode, LayoutSpec, TextAlign as MkuiTextAlign,
     TextSystem, VariationSettings,
 };
 
 use crate::types::{
-    Color, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene, Shadow, Size, Text,
-    TextAlign,
+    Color, CornerRadii, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene, Shadow,
+    Size, Text, TextAlign,
 };
+
+/// Number of straight-line segments approximating each 90° corner arc of a
+/// rounded [`Quad`] (fill and stroke alike) — issue #212's "low-segment
+/// triangle fan per corner". Enough to read as rounded at typical UI radii
+/// (4-16px buttons/cards/badges) without inflating triangle counts for every
+/// quad on screen; the zero-radius fast path below pays none of this cost.
+const CORNER_ARC_SEGMENTS: usize = 8;
 
 /// Round `value_px` to the nearest physical pixel at `device_pixel_ratio`,
 /// then convert back to logical pixels. A local copy of the same snap used
@@ -96,23 +105,199 @@ fn tessellate_shadow(triangles: &mut Vec<GuiTriangle>, shadow: Shadow) {
 }
 
 fn tessellate_quad(triangles: &mut Vec<GuiTriangle>, quad: Quad) {
-    push_rect(triangles, quad.rect, quad.fill);
+    let radii = clamp_corner_radii(quad.rect, quad.corner_radii);
+    if corner_radii_are_zero(radii) {
+        push_rect(triangles, quad.rect, quad.fill);
+    } else {
+        push_rounded_rect_fill(triangles, quad.rect, radii, quad.fill);
+    }
+
     if let Some(stroke) = quad.stroke {
         let width = stroke.width.max(1.0);
-        let top = Rect::new(quad.rect.origin, Size::new(quad.rect.size.width, width));
-        let bottom = Rect::new(
-            Point::new(quad.rect.origin.x, quad.rect.height_end() - width),
-            Size::new(quad.rect.size.width, width),
-        );
-        let left = Rect::new(quad.rect.origin, Size::new(width, quad.rect.size.height));
-        let right = Rect::new(
-            Point::new(quad.rect.width_end() - width, quad.rect.origin.y),
-            Size::new(width, quad.rect.size.height),
-        );
-        push_rect(triangles, top, stroke.color);
-        push_rect(triangles, bottom, stroke.color);
-        push_rect(triangles, left, stroke.color);
-        push_rect(triangles, right, stroke.color);
+        if corner_radii_are_zero(radii) {
+            let top = Rect::new(quad.rect.origin, Size::new(quad.rect.size.width, width));
+            let bottom = Rect::new(
+                Point::new(quad.rect.origin.x, quad.rect.height_end() - width),
+                Size::new(quad.rect.size.width, width),
+            );
+            let left = Rect::new(quad.rect.origin, Size::new(width, quad.rect.size.height));
+            let right = Rect::new(
+                Point::new(quad.rect.width_end() - width, quad.rect.origin.y),
+                Size::new(width, quad.rect.size.height),
+            );
+            push_rect(triangles, top, stroke.color);
+            push_rect(triangles, bottom, stroke.color);
+            push_rect(triangles, left, stroke.color);
+            push_rect(triangles, right, stroke.color);
+        } else {
+            push_rounded_rect_stroke(triangles, quad.rect, radii, width, stroke.color);
+        }
+    }
+}
+
+/// Clamp each corner radius to half the shorter rect dimension so opposing
+/// arcs can never overlap — the per-corner generalization of the uniform
+/// clamp `components::card`'s vector-path `rounded_rect_contour` applies to
+/// its single `radius`.
+fn clamp_corner_radii(rect: Rect, radii: CornerRadii) -> CornerRadii {
+    let max_r = (rect.size.width.max(0.0).min(rect.size.height.max(0.0)) * 0.5).max(0.0);
+    CornerRadii {
+        top_left: radii.top_left.clamp(0.0, max_r),
+        top_right: radii.top_right.clamp(0.0, max_r),
+        bottom_right: radii.bottom_right.clamp(0.0, max_r),
+        bottom_left: radii.bottom_left.clamp(0.0, max_r),
+    }
+}
+
+fn corner_radii_are_zero(radii: CornerRadii) -> bool {
+    radii.top_left <= 0.0
+        && radii.top_right <= 0.0
+        && radii.bottom_right <= 0.0
+        && radii.bottom_left <= 0.0
+}
+
+/// Walk `rect`'s boundary clockwise (screen space, `y` down), replacing each
+/// corner with a [`CORNER_ARC_SEGMENTS`]-segment circular arc of the
+/// matching [`CornerRadii`] member. Point order matches [`push_rect`]'s
+/// `top_left → top_right → bottom_right → bottom_left` winding. A zero
+/// radius degenerates that corner's whole arc to the rect corner itself
+/// (`center` coincides with the corner and `radius` is `0.0`), so the
+/// straight-edge case needs no special-casing in the walk itself — only the
+/// zero-triangle-count fast path in [`tessellate_quad`] above needs it, for
+/// performance.
+fn rounded_rect_boundary(rect: Rect, radii: CornerRadii, segments: usize) -> Vec<Point> {
+    let x0 = rect.origin.x;
+    let y0 = rect.origin.y;
+    let x1 = rect.width_end();
+    let y1 = rect.height_end();
+
+    let mut points = Vec::with_capacity(4 * (segments + 1));
+    // Left-edge tangent → top-edge tangent, sweeping through the actual
+    // top-left corner (up and to the left of the arc's own center).
+    push_corner_arc(
+        &mut points,
+        Point::new(x0 + radii.top_left, y0 + radii.top_left),
+        radii.top_left,
+        PI,
+        1.5 * PI,
+        segments,
+    );
+    push_corner_arc(
+        &mut points,
+        Point::new(x1 - radii.top_right, y0 + radii.top_right),
+        radii.top_right,
+        1.5 * PI,
+        2.0 * PI,
+        segments,
+    );
+    push_corner_arc(
+        &mut points,
+        Point::new(x1 - radii.bottom_right, y1 - radii.bottom_right),
+        radii.bottom_right,
+        0.0,
+        0.5 * PI,
+        segments,
+    );
+    push_corner_arc(
+        &mut points,
+        Point::new(x0 + radii.bottom_left, y1 - radii.bottom_left),
+        radii.bottom_left,
+        0.5 * PI,
+        PI,
+        segments,
+    );
+    points
+}
+
+/// Append one corner's arc — `segments + 1` points swept from `start_angle`
+/// to `end_angle` (radians, standard `x`-right/`y`-down screen convention)
+/// around `center` at `radius`. `radius <= 0.0` degenerates every point to
+/// `center`, the sharp-corner case.
+fn push_corner_arc(
+    out: &mut Vec<Point>,
+    center: Point,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+    segments: usize,
+) {
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let angle = start_angle + (end_angle - start_angle) * t;
+        out.push(Point::new(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        ));
+    }
+}
+
+/// Fill a rounded rect by fanning triangles from its center out to each
+/// boundary edge — valid since [`rounded_rect_boundary`] is always convex.
+fn push_rounded_rect_fill(
+    triangles: &mut Vec<GuiTriangle>,
+    rect: Rect,
+    radii: CornerRadii,
+    color: Color,
+) {
+    if rect.size.width <= 0.0 || rect.size.height <= 0.0 || color.a <= 0.0 {
+        return;
+    }
+    let boundary = rounded_rect_boundary(rect, radii, CORNER_ARC_SEGMENTS);
+    let center = Point::new(
+        rect.origin.x + rect.size.width * 0.5,
+        rect.origin.y + rect.size.height * 0.5,
+    );
+    let n = boundary.len();
+    for i in 0..n {
+        triangles.push(GuiTriangle {
+            points: [center, boundary[i], boundary[(i + 1) % n]],
+            color,
+        });
+    }
+}
+
+/// Stroke a rounded rect as a ring between its outer boundary and an inner
+/// boundary inset by `width` on every side (radii reduced by `width` too,
+/// then re-clamped) — so the stroke bends around the same corners the fill
+/// does, instead of the four straight edge strips the un-rounded case still
+/// uses. Outer and inner boundaries share the same per-corner segment count
+/// and angle sweep, so index `i` on one always corresponds to the same
+/// angular position on the other.
+fn push_rounded_rect_stroke(
+    triangles: &mut Vec<GuiTriangle>,
+    rect: Rect,
+    radii: CornerRadii,
+    width: f32,
+    color: Color,
+) {
+    if color.a <= 0.0 || width <= 0.0 {
+        return;
+    }
+    let inset_amount = width.min(rect.size.width * 0.5).min(rect.size.height * 0.5);
+    let inner_rect = rect.inset(Insets::all(inset_amount));
+    let inner_radii = clamp_corner_radii(
+        inner_rect,
+        CornerRadii {
+            top_left: (radii.top_left - inset_amount).max(0.0),
+            top_right: (radii.top_right - inset_amount).max(0.0),
+            bottom_right: (radii.bottom_right - inset_amount).max(0.0),
+            bottom_left: (radii.bottom_left - inset_amount).max(0.0),
+        },
+    );
+
+    let outer = rounded_rect_boundary(rect, radii, CORNER_ARC_SEGMENTS);
+    let inner = rounded_rect_boundary(inner_rect, inner_radii, CORNER_ARC_SEGMENTS);
+    let n = outer.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        triangles.push(GuiTriangle {
+            points: [outer[i], outer[j], inner[j]],
+            color,
+        });
+        triangles.push(GuiTriangle {
+            points: [outer[i], inner[j], inner[i]],
+            color,
+        });
     }
 }
 
@@ -236,7 +421,7 @@ fn push_rect(triangles: &mut Vec<GuiTriangle>, rect: Rect, color: Color) {
 mod tests {
     use super::*;
     use crate::theme::WgpuTheme;
-    use crate::types::{Scene, Size, Text};
+    use crate::types::{Scene, Size, Stroke, Text};
 
     #[test]
     fn text_tessellation_produces_triangles() {
@@ -386,5 +571,142 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- #212: rounded Quad corner tessellation ---------------------------
+
+    fn fill_triangle_area(triangle: &GuiTriangle) -> f32 {
+        let [a, b, c] = triangle.points;
+        ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() * 0.5
+    }
+
+    #[test]
+    fn zero_corner_radii_use_the_plain_rect_fast_path() {
+        let quad = Quad {
+            rect: Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 40.0)),
+            fill: Color::rgb(1.0, 0.0, 0.0),
+            corner_radii: CornerRadii::all(0.0),
+            stroke: Some(Stroke {
+                color: Color::rgb(0.0, 1.0, 0.0),
+                width: 2.0,
+            }),
+        };
+        let mut triangles = Vec::new();
+        tessellate_quad(&mut triangles, quad);
+        // 2 for the plain rect fill, plus 2 each for the stroke's 4 straight
+        // strips — byte-for-byte the pre-#212 behavior.
+        assert_eq!(
+            triangles.len(),
+            2 + 4 * 2,
+            "a zero-radius quad must still use the cheap plain-rect path"
+        );
+    }
+
+    #[test]
+    fn rounded_quad_fill_area_matches_the_analytic_rounded_rect_area() {
+        let width = 80.0;
+        let height = 40.0;
+        let radius = 10.0;
+        let quad = Quad {
+            rect: Rect::new(Point::new(0.0, 0.0), Size::new(width, height)),
+            fill: Color::rgb(1.0, 1.0, 1.0),
+            corner_radii: CornerRadii::all(radius),
+            stroke: None,
+        };
+        let mut triangles = Vec::new();
+        tessellate_quad(&mut triangles, quad);
+
+        // 4 corners * (segments + 1) boundary points, fanned into that many
+        // triangles.
+        assert_eq!(triangles.len(), 4 * (CORNER_ARC_SEGMENTS + 1));
+
+        let area: f32 = triangles.iter().map(fill_triangle_area).sum();
+        // width*height, minus the 4 corner squares the radius carves away,
+        // plus the 4 quarter-circles it replaces them with. The faceted fan
+        // under-approximates a true quarter-circle sector by a tiny, fixed
+        // amount at this segment count, hence the generous-but-not-vacuous
+        // tolerance below.
+        let analytic = width * height - 4.0 * radius * radius + PI * radius * radius;
+        let relative_error = (area - analytic).abs() / analytic;
+        assert!(
+            relative_error < 0.01,
+            "faceted area {area} should track the analytic rounded-rect area \
+             {analytic} within 1% (segment count {CORNER_ARC_SEGMENTS}), got \
+             {relative_error}"
+        );
+    }
+
+    #[test]
+    fn oversized_corner_radii_are_clamped_to_half_the_shorter_side() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 10.0));
+        let radii = clamp_corner_radii(rect, CornerRadii::all(1000.0));
+        let max_r = 5.0; // half of the shorter side (10.0)
+        assert_eq!(radii, CornerRadii::all(max_r));
+
+        let boundary = rounded_rect_boundary(rect, radii, CORNER_ARC_SEGMENTS);
+        for p in &boundary {
+            assert!(
+                (-1e-3..=20.0 + 1e-3).contains(&p.x) && (-1e-3..=10.0 + 1e-3).contains(&p.y),
+                "a clamped boundary point must stay within the rect, got {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn asymmetric_corner_radii_only_round_the_requested_corners() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0));
+        let radii = CornerRadii {
+            top_left: 10.0,
+            top_right: 0.0,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
+        };
+        let boundary = rounded_rect_boundary(rect, radii, CORNER_ARC_SEGMENTS);
+        // The top-right, bottom-right and bottom-left arcs all degenerate to
+        // their rect corner; only the top-left arc sweeps away from (0, 0).
+        assert!(boundary.contains(&Point::new(40.0, 0.0)));
+        assert!(boundary.contains(&Point::new(40.0, 40.0)));
+        assert!(boundary.contains(&Point::new(0.0, 40.0)));
+        assert!(
+            !boundary.contains(&Point::new(0.0, 0.0)),
+            "a rounded top-left corner must never touch the exact (0, 0) corner point"
+        );
+    }
+
+    #[test]
+    fn rounded_quad_stroke_forms_a_ring_between_outer_and_inner_boundaries() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(80.0, 40.0));
+        let radius = 10.0;
+        let width = 4.0;
+        let mut triangles = Vec::new();
+        push_rounded_rect_stroke(
+            &mut triangles,
+            rect,
+            CornerRadii::all(radius),
+            width,
+            Color::rgb(0.0, 0.0, 1.0),
+        );
+
+        let n = 4 * (CORNER_ARC_SEGMENTS + 1);
+        assert_eq!(
+            triangles.len(),
+            2 * n,
+            "one quad (2 triangles) per boundary segment"
+        );
+
+        let ring_area: f32 = triangles.iter().map(fill_triangle_area).sum();
+        let outer_area = 80.0 * 40.0 - 4.0 * radius * radius + PI * radius * radius;
+        let inner_radius = radius - width;
+        let inner_radius_sq = inner_radius * inner_radius;
+        let inner_w = 80.0 - 2.0 * width;
+        let inner_h = 40.0 - 2.0 * width;
+        let inner_area = inner_w * inner_h - 4.0 * inner_radius_sq + PI * inner_radius_sq;
+        let analytic_ring = outer_area - inner_area;
+        let relative_error = (ring_area - analytic_ring).abs() / analytic_ring;
+        assert!(
+            relative_error < 0.02,
+            "ring area {ring_area} should track outer-minus-inner area {analytic_ring} \
+             within 2%, got {relative_error}"
+        );
     }
 }

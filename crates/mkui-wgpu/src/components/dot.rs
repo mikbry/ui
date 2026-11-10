@@ -103,10 +103,10 @@ fn emit_circle(scene: &mut Scene, center: Point, radius: f32, fill: Color) {
 }
 
 /// Emit one filled circle of `radius` centred at `center`. Off the `slug`
-/// feature this stays the exact v0.10.0 quad — a square quad with
-/// `corner_radii` set to the full radius (the renderer does not round quad
-/// corners today, so the on-screen shape is unchanged from before #142: a
-/// square pip, not yet a circle).
+/// feature this is a quad with `corner_radii` set to the full radius — since
+/// #212, the native tessellator facets that into a many-sided polygon
+/// approximating a true circle (flat, hard edges; no per-fragment AA,
+/// unlike the `slug` lane's circle).
 #[cfg(not(feature = "slug"))]
 fn emit_circle(scene: &mut Scene, center: Point, radius: f32, fill: Color) {
     let origin = Point::new(center.x - radius, center.y - radius);

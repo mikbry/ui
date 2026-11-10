@@ -5,10 +5,11 @@
 //! lanes agree everywhere they should and differ exactly where #141 says
 //! they should:
 //!
-//! - the vector lane's corners are genuinely rounded; the triangulated
-//!   lane's are square, because `tessellate_quad` never reads
-//!   `Quad::corner_radii` — the pre-#141 "rounded" card was in fact a
-//!   square-corner approximation;
+//! - the vector lane's corners are genuinely rounded with per-fragment AA;
+//!   since #212, `tessellate_quad` also facets `Quad::corner_radii` into a
+//!   many-sided polygon (hard, non-anti-aliased edges) rather than ignoring
+//!   it — the pre-#141/#212 "rounded" card was in fact a square-corner
+//!   approximation, but the triangulated lane is no longer that;
 //! - the vector lane's border stays inset within the card's own rect, same
 //!   as the triangulated lane's border rects — a regression Codex round-1
 //!   review of #141 caught (a stroke centered on the fill's outer boundary
@@ -232,22 +233,24 @@ fn texel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 /// the border band is `16..20` (top/left) and `44..48` (bottom/right) on
 /// each axis, and the radius-8 corners clip a multi-pixel region at each
 /// corner. Every point below is checked on *both* lanes: the triangulated
-/// lane (square corners, border rects fully inside the rect — see
-/// `tessellate_quad`) is the independent reference the vector lane must
-/// match everywhere except the corners themselves.
+/// lane (rounded since #212, hard-edged — see `tessellate_quad`) is the
+/// independent reference the vector lane must match everywhere, including
+/// now at the corners, modulo the vector lane's anti-aliasing.
 #[test]
 fn card_vector_vs_triangulated() {
     let triangulated = render_triangulated(test_rect(), &test_style());
     let vector = render_vector(test_rect(), &test_style());
 
-    // The exact corner pixel: squared (and border-colored, since both
-    // adjacent border rects overlap there) in the triangulated lane;
-    // clipped to the background in the vector lane (the rounded corner's
-    // arc excludes it) — the precise corner-squareness bug #141 fixes.
+    // The exact corner pixel: its center (16.5, 16.5) is ~10.61px from the
+    // radius-8 arc's own center (24, 24) — 2.6px outside the radius, far
+    // past the faceted polygon's sub-pixel deviation from a true arc — so
+    // since #212 both lanes clip it to the background, the same precise
+    // corner-roundedness #141 established for the vector lane alone.
     assert_eq!(
         texel(&triangulated, 16, 16),
-        GREEN,
-        "triangulated corner is square: the exact corner pixel must be border-colored"
+        BLUE,
+        "triangulated corner is rounded too (#212): the exact corner pixel must show the \
+         background through it"
     );
     assert_eq!(
         texel(&vector, 16, 16),

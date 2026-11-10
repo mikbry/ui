@@ -32,17 +32,23 @@
 //!   `mkui_wgpu::Mkui::run`.
 //!
 //! Scope note (acceptance criterion "triangulated column shows visible
-//! polygons"): `mkui-wgpu`'s shared native tessellator
-//! (`tessellate_quad`/`push_rect`) does not consume `Quad::corner_radii` at
-//! all — a rounded `Quad` renders as a plain square there, not a faceted
-//! polygon. That's the exact, documented, GPU-test-asserted baseline #142's
-//! own `render/dot_vector_gpu.rs` builds its triangulated-vs-vector
-//! comparison against, and this showcase does **not** touch that shared
-//! code — an earlier revision of this PR did, and had to be reverted
-//! because it silently broke #142's merged acceptance test and changed the
-//! rendered look of every `CornerRadii`-using atom in the toolkit
+//! polygons"): at the time this showcase was written, `mkui-wgpu`'s shared
+//! native tessellator (`tessellate_quad`/`push_rect`) did not consume
+//! `Quad::corner_radii` at all — a rounded `Quad` rendered as a plain
+//! square there, not a faceted polygon. That was the exact,
+//! GPU-test-asserted baseline #142's own `render/dot_vector_gpu.rs` built
+//! its triangulated-vs-vector comparison against, and this showcase
+//! deliberately did **not** touch that shared code — an earlier revision
+//! of this PR did, and had to be reverted because it silently broke #142's
+//! merged acceptance test and changed the rendered look of every
+//! `CornerRadii`-using atom in the toolkit
 //! (button/card/dot/badge/panel/scrollbar/slider/swatch/text_field). #212
-//! still tracks that production-wide gap.
+//! has since fixed that production-wide gap directly in `tessellate_quad`
+//! (and updated #140/#141/#142's GPU tests to match) — this showcase's own
+//! local polygon rasterizer below predates that fix and is kept as-is
+//! (it's a different, lower-level rasterization strategy, not a
+//! regression), but the "shared tessellator still draws squares" framing
+//! above is now historical, not current.
 //!
 //! Instead, the left column's "triangulated" shape is built *locally*, only
 //! in this example: [`rounded_rect_polygon`] generates a genuine low-facet
@@ -591,13 +597,14 @@ fn build_scene() -> Scene {
     );
 
     // Honest caveat: this showcase-local faceted polygon is NOT the real
-    // Primitive::Quad path real components use (see the module docs — that
-    // shared tessellator still renders a rounded Quad as a plain square,
-    // #212). The box height below is sized for the 2 lines this text
-    // actually wraps to at COL_WIDTH (verified against the bitmap font's
-    // real glyph-advance wrap — a previous, undersized box here truncated a
-    // caption mid-sentence and silently dropped its trailing issue
-    // reference).
+    // Primitive::Quad path real components use (see the module docs — #212
+    // has since fixed that shared tessellator to also facet rounded
+    // corners, but this showcase's own rasterizer predates that fix and is
+    // a different code path, kept as-is). The box height below is sized
+    // for the 2 lines this text actually wraps to at COL_WIDTH (verified
+    // against the bitmap font's real glyph-advance wrap — a previous,
+    // undersized box here truncated a caption mid-sentence and silently
+    // dropped its trailing issue reference).
     label(
         &mut scene,
         Rect::new(Point::new(COL_LEFT_X, 104.0), Size::new(COL_WIDTH, 36.0)),
@@ -1062,10 +1069,11 @@ mod tests {
     /// inside the dot's bounding square but outside a *true* circle (the
     /// corner a circle doesn't have) must be **excluded** by this showcase's
     /// local faceted-polygon approximation too — proof it's a genuine
-    /// low-facet polygon, not a smuggled-back plain square. (Contrast: the
-    /// real `Primitive::Quad` + `tessellate_quad` path — not used here —
-    /// would *include* that point, since it's just a rectangle; that's
-    /// exactly the behavior #212 tracks and this showcase avoids rendering.)
+    /// low-facet polygon, not a smuggled-back plain square. (At the time
+    /// this test was written, the real `Primitive::Quad` + `tessellate_quad`
+    /// path — not used here — would have *included* that point, since it
+    /// was just a rectangle; #212 has since fixed that path too, so this
+    /// contrast is historical, not current — see `tessellation.rs`.)
     #[test]
     fn faceted_dot_polygon_excludes_its_bounding_squares_corner() {
         let polygon = rounded_rect_polygon(DOT_SIZE.width, DOT_SIZE.height, DOT_RADIUS);

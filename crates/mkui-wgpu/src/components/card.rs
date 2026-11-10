@@ -6,12 +6,12 @@
 //!
 //! Sprint 8 Wave 2 (#141): under the `slug` feature, the rounded rect + border
 //! draws as a single [`crate::types::PlacedVectorPath`] (fill + stroke) on the
-//! Slug coverage lane instead of being tessellated to triangles — the
-//! tessellator never respects `Quad::corner_radii` (see
-//! `tessellation::tessellate_quad`), so the pre-#141 "rounded" card was in fact
-//! a square-cornered approximation. With the feature off, `card` is
-//! byte-identical to v0.10.0: same `Quad` push, same corner-radii field (still
-//! unused by the triangulator, preserved only for API parity).
+//! Slug coverage lane instead of being tessellated to triangles — smooth,
+//! per-fragment-AA corners via `mkui_vector2d_wgpu`'s cubic-Bézier contour.
+//! With the feature off, `card` pushes the same `Quad`, whose corner radius
+//! `tessellation::tessellate_quad` now facets into a many-sided polygon
+//! (#212) rather than ignoring it outright — rounded, but with hard
+//! (non-anti-aliased) faceted edges instead of the vector lane's true curve.
 
 use crate::theme::CardStyle;
 use crate::types::{Rect, Scene};
