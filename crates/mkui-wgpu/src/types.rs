@@ -470,6 +470,12 @@ impl CornerRadii {
 }
 
 impl Color {
+    /// Fully transparent — "no paint". A sentinel distinct from any named
+    /// theme token: it represents the absence of a themed value, not a
+    /// palette choice, so resolvers may use it without pulling a
+    /// `ThemeTokens` field (see issue #205).
+    pub const TRANSPARENT: Color = Color::rgba(0.0, 0.0, 0.0, 0.0);
+
     pub const fn rgba(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }

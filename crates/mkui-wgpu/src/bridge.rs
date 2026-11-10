@@ -35,7 +35,7 @@ use mkui_core::error::MkuiError;
 use mkui_runtime::{AppTree, Node};
 
 use crate::theme::WgpuTheme;
-use crate::types::Scene;
+use crate::types::{Color, Scene};
 use crate::walker::HitTestEntry;
 
 /// Per-render outcome returned by a [`WgpuRenderable`]. The walker uses
@@ -112,6 +112,12 @@ pub struct WgpuRenderCtx<'a> {
     /// Left content edge (after any ancestor's left padding has been
     /// applied).
     pub content_x: f32,
+    /// Text color inherited from the nearest ancestor `View` whose class
+    /// set a `ResolvedStyle::foreground` role (`text-foreground`,
+    /// `text-card-foreground`, …) — mirrors the CSS cascade `mkui-web`
+    /// gets for free from the browser (issue #205). `render_text` uses
+    /// this when the text node itself sets no foreground role.
+    pub current_foreground: Color,
 }
 
 /// Registry of custom-component handlers keyed by `type_name`. Built-in
@@ -484,6 +490,7 @@ mod tests {
             viewport_width: 100.0,
             cursor_y: 0.0,
             content_x: 0.0,
+            current_foreground: theme.body_style.color,
         };
 
         let outcome = registry
@@ -546,6 +553,7 @@ mod tests {
             viewport_width: 100.0,
             cursor_y: 0.0,
             content_x: 0.0,
+            current_foreground: theme.body_style.color,
         };
 
         registry

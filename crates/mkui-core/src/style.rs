@@ -6,7 +6,7 @@
 //! downstream callers while the canonical type itself moved one crate
 //! deeper.
 
-pub use mkui_runtime::{ClassParseError, ResolvedStyle, StyleClass};
+pub use mkui_runtime::{ClassParseError, ColorRole, ResolvedStyle, StyleClass};
 
 /// Builder helper retained for source compatibility with v0.4.x callers
 /// that wrote `Style::class("flex")`.

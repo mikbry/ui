@@ -49,7 +49,7 @@
 
 use mkui_core::error::MkuiError;
 use mkui_runtime::{
-    ActionId, AppTree, ButtonVariant, NodeId, NodeKind, ResolvedStyle, TextVariant,
+    ActionId, AppTree, ButtonVariant, ColorRole, NodeId, NodeKind, ResolvedStyle, TextVariant,
 };
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
@@ -57,7 +57,8 @@ use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
 };
 use crate::types::{
-    CornerRadii, Point, Quad, Rect, Scene, Size, Stroke, Text, TextAlign, TextStyle,
+    Color, CornerRadii, Point, Primitive, Quad, Rect, Scene, Size, Stroke, Text, TextAlign,
+    TextStyle,
 };
 
 /// One interactive region collected during the walk. The input router
@@ -158,6 +159,7 @@ pub fn walk_app_tree(
             viewport_width: options.viewport.width,
             cursor_y: VIEWPORT_OUTER_MARGIN_PX,
             content_x: VIEWPORT_OUTER_MARGIN_PX,
+            current_foreground: options.theme.body_style.color,
         };
 
         if let Some(root) = tree.get(tree.root()) {
@@ -241,7 +243,34 @@ fn render_view(
     let inner_width = (content_width - pad_x * 2.0).max(0.0);
     let inner_left = outer_left + pad_x;
 
+    // `bg-card` (today the only class that sets `ResolvedStyle::background`)
+    // paints a themed quad behind the container's children — previously
+    // this role was parsed but never consumed, so the class had no visual
+    // effect on wgpu (issue #205). The quad's final rect isn't known until
+    // the children below have been laid out (height grows with content),
+    // but it must still land *behind* them in `Scene::primitives`' paint
+    // order, so a placeholder is reserved here and patched in place once
+    // `outer_bottom` is known.
+    let bg_index = style.background.map(|_| {
+        ctx.scene.primitives.push(Primitive::Quad(Quad {
+            rect: Rect::new(Point::new(outer_left, outer_top), Size::new(0.0, 0.0)),
+            fill: Color::TRANSPARENT,
+            corner_radii: CornerRadii::all(0.0),
+            stroke: None,
+        }));
+        ctx.scene.primitives.len() - 1
+    });
+
     let saved_content_x = ctx.content_x;
+    // `text-*` on a container (e.g. the showcase's `bg-card
+    // text-card-foreground` card) must cascade to descendant `Text` nodes
+    // that set no color of their own — the same inheritance `mkui-web`
+    // gets for free from CSS. Save/restore around the recursion mirrors
+    // the existing `content_x` save/restore just above.
+    let saved_foreground = ctx.current_foreground;
+    if let Some(role) = style.foreground {
+        ctx.current_foreground = color_role_foreground(role, ctx.theme);
+    }
 
     ctx.content_x = inner_left;
     ctx.cursor_y = outer_top + pad_y;
@@ -257,13 +286,40 @@ fn render_view(
     // stretch to their parent's content_width).
     ctx.content_x = saved_content_x;
     ctx.cursor_y = outer_bottom;
+    ctx.current_foreground = saved_foreground;
+
+    let rect = Rect::new(
+        Point::new(outer_left, outer_top),
+        Size::new(content_width.max(0.0), (outer_bottom - outer_top).max(0.0)),
+    );
+
+    if let (Some(role), Some(idx)) = (style.background, bg_index) {
+        let fill = color_role_fill(role, ctx.theme);
+        let card = ctx.theme.card();
+        let corner_radius = if style.rounded_lg {
+            card.corner_radius
+        } else {
+            0.0
+        };
+        let stroke = if style.border {
+            Some(Stroke {
+                color: card.stroke,
+                width: card.stroke_width,
+            })
+        } else {
+            None
+        };
+        ctx.scene.primitives[idx] = Primitive::Quad(Quad {
+            rect,
+            fill,
+            corner_radii: CornerRadii::all(corner_radius),
+            stroke,
+        });
+    }
 
     layouts.push(NodeLayout {
         node: node.id,
-        rect: Rect::new(
-            Point::new(outer_left, outer_top),
-            Size::new(content_width.max(0.0), (outer_bottom - outer_top).max(0.0)),
-        ),
+        rect,
     });
 
     Ok(())
@@ -281,7 +337,13 @@ fn render_text(
     let line_height = (font_size * 1.25).max(font_size + 2.0);
 
     let body_style = ctx.theme.body_style;
-    let color = body_style.color;
+    // The node's own `text-*` class (e.g. `text-foreground`) wins; absent
+    // one, it inherits the nearest ancestor `View`'s foreground role (set
+    // in `render_view`), falling back to the theme's default body color.
+    let color = match style.foreground {
+        Some(role) => color_role_foreground(role, ctx.theme),
+        None => ctx.current_foreground,
+    };
 
     let align = if style.text_center {
         TextAlign::Center
@@ -386,6 +448,30 @@ fn map_button_variant(v: ButtonVariant) -> ThemeButtonVariant {
         // ButtonVariant is `#[non_exhaustive]` — future variants fall back
         // to the Default style until they get their own arm.
         _ => ThemeButtonVariant::Default,
+    }
+}
+
+/// Resolve a `bg-*` [`ColorRole`] to the fill the themed background quad
+/// paints. `mkui-web` gets this mapping for free from CSS variables
+/// (`var(--card)`); the wgpu walker has to do it explicitly (issue #205).
+fn color_role_fill(role: ColorRole, theme: &WgpuTheme) -> Color {
+    match role {
+        ColorRole::Card => theme.tokens.card_fill,
+        // `ColorRole` is `#[non_exhaustive]` and today only `bg-card` ever
+        // sets `ResolvedStyle::background` — the other roles are text-only.
+        // Fall back to the neutral surface token rather than panic.
+        _ => theme.tokens.surface,
+    }
+}
+
+/// Resolve a `text-*` [`ColorRole`] to a concrete text color.
+fn color_role_foreground(role: ColorRole, theme: &WgpuTheme) -> Color {
+    match role {
+        ColorRole::Card => theme.tokens.card_fill,
+        ColorRole::CardForeground => theme.tokens.surface_foreground,
+        ColorRole::Foreground => theme.tokens.surface_foreground,
+        ColorRole::MutedForeground => theme.tokens.muted_foreground,
+        _ => theme.tokens.surface_foreground,
     }
 }
 
@@ -606,5 +692,144 @@ mod tests {
         assert!(!out.scene.primitives.is_empty());
         assert_eq!(out.hit_tests.len(), 1);
         assert!(!out.layouts.is_empty());
+    }
+
+    fn walk_with_theme(core: &CoreMkui, theme: WgpuTheme) -> WalkOutput {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme,
+        };
+        walk_app_tree(core.tree(), &registry, &options).expect("walk")
+    }
+
+    fn quads(scene: &Scene) -> Vec<&Quad> {
+        scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::Quad(q) => Some(q),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `bg-card` used to parse into `ResolvedStyle::background` and then
+    /// go nowhere — the wgpu walker never consumed it, so a card-styled
+    /// `View` painted no background at all (issue #205). It must now
+    /// paint the themed card fill, behind its children in paint order.
+    #[test]
+    fn bg_card_class_paints_the_themed_card_fill_behind_its_children() {
+        let core = CoreMkui::new().child(
+            View::new()
+                .class("bg-card")
+                .child(CoreText::new("inside").variant(TextVariant::Body)),
+        );
+        let theme = WgpuTheme::default();
+        let out = walk_with_theme(&core, theme);
+
+        let card_quads = quads(&out.scene)
+            .into_iter()
+            .filter(|q| q.fill == theme.tokens.card_fill)
+            .count();
+        assert_eq!(
+            card_quads, 1,
+            "bg-card must paint exactly one quad filled with the theme's card_fill token"
+        );
+
+        let bg_pos = out
+            .scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::Quad(q) if q.fill == theme.tokens.card_fill))
+            .expect("card background quad");
+        let text_pos = out
+            .scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::Text(t) if t.content == "inside"))
+            .expect("child text");
+        assert!(
+            bg_pos < text_pos,
+            "the card background must paint before (behind) its child text"
+        );
+    }
+
+    /// A `View`'s own `text-*` class (no `Text`-node class of its own)
+    /// must cascade to child `Text` nodes — the same inheritance
+    /// `mkui-web` gets for free from the CSS cascade.
+    #[test]
+    fn foreground_role_on_a_view_cascades_to_untagged_child_text() {
+        let core = CoreMkui::new().child(
+            View::new()
+                .class("bg-card text-card-foreground")
+                .child(CoreText::new("inherits").variant(TextVariant::Body)),
+        );
+        let theme = WgpuTheme::default();
+        let out = walk_with_theme(&core, theme);
+
+        let text = text_primitives(&out.scene)[0];
+        assert_eq!(
+            text.style.color,
+            color_role_foreground(ColorRole::CardForeground, &theme),
+            "text with no color class of its own must inherit the ancestor's text-card-foreground"
+        );
+    }
+
+    /// A `Text` node's own `text-*` class wins over any ancestor role.
+    #[test]
+    fn foreground_role_on_the_text_node_itself_overrides_the_ancestor() {
+        let core = CoreMkui::new().child(
+            View::new().class("bg-card text-card-foreground").child(
+                CoreText::new("overridden")
+                    .variant(TextVariant::Body)
+                    .class("text-muted-foreground"),
+            ),
+        );
+        let theme = WgpuTheme::default();
+        let out = walk_with_theme(&core, theme);
+
+        let text = text_primitives(&out.scene)[0];
+        assert_eq!(
+            text.style.color,
+            color_role_foreground(ColorRole::MutedForeground, &theme),
+        );
+    }
+
+    /// Acceptance criterion #205.2, exercised end-to-end through the real
+    /// declarative tree + walker path (not just the resolver unit tests
+    /// in `theme.rs`): the identical tree, walked through the identical
+    /// `walk_app_tree`/`render_view`/`render_text` code, must render a
+    /// different background and text color when only the `WgpuTheme`
+    /// swaps — no call site above the walk changes.
+    #[test]
+    fn swapping_the_theme_changes_rendered_colors_with_no_tree_change() {
+        let core = CoreMkui::new().child(
+            View::new()
+                .class("bg-card text-card-foreground")
+                .child(CoreText::new("swap me").variant(TextVariant::Body)),
+        );
+
+        let default_theme = WgpuTheme::default();
+        let mut swapped = WgpuTheme::default();
+        swapped.tokens.card_fill = Color::rgba(0.9, 0.1, 0.1, 1.0);
+        swapped.tokens.surface_foreground = Color::rgba(0.1, 0.9, 0.1, 1.0);
+        assert_ne!(
+            default_theme, swapped,
+            "the two themes must actually differ"
+        );
+
+        let default_out = walk_with_theme(&core, default_theme);
+        let swapped_out = walk_with_theme(&core, swapped);
+
+        let default_bg = quads(&default_out.scene)[0].fill;
+        let swapped_bg = quads(&swapped_out.scene)[0].fill;
+        assert_ne!(default_bg, swapped_bg);
+        assert_eq!(swapped_bg, swapped.tokens.card_fill);
+
+        let default_text = text_primitives(&default_out.scene)[0].style.color;
+        let swapped_text = text_primitives(&swapped_out.scene)[0].style.color;
+        assert_ne!(default_text, swapped_text);
+        assert_eq!(swapped_text, swapped.tokens.surface_foreground);
     }
 }
