@@ -14,6 +14,8 @@
 //!   — abstract flex layout primitives.
 //! - **Input contracts** ([`input::InputEvent`], [`input::Key`], ...) — the
 //!   normalized event stream every backend feeds into headless components.
+//!   [`input::Routed`] is the shared consumed/ignored vocabulary a
+//!   backend's embedding-host input router reports per event (ADR 0011).
 //! - **Style classes** ([`style::StyleClass`]) — the utility-class string
 //!   format shared by every backend.
 //! - **Error types** ([`error::MkuiError`]).

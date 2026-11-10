@@ -64,6 +64,8 @@ pub mod bridge;
 pub mod builder;
 pub mod components;
 pub mod high_level;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod input_router;
 pub mod pointer;
 pub mod prelude;
 #[cfg(not(target_arch = "wasm32"))]
