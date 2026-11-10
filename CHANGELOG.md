@@ -627,6 +627,51 @@ breaking changes can land on minor bumps).
     are byte-identical; both new lanes share `prepare_packed` so every lane hits
     the same buffer/bind-group/draw path. Zero dependency on `mkui-wgpu`; no new
     dependencies beyond `mkui-vector2d` + `wgpu` + `bytemuck`.
+- **`mkui-text`'s Slug (SFNT) lane now wraps, aligns, caps lines, and
+  ellipsizes — T2 of #173 (#182).** `#171`/`#172` shipped the Slug-lane
+  component call site but `SfntProvider::layout_local` only ever laid out one
+  unwrapped, `Start`-aligned line — `expand_slug_text` detected the cases it
+  couldn't honor (`Center`/`End` alignment, a multi-line-capable box, a `'\n'`,
+  an overflowing line) and bailed the whole primitive to the bitmap lane
+  instead. `layout_local` now:
+  - **Word-wraps** at `max_width_px` using each character's real advance
+    width (not a fixed per-glyph advance), breaking at the last whitespace in
+    range and hard-breaking mid-word only when a single word exceeds the
+    width — the same contract `bitmap::wrap_paragraph` already gives the
+    bitmap lane, now width- rather than glyph-count-bounded.
+  - **Honors `TextAlign::Center`/`TextAlign::End`** by offsetting each line's
+    pen start against its measured content width, only when `max_width_px` is
+    bounded (unbounded text stays `Start`, matching the bitmap lane).
+  - **Caps at `LayoutSpec::max_lines`** and ellipsizes the final line — a
+    single `'…'` glyph when the face maps it, else three `'.'` glyphs (mirrors
+    `bitmap::wrap_text_lines`'s `"..."` fallback) — shrinking the kept content
+    first when `max_width_px` is bounded.
+  - Preserves the existing per-character Slug/bitmap-fallback segmentation
+    (an unmapped glyph still splits into an adjacent bitmap run) within each
+    wrapped line, and keeps every glyph's `cluster` a global index into the
+    source string so `expand_slug_text`'s fallback-character lookup is
+    unaffected.
+  - Fixes a latent `mkui-text::engine::build_layout` bug this change would
+    otherwise have exposed: it assumed exactly one `LayoutRun` per line, which
+    undercounted/mismeasured any line that splits into a Slug + bitmap-
+    fallback run pair. `build_layout` now groups runs sharing the same
+    `line_y_baseline_px` into one line and measures each line's width from its
+    absolute left/right extent across all its runs, not a single run's local
+    width. No prior shipping caller was affected (no component wires
+    `TextEngine` yet), but this is the crate's public measurement API
+    (acceptance: "a measurement function returns the laid-out size of a text
+    block without drawing it").
+  - Scope decision: shipped the `mkui-text` layout engine work (wrap, align,
+    line-height, max-width, ellipsis, measurement) for the Slug lane.
+    Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s bailout
+    guards (multi-line, non-`Start` align, `'\n'`) so already-correct Slug
+    output is actually routed through the Slug lane instead of falling back
+    to bitmap — that changes renderer routing and needs GPU (Lavapipe)
+    verification this environment cannot run. Tracked as a follow-up issue.
+  - Scope decision: paragraph spacing (mentioned in #182's Goal prose, not
+    its Acceptance checklist) is out of scope — `LayoutSpec` has no paragraph-
+    spacing field and adding one was not required to satisfy any Acceptance
+    item.
 
 ### Fixed
 - **`mkui-core`'s `JsValue` error variant failed to compile on `wasm32`; no
