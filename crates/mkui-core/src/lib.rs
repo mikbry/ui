@@ -17,6 +17,9 @@
 //! - **Style classes** ([`style::StyleClass`]) — the utility-class string
 //!   format shared by every backend.
 //! - **Error types** ([`error::MkuiError`]).
+//! - **Platform services** ([`platform::PlatformHost`]) — the contract a
+//!   host implements so mkui can reach the OS clipboard / native share sheet
+//!   without touching platform APIs itself.
 //!
 //! ## What does *not* belong here
 //!
@@ -37,6 +40,7 @@ pub mod event;
 pub mod headless;
 pub mod input;
 pub mod layout;
+pub mod platform;
 pub mod state;
 pub mod style;
 pub mod theme;
@@ -54,6 +58,9 @@ pub mod prelude {
 
     // Error handling
     pub use crate::error::MkuiError;
+
+    // Platform services (clipboard, native share) — see `platform` module docs.
+    pub use crate::platform::{NoopPlatformHost, PlatformHost, ShareRequest};
 
     // Other modules
     pub use crate::event::*;

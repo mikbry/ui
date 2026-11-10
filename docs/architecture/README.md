@@ -48,6 +48,10 @@ and the records below.
   host must overlap `mkui-wgpu`'s current `wgpu` requirement to unify
   dependency graphs, and each bump is a reviewed, documented PR like this
   one, not a permissive range that would silently break on either end.
+- [ADR 0010 — `PlatformHost` trait for clipboard and native share](0010-platform-host-trait-for-clipboard-and-share.md)
+  — A plain trait in `mkui-core`, with only a `NoopPlatformHost` default
+  shipped; applications wire a real implementation by capturing it in a
+  `Button::on_press` closure, with no new action-registry plumbing.
 
 ## ADR format conventions
 

@@ -8,6 +8,20 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui_core::platform::PlatformHost` — clipboard + native share routed
+  through the host, not the OS (#206).** New `mkui-core` module defining
+  `PlatformHost` (`copy_to_clipboard`, `share`) and `ShareRequest`
+  (`title`/`text`/`url`, all optional). `mkui-core` ships only
+  `NoopPlatformHost`, a zero-dependency no-op default usable in headless
+  targets and unit tests; every OS-touching implementation (clipboard,
+  share sheet) lives in host/application code, consistent with #173's
+  sandboxed-embedding constraints (no filesystem, no network calls from
+  inside mkui). No new action-registry plumbing was needed — `Button::
+  on_press` already accepts an arbitrary closure, so an app wires a host by
+  capturing `Rc<dyn PlatformHost>` in it; see ADR 0010. A backend-provided
+  implementation (e.g. a `web_sys`-backed host in `mkui-web`) is deferred to
+  #220 — #206's acceptance criteria ask only for the trait and the no-op/test
+  double.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through
