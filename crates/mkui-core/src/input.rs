@@ -104,6 +104,50 @@ pub enum InputEvent {
     Blur,
 }
 
+/// Outcome of routing one host-forwarded event through mkui's input router.
+///
+/// An embedding host (e.g. a `wgpu` game forwarding `winit` events into
+/// mkui, per the embedding contract tracked at #173/#176) needs a per-event
+/// answer to "did mkui want this?" so it knows whether to also feed the
+/// event to its own gameplay input (movement, camera look, hotkeys, ...).
+/// `Routed` is that answer. Each backend's concrete router (hit-testing,
+/// pointer capture, keyboard focus) decides the value; this type is just
+/// the shared vocabulary so every backend's router speaks the same
+/// consumed/not-consumed contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Routed {
+    /// mkui consumed the event. The host must not also act on it — e.g. a
+    /// click that landed on a HUD button, or a key swallowed by a focused
+    /// text field.
+    Consumed,
+    /// mkui had no interest in the event. The host's own input layer is
+    /// free to process it as usual. The default: absent any other signal,
+    /// an event is the host's.
+    #[default]
+    Ignored,
+}
+
+impl Routed {
+    /// Build a `Routed` from a boolean "did mkui want this" predicate.
+    /// Lets callers write `Routed::from_consumed(hit.is_some())` instead of
+    /// a manual `if`.
+    pub fn from_consumed(consumed: bool) -> Self {
+        if consumed {
+            Routed::Consumed
+        } else {
+            Routed::Ignored
+        }
+    }
+
+    pub fn is_consumed(self) -> bool {
+        matches!(self, Routed::Consumed)
+    }
+
+    pub fn is_ignored(self) -> bool {
+        matches!(self, Routed::Ignored)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +190,19 @@ mod tests {
         assert_eq!(Key::Char('🦀').as_str(), None);
         assert_eq!(Key::Char('\x07').as_str(), None); // bell
         assert_eq!(Key::Char('\x1b').as_str(), None); // escape
+    }
+
+    #[test]
+    fn routed_from_consumed_round_trips() {
+        assert_eq!(Routed::from_consumed(true), Routed::Consumed);
+        assert_eq!(Routed::from_consumed(false), Routed::Ignored);
+    }
+
+    #[test]
+    fn routed_predicates_agree_with_the_variant() {
+        assert!(Routed::Consumed.is_consumed());
+        assert!(!Routed::Consumed.is_ignored());
+        assert!(Routed::Ignored.is_ignored());
+        assert!(!Routed::Ignored.is_consumed());
     }
 }

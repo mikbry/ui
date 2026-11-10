@@ -56,6 +56,24 @@ breaking changes can land on minor bumps).
     by the existing resolution-independent Slug/outline pipeline (#157/#165/
     #171) and its `device_pixel_ratio`-aware snapping (`mkui-vector2d-wgpu`,
     `mkui-wgpu::tessellation`); no renderer change was needed or made here.
+- **`mkui-wgpu::input_router` — input routing contract for embedding hosts
+  (#176, ADR 0011).** A standalone `InputRouter` a `wgpu` host forwards its
+  `winit::WindowEvent`s into, reporting `mkui_core::input::Routed`
+  (`Consumed`/`Ignored`) per event so the host knows whether to also feed
+  the event to its own gameplay input. Covers the tracker #173 acceptance
+  criteria: gesture-length pointer capture (a drag stays consumed even once
+  the cursor leaves the armed control's rect), a modal stack giving Escape
+  dialog precedence over everything else, and a text-focus slot that
+  swallows every other key while a field is composing. `mkui_core::input`
+  gains the shared `Routed` vocabulary type. Fixed alongside: `HitTestEntry`
+  now carries `CornerRadii` and `pointer::hit_test` uses the new
+  `types::rect_contains_rounded` instead of a plain bounding-box test, so a
+  click in a rounded button's chamfered corner no longer registers as a
+  hit — this also fixes the standalone `WgpuApp` shell's existing hit-test,
+  not just the new router. Scope decision: `InputRouter` is not wired into
+  `WgpuApp`'s event loop (no regression risk to the tuned resize/redraw
+  state machine there), and the modal/text-focus hooks are inert until
+  #185 (text field) and #188 (dialog) call them — see ADR 0011.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through

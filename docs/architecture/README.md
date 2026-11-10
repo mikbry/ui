@@ -52,6 +52,11 @@ and the records below.
   — A plain trait in `mkui-core`, with only a `NoopPlatformHost` default
   shipped; applications wire a real implementation by capturing it in a
   `Button::on_press` closure, with no new action-registry plumbing.
+- [ADR 0011 — Input routing contract for embedding hosts](0011-input-routing-contract.md)
+  — A standalone `InputRouter` reports `mkui_core::input::Routed`
+  (consumed/ignored) per `winit::WindowEvent`: gesture-length pointer
+  capture, a modal stack that gives Escape dialog precedence, a text-focus
+  slot that swallows every other key, and corner-exact hit-testing.
 
 ## ADR format conventions
 

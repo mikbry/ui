@@ -76,6 +76,12 @@ pub struct HitTestEntry {
     pub node: NodeId,
     pub rect: Rect,
     pub action: Option<ActionId>,
+    /// Corner radii of the rendered silhouette this entry hit-tests against
+    /// (#176). Hit-testing against `rect` alone would accept clicks in the
+    /// triangular slivers the renderer chamfers away from a rounded quad;
+    /// carrying the same radii here lets [`crate::pointer::hit_test`] reject
+    /// those pixels via [`crate::types::rect_contains_rounded`].
+    pub corner_radii: CornerRadii,
 }
 
 /// Per-node layout snapshot captured during the walk. The bridge
@@ -395,10 +401,11 @@ fn render_button(
         Size::new(width, BUTTON_HEIGHT_PX),
     );
 
+    let corner_radii = CornerRadii::all(style.corner_radius);
     ctx.scene.quad(Quad {
         rect,
         fill: style.idle_fill,
-        corner_radii: CornerRadii::all(style.corner_radius),
+        corner_radii,
         stroke: Some(Stroke {
             color: style.idle_stroke,
             width: style.stroke_width.max(1.0),
@@ -428,6 +435,7 @@ fn render_button(
         rect,
         node: node.id,
         action: button.on_press,
+        corner_radii,
     });
     layouts.push(NodeLayout {
         node: node.id,

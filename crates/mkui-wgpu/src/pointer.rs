@@ -36,7 +36,7 @@ use winit::event::{ElementState, MouseButton};
 
 use mkui_runtime::{ActionId, NodeId};
 
-use crate::types::{rect_contains, Point};
+use crate::types::{rect_contains_rounded, Point};
 use crate::walker::HitTestEntry;
 
 /// Pointer-state machine. One instance owned by `WgpuApp`; updated each
@@ -160,6 +160,12 @@ pub struct ClickHit {
 /// (latest-painted = topmost) and returns the first containing entry, if
 /// any.
 ///
+/// Uses [`rect_contains_rounded`] rather than a plain bounding-box test
+/// (#176): a rounded control's rendered silhouette is chamfered at the
+/// corners, and a plain rect test would register a hit in the
+/// triangular sliver the renderer never paints. Carrying `corner_radii`
+/// on [`HitTestEntry`] keeps the hit region pixel-exact to what's drawn.
+///
 /// Cloning the `ActionId` out of the entry lets the caller drop the
 /// `&[HitTestEntry]` borrow before invoking the action, avoiding any
 /// chance of borrowing the per-frame vec across an action that itself
@@ -168,7 +174,7 @@ pub fn hit_test(hit_entries: &[HitTestEntry], cursor: Point) -> Option<ClickHit>
     hit_entries
         .iter()
         .rev()
-        .find(|entry| rect_contains(entry.rect, cursor))
+        .find(|entry| rect_contains_rounded(entry.rect, entry.corner_radii, cursor))
         .map(|entry| ClickHit {
             node: entry.node,
             action: entry.action,
@@ -178,7 +184,7 @@ pub fn hit_test(hit_entries: &[HitTestEntry], cursor: Point) -> Option<ClickHit>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Rect, Size};
+    use crate::types::{CornerRadii, Rect, Size};
     use mkui_runtime::ActionId as RtActionId;
     use mkui_runtime::NodeId;
 
@@ -194,11 +200,19 @@ mod tests {
             rect: Rect::new(Point::new(x, y), Size::new(w, h)),
             node: NodeId::from_raw(idx, 0),
             action,
+            corner_radii: CornerRadii::all(0.0),
         }
     }
 
     fn entry(x: f32, y: f32, w: f32, h: f32, idx: u32) -> HitTestEntry {
         entry_with_action(x, y, w, h, idx, None)
+    }
+
+    fn entry_with_radius(x: f32, y: f32, w: f32, h: f32, idx: u32, radius: f32) -> HitTestEntry {
+        HitTestEntry {
+            corner_radii: CornerRadii::all(radius),
+            ..entry(x, y, w, h, idx)
+        }
     }
 
     #[test]
@@ -231,6 +245,23 @@ mod tests {
         ];
         let hit = hit_test(&entries, Point::new(30.0, 30.0)).expect("inside both");
         assert_eq!(hit.node, NodeId::from_raw(2, 0));
+    }
+
+    #[test]
+    fn hit_test_rejects_rounded_corner_clip_zone() {
+        // #176: a 40x40 button with a 20px corner radius must not register
+        // a hit in the triangular sliver the renderer chamfers away from
+        // the top-left quarter-circle, even though it's inside the plain
+        // bounding box.
+        let entries = vec![entry_with_radius(0.0, 0.0, 40.0, 40.0, 1, 20.0)];
+        assert!(
+            hit_test(&entries, Point::new(2.0, 2.0)).is_none(),
+            "clipped-off corner pixel must miss"
+        );
+        assert!(
+            hit_test(&entries, Point::new(20.0, 20.0)).is_some(),
+            "the control's center must still hit"
+        );
     }
 
     #[test]

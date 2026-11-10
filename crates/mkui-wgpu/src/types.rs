@@ -365,6 +365,69 @@ pub fn rect_contains(rect: Rect, point: Point) -> bool {
         && point.y <= rect.origin.y + rect.size.height
 }
 
+/// Point-in-rounded-rect test (#176: exact hit-testing for embedding hosts).
+///
+/// `rect_contains` treats every quad as a plain rectangle, so a click in a
+/// corner that `tessellation::clamp_corner_radii` + `push_rounded_rect_fill`
+/// chamfer away from the rendered silhouette would still register as a hit —
+/// visually missing the control but logically landing on it. This test
+/// clips each corner the same way the renderer does (radius clamped to half
+/// the shorter side, exactly `tessellation::clamp_corner_radii`'s formula)
+/// and rejects a point that falls in the clipped-off triangle outside the
+/// corner's quarter-circle.
+///
+/// Zero radii (the common case: most controls aren't rounded) degrade to a
+/// plain bounding-box test — every point that passes `rect_contains` is
+/// trivially outside all four (zero-radius) corner-exclusion zones.
+pub fn rect_contains_rounded(rect: Rect, corner_radii: CornerRadii, point: Point) -> bool {
+    if !rect_contains(rect, point) {
+        return false;
+    }
+
+    let max_r = (rect.size.width.max(0.0).min(rect.size.height.max(0.0)) * 0.5).max(0.0);
+    let top_left = corner_radii.top_left.clamp(0.0, max_r);
+    let top_right = corner_radii.top_right.clamp(0.0, max_r);
+    let bottom_right = corner_radii.bottom_right.clamp(0.0, max_r);
+    let bottom_left = corner_radii.bottom_left.clamp(0.0, max_r);
+
+    let left = rect.origin.x;
+    let top = rect.origin.y;
+    let right = rect.origin.x + rect.size.width;
+    let bottom = rect.origin.y + rect.size.height;
+
+    if top_left > 0.0 && point.x < left + top_left && point.y < top + top_left {
+        return within_corner_circle(point, Point::new(left + top_left, top + top_left), top_left);
+    }
+    if top_right > 0.0 && point.x > right - top_right && point.y < top + top_right {
+        return within_corner_circle(
+            point,
+            Point::new(right - top_right, top + top_right),
+            top_right,
+        );
+    }
+    if bottom_right > 0.0 && point.x > right - bottom_right && point.y > bottom - bottom_right {
+        return within_corner_circle(
+            point,
+            Point::new(right - bottom_right, bottom - bottom_right),
+            bottom_right,
+        );
+    }
+    if bottom_left > 0.0 && point.x < left + bottom_left && point.y > bottom - bottom_left {
+        return within_corner_circle(
+            point,
+            Point::new(left + bottom_left, bottom - bottom_left),
+            bottom_left,
+        );
+    }
+    true
+}
+
+fn within_corner_circle(point: Point, center: Point, radius: f32) -> bool {
+    let dx = point.x - center.x;
+    let dy = point.y - center.y;
+    dx * dx + dy * dy <= radius * radius
+}
+
 /// sRGB → linear transfer (the sRGB EOTF). Maps a gamma-encoded perceptual
 /// channel in `[0, 1]` to its linear-light value so alpha blending composites
 /// in the physically-correct space. `0.0`/`1.0` are fixed points; `0.5` → ~0.214.
@@ -737,5 +800,95 @@ mod tests {
             Color::from_srgb_a(0.2, 0.4, 0.6, 0.8),
             Color::rgba(0.2, 0.4, 0.6, 0.8)
         );
+    }
+
+    // ---- #176: rect_contains_rounded (exact hit-testing) ----
+
+    #[test]
+    fn rounded_hit_test_matches_plain_rect_for_zero_radii() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 50.0));
+        let zero = CornerRadii::all(0.0);
+        for p in [
+            Point::new(0.0, 0.0),
+            Point::new(99.0, 1.0),
+            Point::new(1.0, 49.0),
+            Point::new(50.0, 25.0),
+        ] {
+            assert_eq!(rect_contains_rounded(rect, zero, p), rect_contains(rect, p));
+        }
+    }
+
+    #[test]
+    fn rounded_hit_test_rejects_the_clipped_off_corner() {
+        // A 40x40 square with a 20px corner radius: (2, 2) is well inside the
+        // bounding box but sits in the triangular sliver the renderer clips
+        // away from the top-left quarter-circle.
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0));
+        let radii = CornerRadii::all(20.0);
+        assert!(
+            !rect_contains_rounded(rect, radii, Point::new(2.0, 2.0)),
+            "corner pixel outside the rounded silhouette must miss"
+        );
+        assert!(
+            rect_contains(rect, Point::new(2.0, 2.0)),
+            "sanity: the plain bounding box still contains it"
+        );
+    }
+
+    #[test]
+    fn rounded_hit_test_accepts_the_corner_arc_and_the_center() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0));
+        let radii = CornerRadii::all(20.0);
+        // Inside the top-left corner's exclusion box (x < 20, y < 20) but
+        // within the quarter-circle arc itself: dx=-5, dy=-14 from the
+        // circle's center (20, 20), distance² = 221 <= 400.
+        assert!(rect_contains_rounded(rect, radii, Point::new(15.0, 6.0)));
+        // Dead center of the square is always inside, radii or not.
+        assert!(rect_contains_rounded(rect, radii, Point::new(20.0, 20.0)));
+    }
+
+    #[test]
+    fn rounded_hit_test_only_clips_rounded_corners() {
+        // Asymmetric radii: only the top-left corner is rounded. The
+        // top-right corner pixel must still hit even though it's as close to
+        // its own (zero-radius) corner as the rejected top-left pixel was.
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0));
+        let radii = CornerRadii {
+            top_left: 20.0,
+            top_right: 0.0,
+            bottom_right: 0.0,
+            bottom_left: 0.0,
+        };
+        assert!(!rect_contains_rounded(rect, radii, Point::new(2.0, 2.0)));
+        assert!(rect_contains_rounded(rect, radii, Point::new(38.0, 2.0)));
+    }
+
+    #[test]
+    fn rounded_hit_test_clamps_oversized_radii_like_the_renderer() {
+        // A radius far larger than half the rect's shorter side is clamped
+        // before the corner test runs — mirroring
+        // `tessellation::clamp_corner_radii` so hit-testing and rendering
+        // never disagree about the silhouette.
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 20.0));
+        let radii = CornerRadii::all(1000.0);
+        // Clamped radius is 10 (half the shorter side), circle centered at
+        // (10, 10). (3, 3) is distance ~9.9 from that center — inside the
+        // clamped arc.
+        assert!(rect_contains_rounded(rect, radii, Point::new(3.0, 3.0)));
+        // (2, 2) is distance ~11.3 from the same center — just outside the
+        // clamped arc, proving the clamp (not an unclamped 1000px radius)
+        // governs the test.
+        assert!(!rect_contains_rounded(rect, radii, Point::new(2.0, 2.0)));
+    }
+
+    #[test]
+    fn rounded_hit_test_rejects_outside_bounding_box_first() {
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0));
+        let radii = CornerRadii::all(10.0);
+        assert!(!rect_contains_rounded(
+            rect,
+            radii,
+            Point::new(100.0, 100.0)
+        ));
     }
 }
