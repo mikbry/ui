@@ -672,6 +672,16 @@ breaking changes can land on minor bumps).
     `TextEngine` yet), but this is the crate's public measurement API
     (acceptance: "a measurement function returns the laid-out size of a text
     block without drawing it").
+  - **Fixed a hang in that same grouping loop**, caught by review: a
+    non-finite `font_size_px` propagates into `SfntProvider::layout_local`'s
+    `sfnt_scale` and from there into every run's `line_y_baseline_px`. The
+    grouping loop scanned ahead from `j = i` for `runs[j].line_y_baseline_px
+    == baseline`, but `NaN == NaN` is `false`, so with a `NaN` baseline the
+    scan matched zero runs — including run `i` itself — leaving the outer
+    index unchanged and looping forever. Run `i` is now folded into its own
+    group unconditionally and the lookahead starts at `j = i + 1`, so the
+    outer index strictly advances every iteration regardless of what
+    `line_y_baseline_px` holds.
   - Scope decision: shipped the `mkui-text` layout engine work (wrap, align,
     line-height, max-width, ellipsis, measurement) for the Slug lane.
     Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s three

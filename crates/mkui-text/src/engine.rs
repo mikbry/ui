@@ -183,6 +183,14 @@ fn run_width(run: &LayoutRun) -> f32 {
 /// non-first run on a Slug-routed line is relative to that run's own origin.
 /// `logical_width_px` (the widest line) is derived from those grouped widths,
 /// never from a single run in isolation.
+///
+/// Run `i` is always folded into its own group unconditionally, and the
+/// lookahead scan starts at `j = i + 1` — never `j = i` — so `i` strictly
+/// advances every outer iteration regardless of what `line_y_baseline_px`
+/// holds. This matters because `NaN == NaN` is `false`: a non-finite
+/// baseline (e.g. from a non-finite `font_size_px`) would otherwise make the
+/// scan match zero runs including the very run it started from, leaving `i`
+/// unchanged and looping forever.
 fn build_layout(runs: Vec<LayoutRun>, spec: &LayoutSpec) -> TextLayout {
     let line_height_px = spec.line_height_px.max(1.0);
     let mut lines = Vec::new();
@@ -193,11 +201,11 @@ fn build_layout(runs: Vec<LayoutRun>, spec: &LayoutSpec) -> TextLayout {
         let mut top_px = runs[i].origin_y_px;
         let mut ascent_px = runs[i].line_ascent_px;
         let mut descent_px = runs[i].line_descent_px;
-        let mut min_left = f32::INFINITY;
-        let mut max_right = f32::NEG_INFINITY;
-        let mut glyph_count = 0usize;
+        let mut min_left = runs[i].origin_x_px;
+        let mut max_right = runs[i].origin_x_px + run_width(&runs[i]);
+        let mut glyph_count = runs[i].glyphs.len();
 
-        let mut j = i;
+        let mut j = i + 1;
         while j < runs.len() && runs[j].line_y_baseline_px == baseline {
             let run = &runs[j];
             top_px = top_px.min(run.origin_y_px);

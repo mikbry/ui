@@ -435,6 +435,39 @@ fn slug_lane_does_not_panic_on_degenerate_inputs() {
     assert!(!runs.is_empty());
 }
 
+/// A non-finite `font_size_px` must not hang `TextEngine::prepare`.
+///
+/// `font_size_px: NaN` propagates into `SfntProvider::layout_local`'s
+/// `sfnt_scale` and from there into every run's `line_y_baseline_px`. Before
+/// the fix, `engine.rs::build_layout` grouped runs into lines by scanning
+/// ahead from `j = i` for `runs[j].line_y_baseline_px == baseline` — but
+/// `NaN == NaN` is `false`, so that scan matched **zero** runs, including
+/// run `i` itself, leaving the outer index unchanged and looping forever
+/// (an unbounded `Vec` of duplicate zero-width lines). Run this on a thread
+/// with a bounded join instead of calling `prepare` directly, so a
+/// regression fails this test loudly instead of hanging the whole suite.
+#[test]
+fn prepare_with_non_finite_font_size_terminates() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (sys, id) = registered();
+        let spec = LayoutSpec {
+            font_size_px: f32::NAN,
+            ..slug_spec(id, 16.0)
+        };
+        let engine = TextEngine::new(Arc::new(sys));
+        let prepared = engine.prepare("M", spec);
+        let _ = prepared.intrinsic_layout();
+        let _ = tx.send(());
+    });
+
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "TextEngine::prepare with a non-finite font_size_px must terminate, \
+         not hang build_layout's line-grouping loop"
+    );
+}
+
 /// The public measurement API ([`TextEngine`]/[`TextLayout`]) must report the
 /// true line count and block height for Slug-routed mixed-lane text — the
 /// bug `engine.rs::build_layout` had before #182, which assumed one run per
