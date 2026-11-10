@@ -225,6 +225,7 @@ impl Gpu {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .expect("host-embed-wgpu: request_adapter failed");
@@ -271,6 +272,7 @@ impl Gpu {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
+            color_space: wgpu::SurfaceColorSpace::Auto,
             width,
             height,
             present_mode,
@@ -333,7 +335,7 @@ impl Gpu {
                 module: &shader,
                 entry_point: Some("vs_cube"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[CubeVertex::layout()],
+                buffers: &[Some(CubeVertex::layout())],
             },
             primitive: wgpu::PrimitiveState {
                 cull_mode: None,
@@ -483,7 +485,7 @@ impl Gpu {
         // ONE submission, carrying both passes.
         self.queue.submit(Some(encoder.finish()));
         drop(view);
-        frame.present();
+        self.queue.present(frame);
         if reconfigure_after_present {
             self.surface.configure(&self.device, &self.config);
         }
