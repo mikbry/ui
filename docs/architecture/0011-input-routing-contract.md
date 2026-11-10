@@ -139,3 +139,49 @@ tested entry point ready for #175's eventual host example to call.
   the host, which would have to re-derive mkui's own capture/focus logic to
   use it correctly. A per-event `Routed` keeps that logic in exactly one
   place.
+
+## Addendum: review round 1 — ownership must be decided once, not re-queried
+
+The first review round found the initial implementation decided a key's or
+gesture's `Routed` verdict by re-reading *current* router state on every
+event, rather than locking it in once at the moment it was actually
+decided. That breaks the moment state changes mid-hold:
+
+- **Key ownership changes mid-press.** `route_key` re-checked
+  `self.text_focus` on every event. Pressing `W` before a text field
+  focuses returned `Ignored`; if the field focused before `W` was
+  released, the release re-checked focus and returned `Consumed` — the
+  host applied the press itself (it was told `Ignored`) and then never saw
+  a matching release telling it to stop. Fixed by `key_ownership: HashMap<PhysicalKey,
+  Routed>`: the verdict is decided once on the initial (non-repeat) press
+  and replayed verbatim for every repeat and for the eventual release.
+- **Escape key-repeat popped the modal stack repeatedly.** `KeyEvent::repeat`
+  was discarded, so each OS repeat was treated as a fresh press — popping
+  another modal every ~30ms the key stayed held, then disagreeing with the
+  original press's verdict once the stack ran out. Fixed by the same
+  `key_ownership` cache: a repeat with a tracked entry returns it without
+  re-running `decide_key_press`.
+- **Cancelling a drag disowned the rest of the physical gesture.**
+  `route_cursor_moved`/the release handler read `pointer.armed()` directly;
+  Escape and `CursorLeft` clear `armed` to stop the click from firing, which
+  also made every subsequent event (including the eventual
+  `MouseInput::Released`, still backed by a physically-held button) read as
+  `Ignored` — handing the tail of an in-progress UI drag to the host's
+  camera/look control. Fixed by `gesture_owned: bool`, tracked independently
+  of `armed`: set from the press's hit result, left untouched by
+  Escape/`CursorLeft`'s cancel, cleared only by the matching physical
+  release (or a focus-loss cancel, next).
+- **Window focus loss left a press armed.** `WindowEvent::Focused(false)`
+  wasn't handled at all, so a press that armed a control, followed by an
+  alt-tab away and an eventual release the window may or may not ever
+  see, left the stale arm (and `gesture_owned`) in place for a later,
+  unrelated release to wrongly fire. Fixed by routing `Focused(false)`
+  through `pointer.cancel()` + clearing `gesture_owned`.
+
+The shared lesson: this router's state (text focus, the modal stack,
+`armed`) is mutable *host-visible* state a host can change between a key's
+press and its release, or between an arm and the gesture's physical end.
+Any verdict derived from "current state" rather than "state at the moment
+the gesture/key began" is a latent inconsistency. `key_ownership` and
+`gesture_owned` are the two places this contract now locks a verdict in at
+the start of a gesture and replays it, rather than re-deriving it.

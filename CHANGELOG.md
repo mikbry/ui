@@ -74,6 +74,16 @@ breaking changes can land on minor bumps).
   `WgpuApp`'s event loop (no regression risk to the tuned resize/redraw
   state machine there), and the modal/text-focus hooks are inert until
   #185 (text field) and #188 (dialog) call them — see ADR 0011.
+  - **Review round 1 hardening:** key and gesture routing verdicts are now
+    locked in once (at the initial press / arm) and replayed for repeats
+    and the matching release/end-of-gesture, instead of being re-derived
+    from current router state each time. Fixes: a key's `Consumed`/`Ignored`
+    verdict no longer flips if focus changes between its press and release;
+    an Escape key-repeat no longer pops more than one modal off the stack;
+    cancelling a drag (Escape or `CursorLeft`) no longer hands the rest of
+    a still-physically-held gesture to the host; and losing window focus
+    now cancels a pending pointer activation instead of leaving it armed
+    for a later, unrelated release to fire. See ADR 0011's addendum.
 - **`vector-showcase` example — Sprint 8 Wave 2 vector-primitives showcase
   (#143).** A new `examples/vector-showcase` binary renders button/card/dot
   in a 3×2 grid: the right column emits a rounded-rect through
