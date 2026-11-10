@@ -510,13 +510,9 @@ jobs:
     #
     # All three build on the native (host) target — the same target the
     # aggregate `--workspace` jobs used before #102, so this is coverage at
-    # parity, not new coverage. A dedicated `wasm32-unknown-unknown` build of
-    # `web-showcase` is intentionally NOT added here: it surfaces a pre-existing
-    # mkui-core wasm bug (the `#[cfg(target_arch = "wasm32")]`
-    # `MkuiError::JsValue(#[from] JsValue)` variant requires `JsValue:
-    # std::error::Error`, which it does not implement) that is unrelated to the
-    # #102 backend-selection contract. Adding a real wasm32 CI lane + fixing
-    # that variant is deferred to a follow-up issue.
+    # parity, not new coverage. The actual `wasm32-unknown-unknown` build of
+    # the web path lives in the dedicated `wasm32` job below (#121) — kept
+    # separate so this job's cache key and native toolchain stay untouched.
     name: mkui-examples
     needs: changes
     if: needs.changes.outputs.code != 'false'
@@ -540,6 +536,55 @@ jobs:
         run: cargo build -p native-showcase --locked
       - name: Build web-showcase (web backend, native target)
         run: cargo build -p web-showcase --locked
+
+  wasm32:
+    # Real `wasm32-unknown-unknown` build lane (#121). Before this job, CI had
+    # never compiled any crate for wasm32 — `web-showcase` and the `mkui-web`
+    # stack were only ever built on the native host (see `mkui-examples`
+    # above and, pre-#102, the bridge's cfg precedence silently mis-backing
+    # onto the console backend). That let the wasm path rot undetected: the
+    # `#[cfg(target_arch = "wasm32")]` `MkuiError::JsValue` variant used
+    # `#[from]`, which requires `wasm_bindgen::JsValue: std::error::Error` —
+    # a bound `JsValue` does not satisfy — so every wasm32 build of
+    # `mkui-core` failed outright. That variant now uses a manual `From` impl
+    # instead of `#[from]`.
+    #
+    # Builds `mkui-core` directly (the crate that owns the fixed variant),
+    # then the rest of the web stack up through the showcase binary, so a
+    # regression anywhere on that path fails loudly here instead of silently
+    # on `main`.
+    name: wasm32
+    needs: changes
+    if: needs.changes.outputs.code != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-cargo-wasm32-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm32-
+      - name: Build mkui-core (wasm32-unknown-unknown)
+        run: cargo build -p mkui-core --target wasm32-unknown-unknown --locked
+      # `--no-run`: wasm32 tests need a JS/Node/browser host to execute, which
+      # this job doesn't set up. Compiling them still catches a regression in
+      # the wasm-only `JsValue` conversion tests in `mkui-core/src/error.rs`.
+      - name: Compile mkui-core tests (wasm32-unknown-unknown)
+        run: cargo test -p mkui-core --target wasm32-unknown-unknown --no-run --locked
+      - name: Build mkui-web (wasm32-unknown-unknown)
+        run: cargo build -p mkui-web --target wasm32-unknown-unknown --locked
+      - name: Build mkui bridge (web backend, wasm32-unknown-unknown)
+        run: cargo build -p mkui --no-default-features --features web --target wasm32-unknown-unknown --locked
+      - name: Build web-showcase (wasm32-unknown-unknown)
+        run: cargo build -p web-showcase --target wasm32-unknown-unknown --locked
 
   test-doc:
     name: test-doc

@@ -310,7 +310,7 @@ impl Mkui {
 
 /// Convert a `JsValue` from the web backend into a typed `MkuiError`.
 ///
-/// On `wasm32` this hits the `#[from]` impl on `MkuiError::JsValue`. On
+/// On `wasm32` this hits the manual `From` impl on `MkuiError::JsValue`. On
 /// native (the workspace's CI target) the cfg-gated variant isn't available,
 /// so we fall back to a rendered string in `Rendering`. Either way, the
 /// bridge never re-stringifies via `format!("{:?}", e)` on user-reachable

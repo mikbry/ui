@@ -514,6 +514,23 @@ breaking changes can land on minor bumps).
     the same buffer/bind-group/draw path. Zero dependency on `mkui-wgpu`; no new
     dependencies beyond `mkui-vector2d` + `wgpu` + `bytemuck`.
 
+### Fixed
+- **`mkui-core`'s `JsValue` error variant failed to compile on `wasm32`; no
+  wasm32 CI lane (#121).** `MkuiError::JsValue`, gated on
+  `#[cfg(target_arch = "wasm32")]`, used `#[from]`, which makes `thiserror`
+  treat the inner value as an error *source* and requires
+  `wasm_bindgen::JsValue: std::error::Error` — a bound `JsValue` does not
+  satisfy, so every `wasm32` build of `mkui-core` failed outright
+  (`E0599`/`AsDynError`). CI had never caught this: no job built any crate
+  for `wasm32-unknown-unknown` (the web showcase was only ever built on the
+  native host — see `mkui-examples`, #102). Fix: the variant drops `#[from]`
+  in favor of a manual `impl From<wasm_bindgen::JsValue> for MkuiError`, which
+  gives the same `.into()` / `?` ergonomics without the `Error`-source bound.
+  No change to native targets' `MkuiError` API. A new `wasm32` CI job builds
+  `mkui-core`, `mkui-web`, the `mkui` bridge's `web` backend, and
+  `web-showcase` for `wasm32-unknown-unknown`, so the web/WASM path can't rot
+  undetected again.
+
 ### Changed
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
   rustdoc with `# Examples` sections to the bridge `Mkui::new`, `Mkui::child`,
