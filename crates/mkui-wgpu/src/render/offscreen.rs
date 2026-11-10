@@ -160,6 +160,7 @@ impl OffscreenRenderer {
                 power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| OffscreenError::AdapterUnavailable(e.to_string()))?;
@@ -335,7 +336,9 @@ impl OffscreenRenderer {
             .map_err(|e| OffscreenError::Map(format!("map callback channel dropped: {e}")))?
             .map_err(|e| OffscreenError::Map(e.to_string()))?;
 
-        let data = slice.get_mapped_range();
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| OffscreenError::Map(e.to_string()))?;
         let pixels = unpad_rows(
             &data,
             self.unpadded_bytes_per_row,

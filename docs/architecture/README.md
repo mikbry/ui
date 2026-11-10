@@ -4,7 +4,7 @@ This directory tracks the load-bearing architectural decisions in mkui's
 history. Each record (ADR) documents one decision: why it was made, what was
 considered, and what the consequences are. New contributors and reviewers
 should be able to understand the shape of the workspace by reading this index
-and the seven records below.
+and the records below.
 
 ## Index
 
@@ -42,6 +42,12 @@ and the seven records below.
   correctness gaps (non-integer scaling, unsnapped sub-pixel positions) are
   fixed instead, since the ratified reference-harness adapter has no way to
   verify a Slug-routed label at arbitrary font sizes.
+- [ADR 0009 — Track the host's `wgpu` release; no skew window](0009-wgpu-version-skew-policy.md)
+  — `mkui-wgpu` keeps its ordinary caret `wgpu` requirement in lockstep with
+  the host ecosystem instead of widening it into a multi-release range; a
+  host must overlap `mkui-wgpu`'s current `wgpu` requirement to unify
+  dependency graphs, and each bump is a reviewed, documented PR like this
+  one, not a permissive range that would silently break on either end.
 
 ## ADR format conventions
 

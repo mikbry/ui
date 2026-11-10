@@ -572,6 +572,38 @@ breaking changes can land on minor bumps).
     Tracked as a follow-up issue (#219).
 
 ### Changed
+- **Bump workspace `wgpu` requirement `"29.0.1"` → `"30.0.1"`, so a host on
+  `wgpu` 30 unifies its dependency graph with `mkui-wgpu` instead of
+  duplicating `wgpu` (#174).** A workspace depending on both `mkui-wgpu` and
+  a host requiring `wgpu` 30.0.1 previously resolved two separate `wgpu`
+  releases (Cargo's default caret requirement on `"29.0.1"`, `>=29.0.1,
+  <30.0.0`, never overlaps `30.0.1`'s `>=30.0.1, <31.0.0`) — two incompatible
+  copies of `wgpu::Device`, `Surface`, and every other `wgpu` type, which
+  would block any future API letting a host and `mkui-wgpu` share one. The
+  workspace `wgpu` entry in the root `Cargo.toml` now reads `"30.0.1"`;
+  `cargo tree -i wgpu` resolves one entry workspace-wide, and a scratch host
+  crate requiring `wgpu = "=30.0.1"` alongside a path dependency on
+  `mkui-wgpu` confirms the same single-version resolution. `mkui-wgpu` does
+  not yet expose an API for a host to inject its own `wgpu::Device` or
+  `Surface` — this bump only removes the version mismatch that would make
+  such an API impossible to add later (tracked under parent #173).
+  - Six call sites in `crates/mkui-wgpu/src/render/mod.rs` and
+    `render/offscreen.rs` needed updates for `wgpu` 30's API changes:
+    `RequestAdapterOptions` and `SurfaceConfiguration` both gained a new
+    required field (`apply_limit_buckets`, `color_space`) at their two
+    construction sites; `SurfaceTexture` lost its own `present()` method in
+    favor of `Queue::present(surface_texture)`; `RenderPipelineDescriptor::vertex.buffers`
+    now takes `&[Option<VertexBufferLayout>]` instead of
+    `&[VertexBufferLayout]`; and `BufferSlice::get_mapped_range()` now
+    returns `Result<BufferView, MapRangeError>` instead of `BufferView`.
+  - `cargo update -p wgpu` resolved every transitive `wgpu`/`naga` dependency
+    to its matching 30.0.1-series release with no other duplicate versions
+    introduced; `cargo metadata`'s resolved `rust_version` fields stay at or
+    below the workspace's `1.87` floor, so there is no MSRV regression.
+  - See `docs/architecture/0009-wgpu-version-skew-policy.md` for the policy
+    this bump establishes: `mkui-wgpu` tracks the host ecosystem's `wgpu`
+    major as a point dependency, not a range, so this kind of bump is the
+    expected, reviewed way a future `wgpu` skew gets resolved.
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
   rustdoc with `# Examples` sections to the bridge `Mkui::new`, `Mkui::child`,
   and `Mkui::run` methods in `crates/mkui/src/lib.rs`, so adopters landing on
