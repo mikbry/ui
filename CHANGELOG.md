@@ -682,6 +682,25 @@ breaking changes can land on minor bumps).
     group unconditionally and the lookahead starts at `j = i + 1`, so the
     outer index strictly advances every iteration regardless of what
     `line_y_baseline_px` holds.
+  - **Fixed ellipsis-glyph identity loss through bitmap fallback**, also
+    caught by review: `SfntProvider::ellipsize_range` tagged every
+    synthesized ellipsis glyph with a borrowed `cluster` — the last kept
+    content character's index — on the theory that a glyph falling back to
+    the bitmap lane should "resolve to a real character instead of
+    panicking". When the dot/ellipsis glyph itself isn't mapped by the face
+    (so it routes into a Bitmap-class run), `expand_slug_text`'s
+    `expand_text_primitive` rebuilt the text to draw by slicing the source
+    string at that borrowed cluster — silently drawing whichever real
+    character happened to sit there instead of a dot. Ellipsis glyphs now
+    carry `chars.len()` (an out-of-range sentinel, since they correspond to
+    no source-text position at all); every existing consumer already guards
+    with `.get()`/`.min(chars.len())`, so nothing needed to start panicking.
+    `expand_text_primitive`'s bitmap-fallback reconstruction (and
+    `place_slug_run`'s per-glyph extraction-failure fallback) now read each
+    glyph's own `glyph_id` instead of `chars[cluster]` — exact for a genuine
+    per-character fallback (CJK/emoji, where it matches the source text 1:1)
+    and, crucially, also correct for a synthesized glyph with no source-text
+    position to borrow.
   - Scope decision: shipped the `mkui-text` layout engine work (wrap, align,
     line-height, max-width, ellipsis, measurement) for the Slug lane.
     Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s three
