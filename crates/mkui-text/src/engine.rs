@@ -45,12 +45,7 @@ impl TextEngine {
         // The intrinsic (unwrapped) layout is the `None`-width wrap of the
         // already-shaped glyphs — still no re-shaping.
         let intrinsic_runs = self.system.wrap(&shaped, None);
-        let intrinsic_width_px = max_run_width(&intrinsic_runs);
-        let intrinsic = Arc::new(build_layout(
-            intrinsic_runs,
-            intrinsic_width_px,
-            &shaped.spec,
-        ));
+        let intrinsic = Arc::new(build_layout(intrinsic_runs, &shaped.spec));
         PreparedText {
             system: Arc::clone(&self.system),
             shaped,
@@ -124,8 +119,7 @@ impl PreparedText {
         // Width-dependent line breaking only — `wrap` consumes the shaped
         // glyphs; it does not re-shape.
         let runs = self.system.wrap(&self.shaped, Some(width));
-        let logical_width = max_run_width(&runs);
-        let layout = Arc::new(build_layout(runs, logical_width, &self.shaped.spec));
+        let layout = Arc::new(build_layout(runs, &self.shaped.spec));
         let mut cache = self.cache.lock().unwrap();
         // Another thread may have inserted between our miss and now; keep the
         // first winner so identical widths share one allocation.
@@ -175,26 +169,72 @@ fn run_width(run: &LayoutRun) -> f32 {
         .fold(0.0_f32, f32::max)
 }
 
-fn max_run_width(runs: &[LayoutRun]) -> f32 {
-    runs.iter().map(run_width).fold(0.0_f32, f32::max)
-}
-
-fn build_layout(runs: Vec<LayoutRun>, logical_width_px: f32, spec: &LayoutSpec) -> TextLayout {
+/// Group `runs` into display lines and measure each one.
+///
+/// The bitmap lane emits exactly one run per line, but a Slug-routed line can
+/// split into several runs (a Slug segment plus a bitmap-fallback segment for
+/// an unmapped character — see `composite.rs::push_line_runs`). Every run on
+/// the same line shares the identical `line_y_baseline_px` value (computed
+/// once per line, copied onto each of its runs), and that value strictly
+/// increases line-to-line, so grouping consecutive runs by that field
+/// recovers line boundaries for either lane without the caller distinguishing
+/// them. A line's width is its absolute right edge minus its absolute left
+/// edge across all its runs — not any single run's local width, which for a
+/// non-first run on a Slug-routed line is relative to that run's own origin.
+/// `logical_width_px` (the widest line) is derived from those grouped widths,
+/// never from a single run in isolation.
+///
+/// Run `i` is always folded into its own group unconditionally, and the
+/// lookahead scan starts at `j = i + 1` — never `j = i` — so `i` strictly
+/// advances every outer iteration regardless of what `line_y_baseline_px`
+/// holds. This matters because `NaN == NaN` is `false`: a non-finite
+/// baseline (e.g. from a non-finite `font_size_px`) would otherwise make the
+/// scan match zero runs including the very run it started from, leaving `i`
+/// unchanged and looping forever.
+fn build_layout(runs: Vec<LayoutRun>, spec: &LayoutSpec) -> TextLayout {
     let line_height_px = spec.line_height_px.max(1.0);
-    let mut lines = Vec::with_capacity(runs.len());
+    let mut lines = Vec::new();
     let mut glyph_cursor = 0usize;
-    for run in &runs {
-        let glyph_end = glyph_cursor + run.glyphs.len();
+    let mut i = 0usize;
+    while i < runs.len() {
+        let baseline = runs[i].line_y_baseline_px;
+        let mut top_px = runs[i].origin_y_px;
+        let mut ascent_px = runs[i].line_ascent_px;
+        let mut descent_px = runs[i].line_descent_px;
+        let mut min_left = runs[i].origin_x_px;
+        let mut max_right = runs[i].origin_x_px + run_width(&runs[i]);
+        let mut glyph_count = runs[i].glyphs.len();
+
+        let mut j = i + 1;
+        while j < runs.len() && runs[j].line_y_baseline_px == baseline {
+            let run = &runs[j];
+            top_px = top_px.min(run.origin_y_px);
+            ascent_px = ascent_px.max(run.line_ascent_px);
+            descent_px = descent_px.max(run.line_descent_px);
+            min_left = min_left.min(run.origin_x_px);
+            max_right = max_right.max(run.origin_x_px + run_width(run));
+            glyph_count += run.glyphs.len();
+            j += 1;
+        }
+
+        let glyph_end = glyph_cursor + glyph_count;
+        let width_px = if max_right > min_left {
+            max_right - min_left
+        } else {
+            0.0
+        };
         lines.push(LineMetrics {
-            top_px: run.origin_y_px,
-            baseline_px: run.line_y_baseline_px,
-            ascent_px: run.line_ascent_px,
-            descent_px: run.line_descent_px,
-            width_px: run_width(run),
+            top_px,
+            baseline_px: baseline,
+            ascent_px,
+            descent_px,
+            width_px,
             glyph_range: glyph_cursor..glyph_end,
         });
         glyph_cursor = glyph_end;
+        i = j;
     }
+    let logical_width_px = lines.iter().map(|l| l.width_px).fold(0.0_f32, f32::max);
     let block_height_px = lines.len() as f32 * line_height_px;
     TextLayout {
         runs,

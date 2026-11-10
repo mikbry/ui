@@ -627,6 +627,102 @@ breaking changes can land on minor bumps).
     are byte-identical; both new lanes share `prepare_packed` so every lane hits
     the same buffer/bind-group/draw path. Zero dependency on `mkui-wgpu`; no new
     dependencies beyond `mkui-vector2d` + `wgpu` + `bytemuck`.
+- **`mkui-text`'s Slug (SFNT) lane now wraps, aligns, caps lines, and
+  ellipsizes — T2 of #173 (#182).** `#171`/`#172` shipped the Slug-lane
+  component call site but `SfntProvider::layout_local` only ever laid out one
+  unwrapped, `Start`-aligned line — `expand_slug_text` detected the cases it
+  couldn't honor (`Center`/`End` alignment, a multi-line-capable box, a `'\n'`,
+  an overflowing line) and bailed the whole primitive to the bitmap lane
+  instead. `layout_local` now:
+  - **Word-wraps** at `max_width_px` using each character's real advance
+    width (not a fixed per-glyph advance), breaking at the last whitespace in
+    range and hard-breaking mid-word only when a single word exceeds the
+    width — the same contract `bitmap::wrap_paragraph` already gives the
+    bitmap lane, now width- rather than glyph-count-bounded.
+  - Fixes a pre-existing off-by-one in both wrap algorithms: when the
+    character that first overflows the line is itself whitespace, the
+    previous code never recorded *that* whitespace as a break candidate
+    (its width was never added, so it never reached the "record as
+    break point" step) and instead broke at an earlier, shorter whitespace
+    — wrapping a word that actually fit onto the next line (e.g. a box sized
+    to exactly fit `"hello world"` would wrap `"hello world foo"` as
+    `"hello"` / `"world foo"` instead of `"hello world"` / `"foo"`). Both
+    `composite::wrap_paragraph_by_width` (new, this PR) and the pre-existing
+    `bitmap::wrap_paragraph` now check whether the overflowing character
+    itself is whitespace before falling back to the backward scan.
+  - **Honors `TextAlign::Center`/`TextAlign::End`** by offsetting each line's
+    pen start against its measured content width, only when `max_width_px` is
+    bounded (unbounded text stays `Start`, matching the bitmap lane).
+  - **Caps at `LayoutSpec::max_lines`** and ellipsizes the final line — a
+    single `'…'` glyph when the face maps it, else three `'.'` glyphs (mirrors
+    `bitmap::wrap_text_lines`'s `"..."` fallback) — shrinking the kept content
+    first when `max_width_px` is bounded.
+  - Preserves the existing per-character Slug/bitmap-fallback segmentation
+    (an unmapped glyph still splits into an adjacent bitmap run) within each
+    wrapped line, and keeps every glyph's `cluster` a global index into the
+    source string so `expand_slug_text`'s fallback-character lookup is
+    unaffected.
+  - Fixes a latent `mkui-text::engine::build_layout` bug this change would
+    otherwise have exposed: it assumed exactly one `LayoutRun` per line, which
+    undercounted/mismeasured any line that splits into a Slug + bitmap-
+    fallback run pair. `build_layout` now groups runs sharing the same
+    `line_y_baseline_px` into one line and measures each line's width from its
+    absolute left/right extent across all its runs, not a single run's local
+    width. No prior shipping caller was affected (no component wires
+    `TextEngine` yet), but this is the crate's public measurement API
+    (acceptance: "a measurement function returns the laid-out size of a text
+    block without drawing it").
+  - **Fixed a hang in that same grouping loop**, caught by review: a
+    non-finite `font_size_px` propagates into `SfntProvider::layout_local`'s
+    `sfnt_scale` and from there into every run's `line_y_baseline_px`. The
+    grouping loop scanned ahead from `j = i` for `runs[j].line_y_baseline_px
+    == baseline`, but `NaN == NaN` is `false`, so with a `NaN` baseline the
+    scan matched zero runs — including run `i` itself — leaving the outer
+    index unchanged and looping forever. Run `i` is now folded into its own
+    group unconditionally and the lookahead starts at `j = i + 1`, so the
+    outer index strictly advances every iteration regardless of what
+    `line_y_baseline_px` holds.
+  - **Fixed ellipsis-glyph identity loss through bitmap fallback**, also
+    caught by review: `SfntProvider::ellipsize_range` tagged every
+    synthesized ellipsis glyph with a borrowed `cluster` — the last kept
+    content character's index — on the theory that a glyph falling back to
+    the bitmap lane should "resolve to a real character instead of
+    panicking". When the dot/ellipsis glyph itself isn't mapped by the face
+    (so it routes into a Bitmap-class run), `expand_slug_text`'s
+    `expand_text_primitive` rebuilt the text to draw by slicing the source
+    string at that borrowed cluster — silently drawing whichever real
+    character happened to sit there instead of a dot. Ellipsis glyphs now
+    carry `chars.len()` (an out-of-range sentinel, since they correspond to
+    no source-text position at all); every existing consumer already guards
+    with `.get()`/`.min(chars.len())`, so nothing needed to start panicking.
+    `expand_text_primitive`'s bitmap-fallback reconstruction (and
+    `place_slug_run`'s per-glyph extraction-failure fallback) now read each
+    glyph's own `glyph_id` instead of `chars[cluster]` — exact for a genuine
+    per-character fallback (CJK/emoji, where it matches the source text 1:1)
+    and, crucially, also correct for a synthesized glyph with no source-text
+    position to borrow.
+  - Scope decision: shipped the `mkui-text` layout engine work (wrap, align,
+    line-height, max-width, ellipsis, measurement) for the Slug lane.
+    Deferred: relaxing `mkui-wgpu::slug_text::expand_slug_text`'s three
+    remaining bailout guards (multi-line, non-`Start` align, `'\n'`) so
+    already-correct Slug output is actually routed through the Slug lane for
+    those cases too — that changes renderer routing and needs GPU (Lavapipe)
+    verification this environment cannot run. Tracked as #233.
+  - **Routing-visible side effect:** `expand_text_primitive`'s fourth guard
+    (width overflow) now sees different input, because `layout_local` can
+    ellipsize an overflowing single line to fit instead of overflowing. A
+    single-line, `Start`-aligned primitive that previously overflowed its box
+    and bailed to bitmap unconditionally now renders through Slug (with a
+    `'…'`/`"..."` tail) whenever the ellipsized line fits — only a box
+    narrower than the ellipsis glyph(s) themselves still bails. No shipping
+    example wires `Renderer::set_slug_font` yet (grepped: only the method
+    itself and its own doc comment reference it), so this has no visible
+    effect until #233 or a future example opts a font in — but it is a real
+    behavior change for the next caller that does.
+  - Scope decision: paragraph spacing (mentioned in #182's Goal prose, not
+    its Acceptance checklist) is out of scope — `LayoutSpec` has no paragraph-
+    spacing field and adding one was not required to satisfy any Acceptance
+    item.
 
 ### Fixed
 - **`mkui-core`'s `JsValue` error variant failed to compile on `wasm32`; no

@@ -198,6 +198,17 @@ pub struct LayoutGlyph {
     pub cluster: u32,
     pub subpixel_variant: u8,
     pub format: GlyphFormat,
+    /// The literal character this glyph must draw as if it ever needs to
+    /// degrade to the bitmap lane — set only for a glyph synthesized by
+    /// layout itself (e.g. an ellipsis `'…'`/`'.'` glyph, #182) that has no
+    /// corresponding position in the source text for `cluster` to index.
+    /// `None` for every ordinarily-shaped glyph, where `cluster` already
+    /// indexes the real source character and a renderer-side fallback can
+    /// read it from there. A renderer degrading this glyph to bitmap (for
+    /// any reason: the provider's own layout-time classification, or a
+    /// later outline-extraction failure) must prefer this field over
+    /// `cluster`-based text lookup when it is `Some`.
+    pub fallback_char: Option<char>,
 }
 
 /// One width-invariant shaped glyph: the output of shaping that does **not**

@@ -37,6 +37,7 @@
 //! #67.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::bitmap::{
@@ -48,7 +49,7 @@ use crate::outline::{GlyphOutline, OutlineKey};
 use crate::sfnt::{apply_transform, SfntError, SfntFace};
 use crate::system::{
     FontQuery, GlyphCacheKey, GlyphFormat, GlyphImage, LayoutGlyph, LayoutRun, LayoutSpec,
-    TextError, TextRenderClass, TextSystem,
+    TextAlign, TextError, TextRenderClass, TextSystem,
 };
 
 /// Where a registered face's data originates — modeled **separately** from
@@ -317,10 +318,259 @@ struct SfntProvider {
     fallback: ValidatedFallback,
 }
 
+/// One character's width-invariant classification: which lane it draws
+/// through, its glyph id in that lane, and its pixel advance at the
+/// requested font size. Built once per [`FontProvider::layout_local`] call
+/// (#182) so line breaking, ellipsizing, and run segmentation all read the
+/// same numbers instead of re-deriving them.
+#[derive(Debug, Clone, Copy)]
+struct Shaped {
+    is_slug: bool,
+    glyph_id: u32,
+    advance_px: f32,
+    /// Mirrors [`LayoutGlyph::fallback_char`] — `None` for an ordinarily
+    /// classified character (its `cluster` indexes real source text), `Some`
+    /// for a layout-synthesized glyph (an ellipsis) that has none.
+    fallback_char: Option<char>,
+}
+
 impl SfntProvider {
     fn new(face: Arc<SfntFace>, fallback: ValidatedFallback) -> Self {
         Self { face, fallback }
     }
+
+    /// Classify one character: a glyph the face maps renders in the Slug
+    /// lane at its real advance width; an unmapped one falls back to the
+    /// bitmap lane's normalized glyph id and fixed advance — the same
+    /// per-character boundary [`layout_local`](FontProvider::layout_local)
+    /// has drawn since #67, just factored out so wrapping and ellipsizing
+    /// can call it too.
+    fn classify(&self, ch: char, sfnt_scale: f32, bmp_advance: f32) -> Shaped {
+        match self.face.glyph_index(ch) {
+            Some(gid) => Shaped {
+                is_slug: true,
+                glyph_id: gid as u32,
+                advance_px: self.face.advance_width(gid) as f32 * sfnt_scale,
+                fallback_char: None,
+            },
+            None => Shaped {
+                is_slug: false,
+                glyph_id: normalize_bitmap_char(ch) as u32,
+                advance_px: bmp_advance,
+                fallback_char: None,
+            },
+        }
+    }
+
+    /// Build the ellipsis glyph(s) appended to a truncated line: a single
+    /// `'…'` glyph when the face maps it, otherwise three `'.'` glyphs
+    /// (mirroring the bitmap lane's own `"..."` fallback in
+    /// [`ellipsize_line`](crate::bitmap::wrap_text_lines)). Every returned
+    /// glyph carries `fallback_char`: these are synthesized, not classified
+    /// from source text, so a renderer that must degrade one to the bitmap
+    /// lane for *any* reason — the layout-time classification here, or a
+    /// later outline-extraction failure — has the literal character to draw
+    /// without consulting `cluster`/source text, which would not describe a
+    /// synthesized glyph correctly.
+    fn ellipsis_glyphs(&self, sfnt_scale: f32, bmp_advance: f32) -> Vec<Shaped> {
+        match self.face.glyph_index('…') {
+            Some(gid) => vec![Shaped {
+                is_slug: true,
+                glyph_id: gid as u32,
+                advance_px: self.face.advance_width(gid) as f32 * sfnt_scale,
+                fallback_char: Some('…'),
+            }],
+            None => {
+                let dot = Shaped {
+                    fallback_char: Some('.'),
+                    ..self.classify('.', sfnt_scale, bmp_advance)
+                };
+                vec![dot, dot, dot]
+            }
+        }
+    }
+
+    /// Replace the tail of a truncated line's range with ellipsis glyphs,
+    /// trimming trailing whitespace first and, when `max_width_px` is
+    /// bounded, shrinking the kept content until it plus the ellipsis fits —
+    /// the width-based analogue of the bitmap lane's `ellipsize_line`.
+    /// Returns `(cluster, Shaped)` pairs; the ellipsis glyphs themselves
+    /// carry `chars.len()` — an out-of-range sentinel cluster — plus
+    /// [`Shaped::fallback_char`], because they are synthetic and correspond
+    /// to **no** position in the source text. An earlier revision instead
+    /// borrowed the last kept content character's cluster, on the theory
+    /// that a glyph falling back to the bitmap lane should "resolve to a
+    /// real character instead of panicking" — but every downstream cluster
+    /// lookup already guards with `.get`/`.min(chars.len())`, so that
+    /// borrowing only replaced a not-actually-needed panic guard with silent
+    /// corruption: a dot/ellipsis glyph that fell back to the bitmap lane
+    /// (whether by the layout-time classification here, or a later
+    /// outline-extraction failure) rendered whatever real character
+    /// happened to sit at the borrowed cluster instead of a dot. The
+    /// out-of-range cluster alone fixed the layout-time case (every consumer
+    /// of it was already `.get`/`.min`-guarded, so it just drops the glyph);
+    /// `fallback_char` fixes the extraction-failure case too, by giving the
+    /// renderer the literal character to draw instead of dropping it.
+    fn ellipsize_range(
+        &self,
+        chars: &[char],
+        shaped: &[Shaped],
+        range: Range<usize>,
+        max_width_px: Option<f32>,
+        sfnt_scale: f32,
+        bmp_advance: f32,
+    ) -> Vec<(u32, Shaped)> {
+        let mut end = range.end;
+        while end > range.start && chars[end - 1].is_whitespace() {
+            end -= 1;
+        }
+
+        let ellipsis = self.ellipsis_glyphs(sfnt_scale, bmp_advance);
+        let ellipsis_width: f32 = ellipsis.iter().map(|s| s.advance_px).sum();
+
+        if let Some(max_width) = max_width_px.filter(|w| w.is_finite() && *w > 0.0) {
+            while end > range.start {
+                let content_width: f32 =
+                    shaped[range.start..end].iter().map(|s| s.advance_px).sum();
+                if content_width + ellipsis_width <= max_width {
+                    break;
+                }
+                end -= 1;
+            }
+        }
+
+        let synthetic_cluster = chars.len() as u32;
+        let mut out: Vec<(u32, Shaped)> =
+            (range.start..end).map(|i| (i as u32, shaped[i])).collect();
+        out.extend(ellipsis.into_iter().map(|s| (synthetic_cluster, s)));
+        out
+    }
+}
+
+/// Word-wrap one paragraph (no `'\n'`) spanning `chars[start..end]` at
+/// `max_width_px`, using each character's real `shaped[..].advance_px`
+/// instead of a fixed per-glyph advance. Mirrors
+/// [`wrap_paragraph`](crate::bitmap) char-for-char (skip leading whitespace,
+/// break at the last whitespace in range, hard-break mid-word with at least
+/// one character per line) but width- rather than count-bounded. An
+/// unbounded (`None`/non-finite/non-positive) width never wraps — the whole
+/// paragraph is one line, matching the bitmap lane's `None`-width contract.
+// allow: a single-element `Vec<Range<usize>>` (one unbroken line) is the
+// correct result here, not a range of indices to collect — clippy's own
+// suggested rewrite would change the element type.
+#[allow(clippy::single_range_in_vec_init)]
+fn wrap_paragraph_by_width(
+    chars: &[char],
+    shaped: &[Shaped],
+    start: usize,
+    end: usize,
+    max_width_px: Option<f32>,
+) -> Vec<Range<usize>> {
+    if start >= end {
+        return Vec::new();
+    }
+    let Some(max_width) = max_width_px.filter(|w| w.is_finite() && *w > 0.0) else {
+        return vec![start..end];
+    };
+
+    let mut lines = Vec::new();
+    let mut pos = start;
+    while pos < end {
+        while pos < end && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        if pos >= end {
+            break;
+        }
+
+        let mut cursor = pos;
+        let mut width = 0.0f32;
+        let mut last_break: Option<usize> = None;
+        while cursor < end {
+            let advance = shaped[cursor].advance_px;
+            if width + advance > max_width && cursor > pos {
+                break;
+            }
+            width += advance;
+            if chars[cursor].is_whitespace() {
+                last_break = Some(cursor);
+            }
+            cursor += 1;
+        }
+
+        if cursor >= end {
+            lines.push(pos..end);
+            break;
+        }
+        // The character the loop stopped on (`cursor`) is the one that
+        // didn't fit — it was never added to `width` and so never got a
+        // chance to be recorded as `last_break`. When that very character is
+        // whitespace, the content before it already fits exactly as-is: break
+        // here directly rather than falling back to an earlier (shorter)
+        // `last_break`, which would wrap a word that actually fit onto the
+        // next line.
+        if chars[cursor].is_whitespace() {
+            lines.push(pos..cursor);
+            pos = cursor + 1;
+            continue;
+        }
+        match last_break {
+            Some(idx) if idx > pos => {
+                lines.push(pos..idx);
+                pos = idx + 1;
+            }
+            _ => {
+                let hard_end = cursor.max(pos + 1);
+                lines.push(pos..hard_end);
+                pos = hard_end;
+            }
+        }
+    }
+    lines
+}
+
+/// Break `chars` into display lines: hard breaks at `'\n'` (never wrapped
+/// across), each resulting paragraph word-wrapped by
+/// [`wrap_paragraph_by_width`], capped at `max_lines` total. Returns the
+/// line ranges plus whether the output was truncated (so the caller knows to
+/// ellipsize the final line). `max_lines == 0` degenerately yields no lines
+/// at all, matching the bitmap lane's `wrap_text_lines` contract.
+fn wrap_width_based(
+    chars: &[char],
+    shaped: &[Shaped],
+    max_width_px: Option<f32>,
+    max_lines: usize,
+) -> (Vec<Range<usize>>, bool) {
+    if max_lines == 0 {
+        return (Vec::new(), !chars.is_empty());
+    }
+
+    let n = chars.len();
+    let mut lines: Vec<Range<usize>> = Vec::new();
+    let mut truncated = false;
+    let mut para_start = 0usize;
+    loop {
+        let mut para_end = para_start;
+        while para_end < n && chars[para_end] != '\n' {
+            para_end += 1;
+        }
+        let para_lines = wrap_paragraph_by_width(chars, shaped, para_start, para_end, max_width_px);
+        if para_lines.is_empty() {
+            lines.push(para_start..para_start);
+        } else {
+            lines.extend(para_lines);
+        }
+        if lines.len() > max_lines {
+            truncated = true;
+            lines.truncate(max_lines);
+            break;
+        }
+        if para_end >= n {
+            break;
+        }
+        para_start = para_end + 1;
+    }
+    (lines, truncated)
 }
 
 /// One run-in-progress while segmenting a line into Slug + fallback runs.
@@ -332,6 +582,95 @@ struct PendingRun {
     line_descent_px: f32,
     line_y_baseline_px: f32,
     glyphs: Vec<LayoutGlyph>,
+}
+
+/// Segment one already-wrapped line's `(cluster, Shaped)` glyphs into
+/// alternating Slug/bitmap-fallback [`PendingRun`]s, appending them to
+/// `runs`. `align_offset` is the line's pen start (0 for `Start`, the
+/// computed offset for `Center`/`End`); every run on the line shares
+/// `line_baseline`. An empty line (a blank paragraph, or every character
+/// wrapped away) still emits one zero-glyph Slug run so the line is not
+/// lost from the block's line/height accounting.
+#[allow(clippy::too_many_arguments)]
+fn push_line_runs(
+    runs: &mut Vec<PendingRun>,
+    fallback: ValidatedFallback,
+    line_glyphs: &[(u32, Shaped)],
+    align_offset: f32,
+    line_baseline: f32,
+    sfnt_ascent: f32,
+    sfnt_descent: f32,
+    bmp_height: f32,
+) {
+    if line_glyphs.is_empty() {
+        runs.push(PendingRun {
+            routing: RoutedRun::Primary,
+            render_class: TextRenderClass::Slug,
+            origin_x_px: align_offset,
+            line_ascent_px: sfnt_ascent,
+            line_descent_px: sfnt_descent,
+            line_y_baseline_px: line_baseline,
+            glyphs: Vec::new(),
+        });
+        return;
+    }
+
+    let mut current: Option<PendingRun> = None;
+    let mut pen_x = align_offset;
+    for (cluster, shape) in line_glyphs {
+        let want_class = if shape.is_slug {
+            TextRenderClass::Slug
+        } else {
+            TextRenderClass::Bitmap
+        };
+
+        // Start a new run at every supported/unsupported boundary.
+        let needs_new = current
+            .as_ref()
+            .is_none_or(|r| r.render_class != want_class);
+        if needs_new {
+            if let Some(done) = current.take() {
+                runs.push(done);
+            }
+            let (line_ascent_px, line_descent_px) = if shape.is_slug {
+                (sfnt_ascent, sfnt_descent)
+            } else {
+                (bmp_height, 0.0)
+            };
+            current = Some(PendingRun {
+                routing: if shape.is_slug {
+                    RoutedRun::Primary
+                } else {
+                    RoutedRun::Fallback(fallback)
+                },
+                render_class: want_class,
+                origin_x_px: pen_x,
+                line_ascent_px,
+                line_descent_px,
+                line_y_baseline_px: line_baseline,
+                glyphs: Vec::new(),
+            });
+        }
+
+        let run = current.as_mut().expect("a run was just ensured");
+        run.glyphs.push(LayoutGlyph {
+            glyph_id: shape.glyph_id,
+            // Absolute x within the parent run = pen − run origin.
+            x_px: pen_x - run.origin_x_px,
+            y_px: 0.0,
+            x_advance_px: shape.advance_px,
+            x_offset_px: 0.0,
+            y_offset_px: 0.0,
+            cluster: *cluster,
+            subpixel_variant: 0,
+            format: GlyphFormat::Alpha,
+            fallback_char: shape.fallback_char,
+        });
+        pen_x += shape.advance_px;
+    }
+    if let Some(done) = current.take() {
+        runs.push(done);
+    }
 }
 
 impl FontProvider for SfntProvider {
@@ -364,119 +703,107 @@ impl FontProvider for SfntProvider {
         _local: LocalFontId,
         text: &str,
         spec: &LayoutSpec,
-        _max_width_px: Option<f32>,
+        max_width_px: Option<f32>,
     ) -> Vec<RoutedLayoutRun> {
         let upem = self.face.units_per_em() as f32;
         let sfnt_scale = spec.font_size_px / upem;
         let metrics = self.face.metrics();
         let sfnt_ascent = metrics.ascender as f32 * sfnt_scale;
         let sfnt_descent = -(metrics.descender as f32) * sfnt_scale;
-        // The shared baseline both lanes sit on, measured from the line top.
-        let baseline = sfnt_ascent;
+        let line_height = spec.line_height_px.max(1.0);
 
         let bmp_scale = bitmap_scale(spec.font_size_px);
         let bmp_advance = GLYPH_ADVANCE_PX * bmp_scale;
         let bmp_height = GLYPH_CELL_HEIGHT_PX * bmp_scale;
 
-        let mut runs: Vec<PendingRun> = Vec::new();
-        let mut current: Option<PendingRun> = None;
-        let mut pen_x = 0.0f32;
-        // The previous character's glyph id, kept only while it was itself a
-        // Slug-mapped glyph — kerning (#181) only ever applies between two
-        // consecutive glyphs this face actually maps; a bitmap-fallback
-        // character in between (or at a run start) resets it to `None`.
-        let mut prev_slug_gid: Option<u16> = None;
+        // Width-invariant classification, computed once for the whole
+        // string — wrapping, ellipsizing, and run segmentation below all
+        // read from this instead of re-deriving advances per pass. Entries
+        // at a `'\n'` index are never read (line ranges from
+        // `wrap_width_based` always stop short of it), so no special case
+        // is needed here.
+        let chars: Vec<char> = text.chars().collect();
+        let mut shaped: Vec<Shaped> = chars
+            .iter()
+            .map(|&ch| self.classify(ch, sfnt_scale, bmp_advance))
+            .collect();
 
-        for (cluster, ch) in text.chars().enumerate() {
-            // Classify the character: mapped → Slug lane, unmapped → bitmap
-            // fallback. The boundary is decided here, at layout time, never in
-            // the renderer.
-            let (is_slug, glyph_id, advance) = match self.face.glyph_index(ch) {
-                Some(gid) => (
-                    true,
-                    gid as u32,
-                    self.face.advance_width(gid) as f32 * sfnt_scale,
-                ),
-                None => (false, normalize_bitmap_char(ch) as u32, bmp_advance),
-            };
-
-            // Fold the kerning adjustment into the pen position before this
-            // glyph is placed, so it lands in the same run as its neighbour
-            // (both Slug-class) rather than opening a spurious new run. The
-            // same amount is folded back into the *previous* glyph's
-            // `x_advance_px` (the shaping convention: a kern pair's
-            // adjustment is recorded on the glyph it trails) so a caller that
-            // reconstructs positions by summing advances — rather than
-            // reading `x_px` directly — still agrees with the real pen
-            // positions computed here. `prev_slug_gid` being `Some`
-            // guarantees the previous iteration pushed into this same
-            // `current` run: a render-class change always starts a fresh
-            // `PendingRun` and resets `prev_slug_gid` to `None` first.
-            if is_slug {
-                if let Some(prev_gid) = prev_slug_gid {
-                    let kern_px = self.face.kerning(prev_gid, glyph_id as u16) as f32 * sfnt_scale;
-                    pen_x += kern_px;
-                    if let Some(prev_glyph) = current.as_mut().and_then(|run| run.glyphs.last_mut())
-                    {
-                        prev_glyph.x_advance_px += kern_px;
-                    }
-                }
-                prev_slug_gid = Some(glyph_id as u16);
-            } else {
-                prev_slug_gid = None;
+        // Fold kerning (#181) between every consecutive pair of Slug-mapped
+        // glyphs into the *leading* glyph's advance — the shaping convention
+        // used throughout this codebase ("a kern pair's adjustment is
+        // recorded on the glyph it trails") — so wrapping, ellipsizing, and
+        // the per-line pen walk in `push_line_runs` below all read a single
+        // already-kerned advance per glyph instead of re-querying
+        // `self.face.kerning` a second time. Skipped across a `'\n'` (its
+        // own classification is never Slug in practice, but this is the
+        // explicit guard rather than relying on that): a hard line break
+        // never leaves two glyphs visually adjacent, so no kern pair applies.
+        // Kerning at a word-wrap break point is a different story — wrapping
+        // happens *after* this pass runs, so a pair that straddles a wrap is
+        // still folded in here even though the two glyphs end up on
+        // different lines. This is a deliberate scope decision: computing
+        // kerning only among glyphs wrap decides to keep adjacent would make
+        // wrapping and kerning mutually dependent, and the visual effect of
+        // one extra/missing kern pixel at a line break is negligible.
+        for i in 1..shaped.len() {
+            if chars[i - 1] == '\n' || chars[i] == '\n' {
+                continue;
             }
-
-            let want_class = if is_slug {
-                TextRenderClass::Slug
-            } else {
-                TextRenderClass::Bitmap
-            };
-
-            // Start a new run at every supported/unsupported boundary.
-            let needs_new = current
-                .as_ref()
-                .is_none_or(|r| r.render_class != want_class);
-            if needs_new {
-                if let Some(done) = current.take() {
-                    runs.push(done);
-                }
-                let (line_ascent_px, line_descent_px) = if is_slug {
-                    (sfnt_ascent, sfnt_descent)
-                } else {
-                    (bmp_height, 0.0)
-                };
-                current = Some(PendingRun {
-                    routing: if is_slug {
-                        RoutedRun::Primary
-                    } else {
-                        RoutedRun::Fallback(self.fallback)
-                    },
-                    render_class: want_class,
-                    origin_x_px: pen_x,
-                    line_ascent_px,
-                    line_descent_px,
-                    line_y_baseline_px: baseline,
-                    glyphs: Vec::new(),
-                });
+            if shaped[i - 1].is_slug && shaped[i].is_slug {
+                let prev_gid = shaped[i - 1].glyph_id as u16;
+                let gid = shaped[i].glyph_id as u16;
+                let kern_px = self.face.kerning(prev_gid, gid) as f32 * sfnt_scale;
+                shaped[i - 1].advance_px += kern_px;
             }
-
-            let run = current.as_mut().expect("a run was just ensured");
-            run.glyphs.push(LayoutGlyph {
-                glyph_id,
-                // Absolute x within the parent run = pen − run origin.
-                x_px: pen_x - run.origin_x_px,
-                y_px: 0.0,
-                x_advance_px: advance,
-                x_offset_px: 0.0,
-                y_offset_px: 0.0,
-                cluster: cluster as u32,
-                subpixel_variant: 0,
-                format: GlyphFormat::Alpha,
-            });
-            pen_x += advance;
         }
-        if let Some(done) = current.take() {
-            runs.push(done);
+
+        let max_lines = spec.max_lines.unwrap_or(usize::MAX);
+        let (line_ranges, truncated) = wrap_width_based(&chars, &shaped, max_width_px, max_lines);
+        let last_line_index = line_ranges.len().saturating_sub(1);
+
+        let mut runs: Vec<PendingRun> = Vec::new();
+        for (line_index, range) in line_ranges.into_iter().enumerate() {
+            let line_glyphs: Vec<(u32, Shaped)> = if truncated && line_index == last_line_index {
+                self.ellipsize_range(
+                    &chars,
+                    &shaped,
+                    range,
+                    max_width_px,
+                    sfnt_scale,
+                    bmp_advance,
+                )
+            } else {
+                (range.start..range.end)
+                    .map(|i| (i as u32, shaped[i]))
+                    .collect()
+            };
+
+            let line_width: f32 = line_glyphs.iter().map(|(_, s)| s.advance_px).sum();
+            // Alignment only applies against a bounded width — unbounded text
+            // (max_width_px == None) always renders Start, matching the
+            // bitmap lane's own `max_width_px.map_or(0.0, ...)` contract.
+            let align_offset = match spec.align {
+                TextAlign::Start => 0.0,
+                TextAlign::Center => {
+                    max_width_px.map_or(0.0, |w| ((w - line_width) * 0.5).max(0.0))
+                }
+                TextAlign::End => max_width_px.map_or(0.0, |w| (w - line_width).max(0.0)),
+            };
+            // Every line shares the same ascent/descent (one face, one size),
+            // so each line's baseline is just the previous lines' total
+            // height plus this face's ascent above its own top.
+            let line_baseline = line_index as f32 * line_height + sfnt_ascent;
+
+            push_line_runs(
+                &mut runs,
+                self.fallback,
+                &line_glyphs,
+                align_offset,
+                line_baseline,
+                sfnt_ascent,
+                sfnt_descent,
+                bmp_height,
+            );
         }
 
         // Materialize each pending run into a public LayoutRun. The composite
@@ -485,7 +812,12 @@ impl FontProvider for SfntProvider {
         // placeholders.
         runs.into_iter()
             .map(|pending| {
-                let bitmap_top_origin = (baseline - pending.line_ascent_px).max(0.0);
+                // `line_top` recovers this run's line top from its baseline —
+                // exact because every line's baseline was built as
+                // `line_top + sfnt_ascent` above.
+                let line_top = (pending.line_y_baseline_px - sfnt_ascent).max(0.0);
+                let bitmap_top_origin =
+                    (pending.line_y_baseline_px - pending.line_ascent_px).max(0.0);
                 RoutedLayoutRun {
                     routing: pending.routing,
                     run: LayoutRun {
@@ -497,13 +829,14 @@ impl FontProvider for SfntProvider {
                         synthesis_flags: spec.synthesis_flags,
                         hinting: spec.hinting,
                         origin_x_px: pending.origin_x_px,
-                        // Slug runs are baseline-relative (origin at top = 0);
-                        // bitmap fallback runs draw from a top origin placed so
-                        // their cell baseline lands on the shared baseline.
+                        // Slug runs are baseline-relative (origin at this
+                        // line's top); bitmap fallback runs draw from a top
+                        // origin placed so their cell baseline lands on the
+                        // shared per-line baseline.
                         origin_y_px: if pending.render_class == TextRenderClass::Bitmap {
                             bitmap_top_origin
                         } else {
-                            0.0
+                            line_top
                         },
                         line_y_baseline_px: pending.line_y_baseline_px,
                         line_ascent_px: pending.line_ascent_px,
@@ -1138,6 +1471,7 @@ mod tests {
                 cluster: 0,
                 subpixel_variant: 0,
                 format: GlyphFormat::Alpha,
+                fallback_char: None,
             }],
         }
     }

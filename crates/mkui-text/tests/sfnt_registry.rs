@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use mkui_text::{
     Affine2Fixed, CompositeTextSystem, FontId, FontQuery, FontSource, LayoutSpec, OutlineKey,
-    TextError, TextRenderClass, TextSystem, VariationSettings,
+    TextAlign, TextEngine, TextError, TextRenderClass, TextSystem, VariationSettings,
 };
 
 const ABEL: &[u8] = include_bytes!("fixtures/abel/Abel-Regular.ttf");
@@ -251,4 +251,283 @@ fn leading_and_trailing_fallback_runs_are_segmented() {
     assert_eq!(runs[0].render_class, TextRenderClass::Bitmap);
     assert_eq!(runs[1].render_class, TextRenderClass::Slug);
     assert_eq!(runs[2].render_class, TextRenderClass::Bitmap);
+}
+
+// ---- #182: wrap / align / max-lines / ellipsis / measurement on the Slug
+// (SFNT) lane — the gap `expand_slug_text` bailed to bitmap for since #171/#172.
+
+/// Each wrapped line's measured width (via [`TextEngine`], the public
+/// measurement API) must respect `max_width_px`, and the block must contain
+/// more than one line — proving `SfntProvider::layout_local` genuinely wraps
+/// instead of ignoring `max_width_px` (the pre-#182 behavior).
+#[test]
+fn slug_lane_wraps_a_paragraph_at_an_arbitrary_max_width() {
+    let (sys, id) = registered();
+    let spec = slug_spec(id, 16.0);
+    let text = "The quick brown fox jumps over the lazy dog";
+
+    let engine = TextEngine::new(Arc::new(sys));
+    let prepared = engine.prepare(text, spec);
+    let intrinsic_width = prepared.intrinsic_width_px();
+
+    let narrow_width = intrinsic_width / 4.0;
+    let layout = prepared.layout(Some(narrow_width));
+
+    assert!(
+        layout.lines.len() > 1,
+        "wrapping a narrow box must produce multiple lines, got {}",
+        layout.lines.len()
+    );
+    for (i, line) in layout.lines.iter().enumerate() {
+        assert!(
+            line.width_px <= narrow_width + 1.0,
+            "line {i} width {} exceeds max width {narrow_width}",
+            line.width_px
+        );
+    }
+    // Every wrap point consumes exactly the one whitespace character it
+    // broke at (mirrors the bitmap lane's `wrap_paragraph`), so the glyph
+    // count is less than the source length by the number of line breaks but
+    // never collapses to (near-)nothing.
+    let total_glyphs: usize = layout.runs.iter().map(|r| r.glyphs.len()).sum();
+    assert!(total_glyphs > text.chars().count().saturating_sub(layout.lines.len()));
+    assert!(total_glyphs <= text.chars().count());
+}
+
+/// A word that exactly fits the line must not be wrapped early just because
+/// the *next* character (the separating space before the following word) is
+/// the one that overflows. The break point must be recognized as the
+/// overflowing whitespace itself, not an earlier, shorter one.
+#[test]
+fn slug_lane_does_not_wrap_a_word_that_exactly_fits_the_line() {
+    let (sys, id) = registered();
+    let spec = slug_spec(id, 16.0);
+    let engine = TextEngine::new(Arc::new(sys));
+
+    let probe = engine.prepare("hello world", spec.clone());
+    let hello_world_width = probe.intrinsic_width_px();
+
+    let prepared = engine.prepare("hello world foo", spec);
+    let layout = prepared.layout(Some(hello_world_width + 0.5));
+
+    assert_eq!(
+        layout.lines[0].glyph_range.len(),
+        11,
+        "line 0 must keep all of \"hello world\" (11 glyphs), not wrap early"
+    );
+}
+
+/// `TextAlign::Center` / `TextAlign::End` must offset the Slug run's pen
+/// start, not render flush-left — the exact regression #172's round-1/2 fix
+/// bailed to bitmap for instead of fixing.
+#[test]
+fn slug_lane_honors_center_and_end_alignment() {
+    let (sys, id) = registered();
+    let box_width = 400.0;
+
+    let start_runs = sys.layout(
+        "Mag",
+        &LayoutSpec {
+            align: TextAlign::Start,
+            ..slug_spec(id, 16.0)
+        },
+        Some(box_width),
+    );
+    let center_runs = sys.layout(
+        "Mag",
+        &LayoutSpec {
+            align: TextAlign::Center,
+            ..slug_spec(id, 16.0)
+        },
+        Some(box_width),
+    );
+    let end_runs = sys.layout(
+        "Mag",
+        &LayoutSpec {
+            align: TextAlign::End,
+            ..slug_spec(id, 16.0)
+        },
+        Some(box_width),
+    );
+
+    let start_x = start_runs[0].origin_x_px;
+    let center_x = center_runs[0].origin_x_px;
+    let end_x = end_runs[0].origin_x_px;
+
+    assert_eq!(start_x, 0.0);
+    assert!(
+        center_x > start_x && center_x < end_x,
+        "center offset {center_x} must sit strictly between start {start_x} and end {end_x}"
+    );
+    // The same content, so End's offset must be exactly double Center's
+    // (Start=0, Center=(box-content)/2, End=box-content).
+    assert!((end_x - 2.0 * center_x).abs() < 1e-2);
+}
+
+/// `max_lines` caps the line count, and the final line is ellipsized rather
+/// than silently dropped or left overflowing.
+#[test]
+fn slug_lane_caps_at_max_lines_and_ellipsizes_the_tail() {
+    let (sys, id) = registered();
+    let face = sys.sfnt_face(id).unwrap().clone();
+    let text = "one two three four five six seven eight nine ten";
+    let spec = LayoutSpec {
+        max_lines: Some(2),
+        ..slug_spec(id, 16.0)
+    };
+    // Narrow enough that the unbounded text needs far more than 2 lines.
+    let runs = sys.layout(text, &spec, Some(60.0));
+
+    // Exactly 2 distinct lines (grouped by shared baseline).
+    let mut baselines: Vec<f32> = runs.iter().map(|r| r.line_y_baseline_px).collect();
+    baselines.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+    assert_eq!(baselines.len(), 2, "max_lines=2 must cap at 2 lines");
+
+    // The last run's final glyph is the ellipsis marker: either '…' (if the
+    // face maps it) or the last of three '.' glyphs.
+    let last = runs.last().unwrap();
+    let last_glyph = last.glyphs.last().unwrap();
+    let is_ellipsis_glyph = match face.glyph_index('…') {
+        Some(gid) => last_glyph.glyph_id == gid as u32,
+        None => {
+            let dot_slug = face.glyph_index('.').map(|g| g as u32);
+            let dot_bitmap = mkui_text::normalize_bitmap_char('.') as u32;
+            Some(last_glyph.glyph_id) == dot_slug.map(Some).unwrap_or(Some(dot_bitmap))
+        }
+    };
+    assert!(
+        is_ellipsis_glyph,
+        "truncated tail must end in an ellipsis glyph"
+    );
+}
+
+/// Regression for the ellipsis-glyph-identity-loss-through-bitmap-fallback
+/// bug: a synthesized ellipsis glyph does not correspond to any position in
+/// the source text, so it must carry an out-of-range sentinel `cluster`
+/// (`chars.len()`) rather than borrowing a real content character's index.
+/// An earlier revision borrowed the last kept content character's cluster
+/// "so a glyph that falls back to the bitmap lane still resolves to a real
+/// character instead of panicking" — but every downstream cluster consumer
+/// already guards with `.get`/`.min(chars.len())`, so that borrowing only
+/// swapped a not-actually-needed panic guard for silent misrendering: a
+/// renderer reconstructing bitmap-fallback text from `chars[cluster]` would
+/// draw whatever real character sat at the borrowed cluster instead of a
+/// dot/ellipsis. See `crates/mkui-wgpu/src/slug_text.rs`'s
+/// `expand_text_primitive`, which now reconstructs bitmap-fallback text from
+/// each glyph's own `glyph_id` instead, precisely because this cluster can
+/// no longer be trusted to index real content.
+#[test]
+fn ellipsized_tail_glyphs_carry_an_out_of_range_sentinel_cluster() {
+    let (sys, id) = registered();
+    let text = "one two three four five six seven eight nine ten";
+    let char_count = text.chars().count() as u32;
+    let spec = LayoutSpec {
+        max_lines: Some(1),
+        ..slug_spec(id, 16.0)
+    };
+    // Narrow enough that the single allowed line must truncate + ellipsize.
+    let runs = sys.layout(text, &spec, Some(60.0));
+
+    let last_run = runs.last().unwrap();
+    let last_glyph = last_run.glyphs.last().unwrap();
+    assert_eq!(
+        last_glyph.cluster, char_count,
+        "the ellipsis glyph's cluster must be the out-of-range sentinel \
+         (chars.len()), not a borrowed real content index"
+    );
+}
+
+/// No panic across the degenerate inputs an autonomous layout caller might
+/// legitimately hit: a box narrower than a single glyph, non-finite/zero
+/// width, `max_lines = Some(0)`, and a run of blank lines.
+#[test]
+fn slug_lane_does_not_panic_on_degenerate_inputs() {
+    let (sys, id) = registered();
+
+    for width in [0.0_f32, -1.0, f32::NAN, f32::INFINITY, 0.001] {
+        let _ = sys.layout("Mag", &slug_spec(id, 16.0), Some(width));
+    }
+
+    let zero_lines_spec = LayoutSpec {
+        max_lines: Some(0),
+        ..slug_spec(id, 16.0)
+    };
+    let runs = sys.layout("Mag", &zero_lines_spec, Some(100.0));
+    assert!(runs.is_empty(), "max_lines=0 must yield no runs");
+
+    // Multiple blank paragraphs: every line is empty, must not panic and
+    // must still produce one run per line.
+    let blank_runs = sys.layout("\n\n\n", &slug_spec(id, 16.0), None);
+    assert_eq!(blank_runs.len(), 4);
+    assert!(blank_runs.iter().all(|r| r.glyphs.is_empty()));
+
+    // A single unbreakable word far wider than the box must still produce
+    // exactly one line (hard-broken at the glyph boundary), not loop forever.
+    let runs = sys.layout(
+        "supercalifragilisticexpialidocious",
+        &slug_spec(id, 16.0),
+        Some(5.0),
+    );
+    assert!(!runs.is_empty());
+}
+
+/// A non-finite `font_size_px` must not hang `TextEngine::prepare`.
+///
+/// `font_size_px: NaN` propagates into `SfntProvider::layout_local`'s
+/// `sfnt_scale` and from there into every run's `line_y_baseline_px`. Before
+/// the fix, `engine.rs::build_layout` grouped runs into lines by scanning
+/// ahead from `j = i` for `runs[j].line_y_baseline_px == baseline` — but
+/// `NaN == NaN` is `false`, so that scan matched **zero** runs, including
+/// run `i` itself, leaving the outer index unchanged and looping forever
+/// (an unbounded `Vec` of duplicate zero-width lines). Run this on a thread
+/// with a bounded join instead of calling `prepare` directly, so a
+/// regression fails this test loudly instead of hanging the whole suite.
+#[test]
+fn prepare_with_non_finite_font_size_terminates() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (sys, id) = registered();
+        let spec = LayoutSpec {
+            font_size_px: f32::NAN,
+            ..slug_spec(id, 16.0)
+        };
+        let engine = TextEngine::new(Arc::new(sys));
+        let prepared = engine.prepare("M", spec);
+        let _ = prepared.intrinsic_layout();
+        let _ = tx.send(());
+    });
+
+    assert!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+        "TextEngine::prepare with a non-finite font_size_px must terminate, \
+         not hang build_layout's line-grouping loop"
+    );
+}
+
+/// The public measurement API ([`TextEngine`]/[`TextLayout`]) must report the
+/// true line count and block height for Slug-routed mixed-lane text — the
+/// bug `engine.rs::build_layout` had before #182, which assumed one run per
+/// line and so miscounted a Slug line that splits into a Slug + bitmap-
+/// fallback run pair.
+#[test]
+fn measurement_reports_one_line_for_a_mixed_lane_single_line() {
+    let (sys, id) = registered();
+    let spec = slug_spec(id, 24.0);
+    let engine = TextEngine::new(Arc::new(sys));
+
+    // "M中A": Abel maps 'M'/'A' but not '中' — three runs (Slug, Bitmap,
+    // Slug), all on what must measure as exactly one line.
+    let prepared = engine.prepare("M中A", spec);
+    let layout = prepared.layout(None);
+
+    assert_eq!(
+        layout.lines.len(),
+        1,
+        "a mixed Slug+bitmap-fallback single line must measure as one line, not {}",
+        layout.lines.len()
+    );
+    assert_eq!(layout.block_height_px, layout.line_height_px);
+    // The line's width spans the full mixed run, not just its first/last run.
+    let total_glyphs: usize = layout.runs.iter().map(|r| r.glyphs.len()).sum();
+    assert_eq!(layout.lines[0].glyph_range.len(), total_glyphs);
 }
