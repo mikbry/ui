@@ -381,12 +381,15 @@ pub fn measure_line_width(glyphs: &[char], advance: f32, glyph_width: f32) -> f3
 /// - Width/space folding: the bitmap face is fixed-advance, so there is no
 ///   "narrow" glyph variant — NBSP and the French narrow no-break space both
 ///   collapse to the plain blank space.
-/// - Capital-letter accent folding: lowercase letters reserve row 0 for the
-///   ascender, which gives accented lowercase glyphs (see [`bitmap_glyph`])
-///   a free row to draw the diacritic in. Capitals use all 7 rows for the
-///   letterform itself, so there is no spare row for a diacritic without a
-///   taller cell; rendering the unaccented capital is the legible fallback
-///   until the cell grows.
+/// - `Ç` folding: every other accented capital gets its own [`bitmap_glyph`]
+///   entry (the letterform compressed into 6 rows, freeing row 0 for the
+///   diacritic — see the accented-capital block in that table). A cedilla
+///   sits *below* the baseline instead, and capital `C`'s bottom row
+///   (`0b01111`) already uses every column the 5-bit cell has, so there is
+///   no spare bit left to hang a hook off (unlike lowercase `c`'s bottom row
+///   `0b01110`, which has one free column — see `ç` in [`bitmap_glyph`]).
+///   Rendering the unaccented capital is the legible fallback until the
+///   cell grows.
 pub fn normalize_bitmap_char(character: char) -> char {
     match character {
         '²' => '2',
@@ -394,12 +397,6 @@ pub fn normalize_bitmap_char(character: char) -> char {
         '–' | '—' => '-',
         '\u{2018}' | '\u{2019}' => '\'',
         '\u{00A0}' | '\u{202F}' => ' ',
-        'À' | 'Â' | 'Ä' => 'A',
-        'É' | 'È' | 'Ê' | 'Ë' => 'E',
-        'Î' | 'Ï' => 'I',
-        'Ô' | 'Ö' => 'O',
-        'Ù' | 'Û' | 'Ü' => 'U',
-        'Ÿ' => 'Y',
         'Ç' => 'C',
         _ => character,
     }
@@ -428,12 +425,12 @@ pub fn is_fallback_glyph(bits: &[u8; 7]) -> bool {
 }
 
 /// 5×7 bit pattern for a single glyph. Rows are MSB-first; bit 4 is the
-/// leftmost column. Covers ASCII plus the lowercase French-accented
-/// letters, the œ/Œ ligature, guillemets, curly quotes, and ellipsis needed
+/// leftmost column. Covers ASCII plus the French-accented letters (both
+/// cases), the œ/Œ ligature, guillemets, curly quotes, and ellipsis needed
 /// for Latin + French text; [`normalize_bitmap_char`] folds a few other
-/// codepoints (NBSP, narrow NBSP, accented capitals) onto entries here
-/// before this table is consulted. Characters with no entry below render
-/// the explicit [`FALLBACK_GLYPH`], never `'?'` and never a blank cell.
+/// codepoints (NBSP, narrow NBSP, `Ç`) onto entries here before this table
+/// is consulted. Characters with no entry below render the explicit
+/// [`FALLBACK_GLYPH`], never `'?'` and never a blank cell.
 #[rustfmt::skip]
 pub fn bitmap_glyph(character: char) -> [u8; 7] {
     match character {
@@ -510,6 +507,40 @@ pub fn bitmap_glyph(character: char) -> [u8; 7] {
         'û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
         'ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
         'ÿ' => [0b10001, 0b10001, 0b10001, 0b10001, 0b01111, 0b00001, 0b01110],
+        // French-accented capital letters: unlike lowercase, capitals have
+        // no free ascender row (every row is already load-bearing for the
+        // letterform — see 'A'/'E'/'I'/'O'/'U'/'Y' above). Row 0 is freed
+        // for the diacritic instead by dropping one row from a run of
+        // duplicate rows in the base capital's shape (e.g. 'A' has three
+        // identical 0b10001 leg rows after the crossbar; this keeps two),
+        // which shortens the letterform by one row but does not change its
+        // recognizable shape. 'Ç' has no equivalent treatment and still
+        // folds to 'C' in `normalize_bitmap_char` — a cedilla sits below
+        // the baseline, and 'C''s bottom row already uses every column the
+        // 5-bit cell has (see `normalize_bitmap_char`'s doc comment).
+        'À' => [0b01000, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'Â' => [0b01010, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'Ä' => [0b10001, 0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001],
+        'É' => [0b00010, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'È' => [0b01000, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'Ê' => [0b01010, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'Ë' => [0b10001, 0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'Î' => [0b01010, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'Ï' => [0b10001, 0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'Ô' => [0b01010, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'Ö' => [0b10001, 0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'Ù' => [0b01000, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'Û' => [0b01010, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        // 'Ü' needs its own bottom row, not plain 'U''s 0b01110: 'U''s
+        // compressed body is five identical 0b10001 stem rows followed by
+        // the closing curve, so a diaeresis accent row (also 0b10001)
+        // stacked on top exactly reconstructs the seven rows of plain 'U'
+        // bit-for-bit (unlike 'À'/'É'/'Î'/'Ô', whose capitals have a unique
+        // non-repeating top row that the accent necessarily overwrites).
+        // Widening the closing curve by one bit on the right breaks that
+        // collision while keeping the shape recognizable as 'U'.
+        'Ü' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01111],
+        'Ÿ' => [0b10001, 0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100],
         // Cedilla has no row below the baseline to sit in (row 6 is already
         // the bottom of the letter), so it is approximated as a small hook
         // extending the bottom-right of the 'c' shape rather than a true
@@ -654,12 +685,54 @@ mod tests {
     #[test]
     fn fallback_glyph_is_distinct_from_every_mapped_character() {
         let mapped_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789\
-            :.,+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒ";
+            :.,+-/|()'=?#· «»“”…àâäéèêëîïôöùûüÿçœŒÀÂÄÉÈÊËÎÏÔÖÙÛÜŸ";
         for ch in mapped_chars.chars() {
             let bits = bitmap_glyph(ch);
             assert!(
                 !is_fallback_glyph(&bits),
                 "mapped character {ch:?} must not collide with FALLBACK_GLYPH"
+            );
+        }
+    }
+
+    #[test]
+    fn accented_capitals_render_distinctly_from_their_unaccented_base_letter() {
+        // Each accented capital has its own `bitmap_glyph` entry distinct
+        // from the base letter — unlike `Ç`, which still folds to `C` in
+        // `normalize_bitmap_char` (see its doc comment) and is excluded
+        // here. All-caps UI text (menus, headings) must keep its accents,
+        // not silently drop them.
+        let pairs = [
+            ('À', 'A'),
+            ('Â', 'A'),
+            ('Ä', 'A'),
+            ('É', 'E'),
+            ('È', 'E'),
+            ('Ê', 'E'),
+            ('Ë', 'E'),
+            ('Î', 'I'),
+            ('Ï', 'I'),
+            ('Ô', 'O'),
+            ('Ö', 'O'),
+            ('Ù', 'U'),
+            ('Û', 'U'),
+            ('Ü', 'U'),
+            ('Ÿ', 'Y'),
+        ];
+        for (accented, base) in pairs {
+            assert_eq!(
+                normalize_bitmap_char(accented),
+                accented,
+                "{accented:?} must not be folded away by normalize_bitmap_char"
+            );
+            assert_ne!(
+                bitmap_glyph(accented),
+                bitmap_glyph(base),
+                "{accented:?} must render distinctly from {base:?}"
+            );
+            assert!(
+                !is_fallback_glyph(&bitmap_glyph(accented)),
+                "{accented:?} must not render the fallback glyph"
             );
         }
     }

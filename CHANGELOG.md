@@ -102,11 +102,13 @@ breaking changes can land on minor bumps).
     now cancels a pending pointer activation instead of leaving it armed
     for a later, unrelated release to fire. See ADR 0011's addendum.
 - **`mkui-text` bitmap face: Latin + French glyph coverage, defined fallback
-  glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers the lowercase
-  French-accented letters (à â ä é è ê ë î ï ô ö ù û ü ÿ ç), the œ/Œ
-  ligature, guillemets, curly double quotes, and ellipsis, and folds NBSP /
-  narrow-NBSP to a plain space and accented capitals to their unaccented
-  base letter (the 7-row capital cell has no spare row for a diacritic).
+  glyph (#184).** `BitmapTextSystem`'s 5×7 table now covers the French-accented
+  letters in both cases (à â ä é è ê ë î ï ô ö ù û ü ÿ ç and À Â Ä É È Ê Ë Î Ï
+  Ô Ö Ù Û Ü Ÿ), the œ/Œ ligature, guillemets, curly double quotes, and
+  ellipsis, and folds NBSP / narrow-NBSP to a plain space. `Ç` still folds to
+  `C` — a cedilla sits below the baseline, and `C`'s bottom row already uses
+  every column the 5-bit cell has, unlike the other accented capitals, which
+  free row 0 for the diacritic by compressing their letterform into 6 rows.
   Any codepoint still missing a glyph renders a new, explicit
   `FALLBACK_GLYPH` (a hollow box) instead of reusing `'?'` — legible, never
   blank, never a panic. `BitmapTextSystem::rasterize` now normalizes before
