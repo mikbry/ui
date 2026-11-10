@@ -62,9 +62,13 @@ pub struct TextEditState {
 }
 
 impl TextEditState {
-    /// New state with `initial` as the text and the caret at its end.
+    /// New state with `initial` as the text and the caret at its end. Line
+    /// breaks are stripped, same as every other way text enters this type
+    /// ([`Self::insert_str`], [`Self::set_composing`],
+    /// [`Self::commit_composing`]) — this is a single-line field.
     pub fn new(initial: impl Into<String>) -> Self {
-        let text = initial.into();
+        let initial = initial.into();
+        let text = strip_line_breaks(&initial).into_owned();
         let caret = text.len();
         Self {
             text,
@@ -262,7 +266,15 @@ impl TextEditState {
     /// caret position *within* `preedit`, in bytes, defaulting to
     /// `preedit.len()` when the host doesn't supply one.
     pub fn set_composing(&mut self, preedit: &str, cursor: Option<usize>) {
-        let preedit = strip_line_breaks(preedit);
+        // `cursor` is a byte offset into the *unstripped* `preedit` the host
+        // handed us, so it must be clamped and remapped against that string
+        // before stripping — remapping against the already-stripped string
+        // would leave it pointing at whatever byte happened to end up at
+        // that offset post-strip, which isn't a char boundary in general
+        // (e.g. `cursor` landing inside a multi-byte char that shifted left
+        // to fill the gap left by a removed `\n`).
+        let cursor = cursor.unwrap_or(preedit.len()).min(preedit.len());
+        let (preedit, cursor) = strip_line_breaks_with_cursor(preedit, cursor);
         let start = if let Some((start, end)) = self.composing.take() {
             self.text.replace_range(start..end, "");
             start
@@ -273,7 +285,6 @@ impl TextEditState {
         self.text.insert_str(start, &preedit);
         let end = start + preedit.len();
         self.composing = Some((start, end));
-        let cursor = cursor.unwrap_or(preedit.len()).min(preedit.len());
         self.caret = start + cursor;
         self.normalize();
     }
@@ -360,6 +371,32 @@ fn strip_line_breaks(s: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+/// Like [`strip_line_breaks`], but also remaps a byte offset that's valid
+/// in `s` (e.g. an IME preedit cursor) into the stripped string — not just
+/// clamping it to the new, shorter length, but actually subtracting the
+/// bytes removed *before* it, since those bytes no longer exist in the
+/// result. Without this, a cursor that lands after a removed `\r`/`\n` ends
+/// up pointing at whatever byte shifted into that offset post-strip, which
+/// in general isn't even a char boundary (e.g. the middle of a multi-byte
+/// char that shifted left to fill the gap) — a cursor in [`TextEditState`]
+/// must always land on one.
+fn strip_line_breaks_with_cursor(s: &str, cursor: usize) -> (std::borrow::Cow<'_, str>, usize) {
+    if !s.contains(['\r', '\n']) {
+        return (std::borrow::Cow::Borrowed(s), cursor);
+    }
+    let removed_before_cursor: usize = s
+        .char_indices()
+        .take_while(|(byte_idx, _)| *byte_idx < cursor)
+        .filter(|(_, c)| *c == '\r' || *c == '\n')
+        .map(|(_, c)| c.len_utf8())
+        .sum();
+    let stripped = s.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+    (
+        std::borrow::Cow::Owned(stripped),
+        cursor - removed_before_cursor,
+    )
+}
+
 /// The byte offset of the char immediately before `byte_idx` (which must be
 /// a valid char boundary), or `0` at the start of the string.
 fn prev_char_boundary(s: &str, byte_idx: usize) -> usize {
@@ -393,6 +430,16 @@ mod tests {
         assert_eq!(state.text(), "hello");
         assert_eq!(state.caret(), 5);
         assert_eq!(state.selection(), None);
+    }
+
+    #[test]
+    fn new_strips_line_breaks_to_stay_single_line() {
+        // Regression for #228 review round 2 P2: `new()` is also a way text
+        // enters this type, so it must apply the same single-line
+        // normalization as insert_str/set_composing/commit_composing.
+        let state = TextEditState::new("first\r\nsecond");
+        assert_eq!(state.text(), "firstsecond");
+        assert_eq!(state.caret(), "firstsecond".len());
     }
 
     #[test]
@@ -750,6 +797,51 @@ mod tests {
         assert_eq!(state.text(), "ab");
         state.commit_composing("c\r\nd");
         assert_eq!(state.text(), "cd");
+    }
+
+    #[test]
+    fn set_composing_cursor_remap_does_not_split_a_multibyte_char() {
+        // Regression for #228 review round 2 P1: `cursor` is a byte offset
+        // into the *unstripped* preedit the host supplied. "\néx" with
+        // cursor 1 means "right after the \n, right before é" — once the
+        // \n is stripped, that must land at byte 0 of "éx" (before é, a
+        // valid char boundary), not byte 1 (which would be the middle of
+        // é's 2-byte UTF-8 encoding).
+        let mut state = TextEditState::new("");
+        state.set_composing("\néx", Some(1));
+        assert_eq!(state.text(), "éx");
+        assert_eq!(
+            state.caret(),
+            0,
+            "cursor must land before é, not mid-byte inside it"
+        );
+        // Previously, an unremapped cursor landed at byte 1 — inside é's
+        // 2-byte encoding — and this would panic slicing a non-boundary.
+        state.delete();
+        assert_eq!(
+            state.text(),
+            "x",
+            "delete must remove all of é, not split it"
+        );
+    }
+
+    #[test]
+    fn set_composing_cursor_remap_counts_only_breaks_before_the_cursor() {
+        // A line break *after* the cursor must not affect the remap.
+        let mut state = TextEditState::new("");
+        state.set_composing("ab\ncd", Some(1));
+        assert_eq!(state.text(), "abcd");
+        assert_eq!(state.caret(), 1);
+    }
+
+    #[test]
+    fn set_composing_cursor_remap_handles_crlf_before_cursor() {
+        let mut state = TextEditState::new("");
+        state.set_composing("ab\r\ncd", Some(5));
+        assert_eq!(state.text(), "abcd");
+        // Both \r and \n (2 bytes) were before the original cursor (5), so
+        // the remapped cursor is 5 - 2 = 3, landing right before 'd'.
+        assert_eq!(state.caret(), 3);
     }
 
     // --- Structural audit regressions (#228 review follow-up): fixing the
