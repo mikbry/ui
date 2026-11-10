@@ -4,9 +4,9 @@
 //! Pure logic, no winit/host dependency and no OS clipboard access: like
 //! [`crate::pointer::PointerState`], one instance is owned by the caller and
 //! kept across frames (the renderer is immediate-mode and retains no
-//! component tree between frames). [`TextEditState::copy`] / [`cut`] hand
+//! component tree between frames). [`TextEditState::copy`] / [`TextEditState::cut`] hand
 //! back an owned `String` for a host-provided clipboard (#206) to store;
-//! [`paste`] takes an owned `&str` the host supplies. Nothing in this module
+//! [`TextEditState::paste`] takes an owned `&str` the host supplies. Nothing in this module
 //! touches an OS API, so it slots into #206's trait once that lands without
 //! any change here.
 //!
@@ -21,7 +21,7 @@
 //! [`TextEditState`] only tracks logical state; it has no pixel/x-position
 //! concept and no fixed-width character count. Caret/selection pixel
 //! placement for rendering uses an approximate advance width
-//! ([`crate::components::text_field::text_field_editable`]) pending #182's
+//! (`crate::components::text_field::text_field_editable`) pending #182's
 //! glyph-measurement API — that's a rendering-layer approximation the
 //! logical model here doesn't need to know about.
 
