@@ -107,6 +107,12 @@ pub struct ThemeTokens {
     pub surface_sunken: Color,
     pub scrollbar_track: Color,
     pub swatch_stroke: Color,
+    /// Full-viewport dimming scrim painted behind an open dialog's panel
+    /// (#188). Deliberately its own token rather than a `surface` alpha
+    /// derivative — unlike every other surface, it paints over *all*
+    /// underlying content, not just the space its own widget occupies, so
+    /// it warrants a dedicated, independently-tunable darkness.
+    pub backdrop: Color,
     pub shadow: ShadowStyle,
     /// Named geometry scale (corner radii, hairline stroke width, panel
     /// padding) — the "spacing" half of issue #205's color-and-spacing
@@ -237,6 +243,14 @@ pub struct InputStyle {
     /// Color of the caret bar and of the underline drawn beneath an
     /// in-progress IME composition (#185).
     pub caret_color: Color,
+}
+
+/// Concrete, resolved modal dialog look-and-feel (#188): the full-viewport
+/// backdrop scrim plus the panel chrome its content sits in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DialogStyle {
+    pub backdrop: Color,
+    pub panel: PanelStyle,
 }
 
 /// Concrete, resolved scrollbar look-and-feel. The caller supplies the
@@ -417,6 +431,7 @@ impl Default for WgpuTheme {
             surface_sunken: Color::rgba(0.08, 0.06, 0.05, 0.96),
             scrollbar_track: Color::rgba(0.04, 0.03, 0.02, 0.55),
             swatch_stroke: Color::rgba(0.0, 0.0, 0.0, 0.35),
+            backdrop: Color::rgba(0.0, 0.0, 0.0, 0.55),
             shadow: ShadowStyle {
                 color: Color::rgba(0.0, 0.0, 0.0, 0.38),
                 blur_radius: 24.0,
@@ -549,6 +564,18 @@ impl WgpuTheme {
                 caret_color: self.tokens.primary_ring,
                 padding: Insets::symmetric(6.0, 1.0),
             }
+        }
+    }
+
+    /// Modal dialog chrome: the full-viewport backdrop scrim plus the roomy
+    /// panel preset (#188). Two stacked dialogs each call this and compose
+    /// correctly without any special-casing — the second call's backdrop
+    /// quad paints over the first dialog's panel (dimming it further)
+    /// before the second dialog's own panel paints on top of that.
+    pub fn dialog(&self) -> DialogStyle {
+        DialogStyle {
+            backdrop: self.tokens.backdrop,
+            panel: self.panel_style(),
         }
     }
 
@@ -959,6 +986,7 @@ mod tests {
             surface_sunken: Color::rgba(0.80, 0.82, 0.90, 1.0),
             scrollbar_track: Color::rgba(0.75, 0.75, 0.80, 1.0),
             swatch_stroke: Color::rgba(0.30, 0.30, 0.35, 1.0),
+            backdrop: Color::rgba(0.05, 0.05, 0.10, 0.70),
             shadow: ShadowStyle {
                 color: Color::rgba(0.20, 0.20, 0.30, 0.50),
                 blur_radius: 6.0,
@@ -1126,5 +1154,24 @@ mod tests {
         assert_ne!(info.fill, success.fill);
         assert_eq!(destructive.fill, theme.tokens.destructive);
         assert_eq!(destructive.label_color, theme.tokens.destructive_foreground);
+    }
+
+    #[test]
+    fn dialog_backdrop_is_translucent_and_distinct_from_the_panel_fill() {
+        let theme = WgpuTheme::default();
+        let style = theme.dialog();
+        assert!(
+            style.backdrop.a > 0.0 && style.backdrop.a < 1.0,
+            "a backdrop that's fully opaque or fully transparent can't dim without hiding"
+        );
+        assert_ne!(style.backdrop, style.panel.fill);
+    }
+
+    #[test]
+    fn dialog_derives_live_from_tokens_like_every_other_resolver() {
+        let mut theme = WgpuTheme::default();
+        let before = theme.dialog().backdrop;
+        theme.tokens.backdrop = Color::rgba(1.0, 0.0, 0.0, 0.5);
+        assert_ne!(theme.dialog().backdrop, before);
     }
 }

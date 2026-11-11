@@ -10,13 +10,14 @@
 //!
 //! This is deliberately a *standalone* contract: it does not assume a host
 //! example exists yet (#175, the host-owned GPU/frame embedding mode, is a
-//! sibling in-flight issue) and it does not assume real dialog or text-field
-//! components exist yet (#185, #188). [`InputRouter`] exposes the seams
-//! those components plug into — a modal stack for Escape precedence, a
-//! text-focus slot for key-swallowing — as plain methods a future component
-//! implementation calls. The router works today against whatever
-//! `HitTestEntry`s the walker already produces (buttons); it generalizes to
-//! any future interactive node without a shape change.
+//! sibling in-flight issue). [`InputRouter`] exposes the seams dialog/text-field
+//! components plug into — a modal stack for Escape/backdrop-click precedence
+//! and the Tab focus trap, a text-focus slot for key-swallowing — as plain
+//! methods a component implementation calls; [`crate::components::dialog`]
+//! (#188) is the first caller of the modal-stack half of that contract. The
+//! router works today against whatever `HitTestEntry`s the walker already
+//! produces (buttons); it generalizes to any future interactive node without
+//! a shape change.
 //!
 //! ## Acceptance criteria → mechanism
 //!
@@ -39,18 +40,58 @@
 //!   control-bound keys while composing** — while
 //!   [`InputRouter::focus_text`] is active, every non-Escape key event is
 //!   `Consumed` unconditionally.
+//! - **Backdrop click closes the topmost open dialog; a click on the
+//!   dialog's own (otherwise inert) interior does not** (#188) —
+//!   [`InputRouter::push_modal`] carries the dialog's panel rect alongside
+//!   its `NodeId`. A press that misses every `HitTestEntry` *and* lands
+//!   outside that rect pops the topmost modal (backdrop dismiss); a press
+//!   that misses every entry but still lands inside the rect is `Consumed`
+//!   without popping anything, so blank dialog chrome swallows the click
+//!   rather than leaking it to whatever the dialog is covering. While any
+//!   modal is open, every primary-button press is `Consumed` by one of
+//!   these three outcomes.
+//! - **Tab/Shift+Tab focus cannot leave the topmost open dialog** (#188) —
+//!   while a modal is open, `route` derives that dialog's focusable set
+//!   from the `HitTestEntry`s whose rect centers fall inside its panel
+//!   rect and cycles [`InputRouter::trapped_focus_node`] forward (Tab) or
+//!   backward (Shift+Tab) through exactly that set, wrapping at both
+//!   ends. With no modal open, Tab is untouched by this contract and falls
+//!   through like any other key.
 
 use std::collections::HashMap;
 
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, Modifiers, MouseButton, WindowEvent};
 use winit::keyboard::{KeyCode, PhysicalKey};
 
 use mkui_core::input::Routed;
 use mkui_runtime::NodeId;
 
 use crate::pointer::{left_button_state, ClickHit, PointerState};
+use crate::types::{rect_contains, Point, Rect};
 use crate::walker::HitTestEntry;
+
+/// One open dialog on [`InputRouter`]'s modal stack: the node identity
+/// [`InputRouter::top_modal`] reports, plus the panel rect
+/// [`InputRouter::route`] needs to tell a backdrop click (dismiss) apart
+/// from a click on the dialog's own interior (swallow, don't dismiss) and
+/// to bound the Tab focus trap (#188).
+#[derive(Debug, Clone, Copy)]
+struct ModalEntry {
+    node: NodeId,
+    panel_rect: Rect,
+}
+
+/// Center point of `rect`, used to decide whether a `HitTestEntry` belongs
+/// to a dialog's focus-trap set without requiring the entry's rect to sit
+/// fully inside the panel rect (a control whose hit rect is lightly padded
+/// past the panel edge still counts as "in the dialog").
+fn rect_center(rect: Rect) -> Point {
+    Point::new(
+        rect.origin.x + rect.size.width * 0.5,
+        rect.origin.y + rect.size.height * 0.5,
+    )
+}
 
 /// Outcome of routing one `winit::WindowEvent` through [`InputRouter::route`].
 #[derive(Debug, Clone, Copy, Default)]
@@ -92,10 +133,22 @@ pub struct InputRouter {
     /// means — a button, a backdrop click, Escape) calls
     /// [`InputRouter::pop_modal`]. Escape always targets
     /// [`InputRouter::top_modal`] first.
-    modal_stack: Vec<NodeId>,
+    modal_stack: Vec<ModalEntry>,
     /// Node currently claiming all keyboard input, e.g. a composing text
     /// field (#185). `Some` makes every non-Escape key event `Consumed`.
     text_focus: Option<NodeId>,
+    /// Node the Tab focus-trap cycle currently sits on within the topmost
+    /// open modal (#188). `None` means "nothing focused yet in this
+    /// dialog" — the next Tab lands on the first focusable entry inside
+    /// its panel rect, Shift+Tab on the last. Reset to `None` whenever the
+    /// modal stack changes (push or pop) so a freshly (re)topmost dialog
+    /// always starts its own cycle from scratch rather than resuming
+    /// wherever a now-closed or now-covered dialog left off.
+    trap_focus: Option<NodeId>,
+    /// Latched from the most recent `WindowEvent::ModifiersChanged`.
+    /// Decides Tab's direction: forward when `false`, backward
+    /// (Shift+Tab) when `true`.
+    shift_held: bool,
     /// Per-physical-key routing verdict, decided once on the initial
     /// (non-repeat) press and replayed verbatim for every OS key-repeat and
     /// for the matching release. Keyboard ownership (text focus, the modal
@@ -123,9 +176,13 @@ impl InputRouter {
     }
 
     /// Open a modal surface. Escape now targets this node before anything
-    /// else observes the key.
-    pub fn push_modal(&mut self, node: NodeId) {
-        self.modal_stack.push(node);
+    /// else observes the key. `panel_rect` is the dialog's own chrome rect
+    /// (what [`crate::components::dialog`] painted it at) — `route` uses it
+    /// to tell a backdrop click from a click on the dialog's interior, and
+    /// to bound the Tab focus trap to this dialog's own controls (#188).
+    pub fn push_modal(&mut self, node: NodeId, panel_rect: Rect) {
+        self.modal_stack.push(ModalEntry { node, panel_rect });
+        self.trap_focus = None;
     }
 
     /// Close a modal surface explicitly (a button inside it, a backdrop
@@ -133,11 +190,26 @@ impl InputRouter {
     /// Pops whichever modal is topmost; callers close modals in
     /// last-opened-first-closed order.
     pub fn pop_modal(&mut self) -> Option<NodeId> {
-        self.modal_stack.pop()
+        let popped = self.modal_stack.pop().map(|entry| entry.node);
+        self.trap_focus = None;
+        popped
     }
 
     pub fn top_modal(&self) -> Option<NodeId> {
-        self.modal_stack.last().copied()
+        self.modal_stack.last().map(|entry| entry.node)
+    }
+
+    /// Panel rect of the topmost open modal, if any.
+    fn top_modal_panel_rect(&self) -> Option<Rect> {
+        self.modal_stack.last().map(|entry| entry.panel_rect)
+    }
+
+    /// Node the Tab focus trap currently sits on inside the topmost open
+    /// modal. Exposed so a host can paint a focus ring around it; `None`
+    /// both when no modal is open and when one is open but Tab hasn't been
+    /// pressed yet.
+    pub fn trapped_focus_node(&self) -> Option<NodeId> {
+        self.trap_focus
     }
 
     /// Claim all keyboard input for `node` (e.g. a text field gaining
@@ -183,8 +255,9 @@ impl InputRouter {
             WindowEvent::MouseInput { state, button, .. } => {
                 self.route_mouse_input(*state, *button, hit_entries, scale_factor)
             }
+            WindowEvent::ModifiersChanged(modifiers) => self.route_modifiers_changed(*modifiers),
             WindowEvent::KeyboardInput { event, .. } => {
-                self.route_key(event.physical_key, event.state, event.repeat)
+                self.route_key_with_hits(event.physical_key, event.state, event.repeat, hit_entries)
             }
             _ => RouteOutcome::ignored(),
         }
@@ -220,6 +293,16 @@ impl InputRouter {
         RouteOutcome::ignored()
     }
 
+    /// Latch Shift's held state for Tab's direction (#188). Window focus
+    /// loss can strand this latched `true` if the host never delivers the
+    /// matching key-up, but that only ever flips Tab's cycle direction —
+    /// unlike `armed`/`gesture_owned`, there's no stray action to fire, so
+    /// this is deliberately not reset in [`InputRouter::route_focus_lost`].
+    fn route_modifiers_changed(&mut self, modifiers: Modifiers) -> RouteOutcome {
+        self.shift_held = modifiers.state().shift_key();
+        RouteOutcome::ignored()
+    }
+
     fn route_mouse_input(
         &mut self,
         state: ElementState,
@@ -243,6 +326,23 @@ impl InputRouter {
                 // whatever `gesture_owned` was left at by an earlier,
                 // already-concluded gesture.
                 self.gesture_owned = armed.is_some();
+
+                if let Some(panel_rect) = self.top_modal_panel_rect() {
+                    // A modal is open: nothing behind it may react to a
+                    // click, so every outcome from here is `Consumed`
+                    // (#188). A press that missed every hit-test entry is
+                    // either a backdrop click — outside the dialog's own
+                    // panel, so it dismisses the topmost modal — or a
+                    // click on the dialog's otherwise-inert interior
+                    // (inside the panel), which is swallowed without
+                    // closing anything.
+                    if armed.is_none() && !rect_contains(panel_rect, cursor) {
+                        self.pop_modal();
+                    }
+                    self.gesture_owned = true;
+                    return RouteOutcome::from_consumed(true);
+                }
+
                 RouteOutcome::from_consumed(self.gesture_owned)
             }
             ElementState::Released => {
@@ -262,28 +362,45 @@ impl InputRouter {
         }
     }
 
+    /// [`InputRouter::route_key_with_hits`] with an empty focusable set.
+    /// Only the test suite calls this directly now (every pre-#188 test
+    /// that doesn't care about the Tab focus trap); production code always
+    /// goes through [`InputRouter::route`], which has real `HitTestEntry`s
+    /// to hand `route_key_with_hits`.
+    #[cfg(test)]
     fn route_key(
         &mut self,
         physical_key: PhysicalKey,
         state: ElementState,
         repeat: bool,
     ) -> RouteOutcome {
+        self.route_key_with_hits(physical_key, state, repeat, &[])
+    }
+
+    fn route_key_with_hits(
+        &mut self,
+        physical_key: PhysicalKey,
+        state: ElementState,
+        repeat: bool,
+        hit_entries: &[HitTestEntry],
+    ) -> RouteOutcome {
         match state {
             ElementState::Pressed => {
                 if repeat {
                     // An OS key-repeat for a key already tracked replays
                     // its original verdict verbatim: it must not pop a
-                    // second modal off the stack, nor re-query text focus
-                    // against state that may have changed since the
-                    // initial press (review P1#2). A repeat with no
-                    // tracked entry (the initial press was missed, or this
-                    // is the first event we've seen for the key) falls
-                    // through to the fresh-press path below.
+                    // second modal off the stack, advance the Tab focus
+                    // trap an extra step, nor re-query text focus against
+                    // state that may have changed since the initial press
+                    // (review P1#2). A repeat with no tracked entry (the
+                    // initial press was missed, or this is the first event
+                    // we've seen for the key) falls through to the
+                    // fresh-press path below.
                     if let Some(&decision) = self.key_ownership.get(&physical_key) {
                         return RouteOutcome::from_consumed(decision.is_consumed());
                     }
                 }
-                let decision = self.decide_key_press(physical_key);
+                let decision = self.decide_key_press(physical_key, hit_entries);
                 self.key_ownership.insert(physical_key, decision);
                 RouteOutcome::from_consumed(decision.is_consumed())
             }
@@ -304,15 +421,73 @@ impl InputRouter {
     /// Decide a *fresh* (non-repeat, or first-seen) key press's verdict.
     /// Called exactly once per physical press; the result is cached in
     /// `key_ownership` for repeats and the matching release to replay.
-    fn decide_key_press(&mut self, physical_key: PhysicalKey) -> Routed {
+    fn decide_key_press(
+        &mut self,
+        physical_key: PhysicalKey,
+        hit_entries: &[HitTestEntry],
+    ) -> Routed {
         if matches!(physical_key, PhysicalKey::Code(KeyCode::Escape)) {
             return Routed::from_consumed(self.decide_escape_press());
+        }
+
+        if matches!(physical_key, PhysicalKey::Code(KeyCode::Tab)) {
+            if let Some(consumed) = self.decide_tab_press(hit_entries) {
+                return Routed::from_consumed(consumed);
+            }
         }
 
         // A composing text field claims every other key — WASD, arrow
         // keys, and any other control-bound key must never reach the
         // host's gameplay input while the user is typing.
         Routed::from_consumed(self.text_focus.is_some())
+    }
+
+    /// Tab focus-trap cycling (#188): while a modal is open, Tab/Shift+Tab
+    /// move [`InputRouter::trapped_focus_node`] forward/backward through
+    /// the topmost dialog's own focusable entries — every `HitTestEntry`
+    /// whose rect center falls inside its panel rect — wrapping at both
+    /// ends so focus can never land on a node outside the dialog. Returns
+    /// `None` when no modal is open, so the caller falls through to the
+    /// ordinary (non-trapped) key-routing path; Tab is otherwise untouched
+    /// by this contract.
+    fn decide_tab_press(&mut self, hit_entries: &[HitTestEntry]) -> Option<bool> {
+        let panel_rect = self.top_modal_panel_rect()?;
+
+        let focusable: Vec<NodeId> = hit_entries
+            .iter()
+            .filter(|entry| rect_contains(panel_rect, rect_center(entry.rect)))
+            .map(|entry| entry.node)
+            .collect();
+
+        if focusable.is_empty() {
+            // Nothing focusable yet, but Tab is still the modal's to
+            // consume — it must not leak past an open dialog.
+            self.trap_focus = None;
+            return Some(true);
+        }
+
+        let len = focusable.len();
+        let current = self
+            .trap_focus
+            .and_then(|node| focusable.iter().position(|&candidate| candidate == node));
+        let next = match current {
+            None => {
+                if self.shift_held {
+                    len - 1
+                } else {
+                    0
+                }
+            }
+            Some(index) => {
+                if self.shift_held {
+                    (index + len - 1) % len
+                } else {
+                    (index + 1) % len
+                }
+            }
+        };
+        self.trap_focus = Some(focusable[next]);
+        Some(true)
     }
 
     /// Dialog precedence: the topmost open modal consumes Escape before
@@ -350,6 +525,32 @@ mod tests {
             action: None,
             corner_radii: CornerRadii::all(0.0),
         }
+    }
+
+    /// A button-shaped `HitTestEntry` at an arbitrary rect, for dialog
+    /// focusable-set tests that need more than one distinguishable control.
+    fn button_at(idx: u32, rect: Rect) -> HitTestEntry {
+        HitTestEntry {
+            rect,
+            node: NodeId::from_raw(idx, 0),
+            action: None,
+            corner_radii: CornerRadii::all(0.0),
+        }
+    }
+
+    /// Arbitrary dialog panel rect used by every modal/#188 test that
+    /// doesn't care about the exact geometry, only that it's a bounded
+    /// region distinct from "the rest of the screen".
+    fn dialog_panel_rect() -> Rect {
+        Rect::new(Point::new(200.0, 200.0), Size::new(300.0, 200.0))
+    }
+
+    fn modifiers_changed(shift: bool) -> WindowEvent {
+        let mut state = winit::keyboard::ModifiersState::empty();
+        if shift {
+            state |= winit::keyboard::ModifiersState::SHIFT;
+        }
+        WindowEvent::ModifiersChanged(state.into())
     }
 
     fn cursor_moved(x: f64, y: f64) -> WindowEvent {
@@ -449,8 +650,8 @@ mod tests {
     #[test]
     fn escape_closes_the_topmost_modal_and_is_consumed() {
         let mut router = InputRouter::new();
-        router.push_modal(NodeId::from_raw(1, 0));
-        router.push_modal(NodeId::from_raw(2, 0));
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        router.push_modal(NodeId::from_raw(2, 0), dialog_panel_rect());
 
         let pressed = router.route_key(
             PhysicalKey::Code(KeyCode::Escape),
@@ -514,8 +715,8 @@ mod tests {
     #[test]
     fn escape_repeat_does_not_pop_additional_modals_or_disagree_on_release() {
         let mut router = InputRouter::new();
-        router.push_modal(NodeId::from_raw(1, 0));
-        router.push_modal(NodeId::from_raw(2, 0));
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        router.push_modal(NodeId::from_raw(2, 0), dialog_panel_rect());
 
         let first = router.route_key(
             PhysicalKey::Code(KeyCode::Escape),
@@ -771,6 +972,297 @@ mod tests {
         assert!(
             repeat.routed.is_consumed(),
             "a repeat must replay the original press's verdict, not re-query current focus"
+        );
+    }
+
+    // ---- #188: "Backdrop click ... close[s] the topmost dialog only" ----
+
+    #[test]
+    fn backdrop_click_closes_the_topmost_modal_and_is_consumed() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        // Outside `dialog_panel_rect()` (200,200)-(500,400) and off every
+        // hit entry.
+        router.route(&cursor_moved(10.0, 10.0), &[], 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &[], 1.0);
+        assert!(
+            press.routed.is_consumed(),
+            "a backdrop click is mkui's, not the host's — nothing behind an open modal reacts"
+        );
+        assert!(
+            router.top_modal().is_none(),
+            "the backdrop click dismissed the (only) open modal"
+        );
+
+        let release = router.route(&mouse_input(ElementState::Released), &[], 1.0);
+        assert!(
+            release.routed.is_consumed(),
+            "the matching release mirrors the press's gesture ownership"
+        );
+    }
+
+    #[test]
+    fn click_inside_dialog_interior_is_consumed_without_closing_it() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        // Inside the panel rect but on no interactive entry (e.g. a label).
+        router.route(&cursor_moved(250.0, 250.0), &[], 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &[], 1.0);
+        assert!(
+            press.routed.is_consumed(),
+            "a click on the dialog's own blank interior must not leak to the host"
+        );
+        assert_eq!(
+            router.top_modal(),
+            Some(NodeId::from_raw(1, 0)),
+            "a click on the dialog's interior does not dismiss it"
+        );
+    }
+
+    #[test]
+    fn click_on_a_control_inside_an_open_dialog_still_fires_its_action() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        let entries = vec![button_at(
+            9,
+            Rect::new(Point::new(220.0, 220.0), Size::new(80.0, 30.0)),
+        )];
+        router.route(&cursor_moved(240.0, 230.0), &entries, 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert!(press.routed.is_consumed());
+
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        assert!(release.routed.is_consumed());
+        assert!(
+            release.click.is_some(),
+            "a control inside an open dialog still fires its click"
+        );
+        assert_eq!(
+            router.top_modal(),
+            Some(NodeId::from_raw(1, 0)),
+            "clicking a control inside the dialog does not dismiss it — only a backdrop \
+             click or Escape does"
+        );
+    }
+
+    #[test]
+    fn backdrop_click_closes_only_the_topmost_of_two_stacked_dialogs() {
+        let mut router = InputRouter::new();
+        let bottom_rect = Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 600.0));
+        let top_rect = dialog_panel_rect();
+        router.push_modal(NodeId::from_raw(1, 0), bottom_rect);
+        router.push_modal(NodeId::from_raw(2, 0), top_rect);
+
+        // Inside the bottom dialog's (larger) rect, but outside the top
+        // dialog's rect — a backdrop click relative to the topmost dialog.
+        router.route(&cursor_moved(10.0, 10.0), &[], 1.0);
+        let press = router.route(&mouse_input(ElementState::Pressed), &[], 1.0);
+        assert!(press.routed.is_consumed());
+        assert_eq!(
+            router.top_modal(),
+            Some(NodeId::from_raw(1, 0)),
+            "closes exactly the topmost dialog, leaving the one beneath it open"
+        );
+
+        // A second backdrop click, now outside the remaining (bottom)
+        // dialog's own rect, closes it too.
+        router.route(&cursor_moved(700.0, 700.0), &[], 1.0);
+        router.route(&mouse_input(ElementState::Pressed), &[], 1.0);
+        assert!(router.top_modal().is_none());
+    }
+
+    // ---- #188: "Tab/gamepad focus cannot leave the open dialog while it's open" ----
+
+    #[test]
+    fn tab_cycles_forward_through_the_dialogs_own_controls_and_wraps() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        let entries = vec![
+            button_at(
+                10,
+                Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+            button_at(
+                11,
+                Rect::new(Point::new(260.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+            // Outside the dialog's panel rect — must never be focused by Tab.
+            button_at(99, Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 20.0))),
+        ];
+
+        let first = router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert!(first.routed.is_consumed());
+        assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(10, 0)));
+
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(11, 0)));
+
+        // Wraps back to the first control, never landing on the
+        // out-of-dialog node 99.
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(10, 0)));
+    }
+
+    #[test]
+    fn shift_tab_cycles_backward_and_wraps_to_the_last_control() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        let entries = vec![
+            button_at(
+                10,
+                Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+            button_at(
+                11,
+                Rect::new(Point::new(260.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+        ];
+        router.route(&modifiers_changed(true), &[], 1.0);
+
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert_eq!(
+            router.trapped_focus_node(),
+            Some(NodeId::from_raw(11, 0)),
+            "Shift+Tab from nothing focused lands on the last control"
+        );
+
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(10, 0)));
+    }
+
+    #[test]
+    fn tab_repeat_does_not_advance_the_focus_trap_twice() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        let entries = vec![
+            button_at(
+                10,
+                Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+            button_at(
+                11,
+                Rect::new(Point::new(260.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+        ];
+
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(10, 0)));
+
+        for _ in 0..3 {
+            let repeat = router.route_key_with_hits(
+                PhysicalKey::Code(KeyCode::Tab),
+                ElementState::Pressed,
+                true,
+                &entries,
+            );
+            assert!(repeat.routed.is_consumed());
+        }
+        assert_eq!(
+            router.trapped_focus_node(),
+            Some(NodeId::from_raw(10, 0)),
+            "OS key-repeats must not advance the trap further"
+        );
+    }
+
+    #[test]
+    fn tab_with_no_focusable_controls_still_traps_the_key() {
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+
+        let outcome = router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &[],
+        );
+        assert!(
+            outcome.routed.is_consumed(),
+            "Tab must not leak past an open dialog even with nothing to focus yet"
+        );
+        assert!(router.trapped_focus_node().is_none());
+    }
+
+    #[test]
+    fn tab_falls_through_to_the_host_with_no_modal_open() {
+        let mut router = InputRouter::new();
+        let entries = vec![button_at(
+            10,
+            Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+        )];
+
+        let outcome = router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert!(
+            outcome.routed.is_ignored(),
+            "with nothing open, Tab is the host's own focus-traversal key"
+        );
+    }
+
+    #[test]
+    fn escape_still_closes_a_dialog_opened_after_tab_cycled_its_focus() {
+        // Regression guard: Tab-cycling the trap must not leave state that
+        // confuses the (independently-tested) Escape/backdrop paths.
+        let mut router = InputRouter::new();
+        router.push_modal(NodeId::from_raw(1, 0), dialog_panel_rect());
+        let entries = vec![button_at(
+            10,
+            Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+        )];
+        router.route_key_with_hits(
+            PhysicalKey::Code(KeyCode::Tab),
+            ElementState::Pressed,
+            false,
+            &entries,
+        );
+        assert!(router.trapped_focus_node().is_some());
+
+        let escape = router.route_key(
+            PhysicalKey::Code(KeyCode::Escape),
+            ElementState::Pressed,
+            false,
+        );
+        assert!(escape.routed.is_consumed());
+        assert!(router.top_modal().is_none());
+        assert!(
+            router.trapped_focus_node().is_none(),
+            "closing the dialog clears its focus-trap state"
         );
     }
 }

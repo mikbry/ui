@@ -185,3 +185,53 @@ Any verdict derived from "current state" rather than "state at the moment
 the gesture/key began" is a latent inconsistency. `key_ownership` and
 `gesture_owned` are the two places this contract now locks a verdict in at
 the start of a gesture and replays it, rather than re-deriving it.
+
+## Addendum: #188 — the dialog component lands, backdrop click + Tab trap
+
+[`crate::components::dialog`] (backdrop + panel chrome) is the modal
+stack's first real caller, closing the loop this ADR opened. Landing it
+surfaced two gaps the original contract (modal stack + Escape precedence
+only) didn't cover — a backdrop click and the keyboard focus trap — both
+closed inside `InputRouter` rather than pushed onto callers:
+
+- **`push_modal` now carries the dialog's panel rect.** The original
+  `modal_stack: Vec<NodeId>` had no geometry — enough for Escape, which
+  doesn't care *where* the dialog is, but not enough to tell a backdrop
+  click from a click on the dialog's own interior. `ModalEntry { node,
+  panel_rect }` fixes that; `push_modal`'s signature changed to require
+  it rather than adding a second geometry-setting call, since every real
+  dialog has a panel rect the moment it opens.
+- **While any modal is open, every primary-button press is `Consumed`,
+  by exactly one of three outcomes**: it hit an interactive entry inside
+  the dialog (ordinary click), it missed every entry but landed inside
+  the panel rect (blank dialog chrome swallows it, nothing closes), or it
+  missed every entry and landed outside the panel rect (backdrop click —
+  pop the topmost modal). The alternative — only treating a miss as
+  "backdrop" and otherwise falling through to `Ignored` — would let a
+  modal game leak clicks on its own padding/labels to whatever is behind
+  it, which is the exact bug "nothing behind an open modal should react"
+  exists to prevent.
+- **The Tab focus trap has no persistent widget registry — it derives
+  the focusable set from `hit_entries` every press**, the same way
+  pointer hit-testing already works against the current frame's list
+  rather than a retained tree (consistent with the walker's eager-rebuild
+  model, ADR 0006). A `HitTestEntry` counts as "in the dialog" if its
+  rect's *center* falls inside the panel rect — a center check rather
+  than full containment, so a control whose hit rect is lightly padded
+  past the panel edge still counts.
+- **Tab/Shift+Tab reuse the press/repeat lock-in lesson above.** Shift
+  state is latched from `WindowEvent::ModifiersChanged` (winit delivers
+  it as a separate event, not inline on `KeyEvent`); the trap only
+  advances on a *fresh* Tab press — an OS key-repeat replays the cached
+  verdict like every other key, so holding Tab down doesn't race through
+  a dialog's controls once per repeat tick. `trap_focus` resets on every
+  `push_modal`/`pop_modal`, so a freshly (re)topmost dialog always starts
+  its own cycle from the beginning rather than resuming wherever a
+  closed or now-covered dialog left off.
+- **Gamepad focus traversal is explicitly out of scope.** The acceptance
+  criteria mention "Tab/gamepad focus", but no gamepad input exists
+  anywhere in this workspace yet (no `gilrs` or equivalent dependency,
+  no gamepad `WindowEvent` equivalent) — there is nothing for this
+  contract to route today. Tab is the load-bearing keyboard-only
+  mechanism; gamepad navigation is deferred to a follow-up issue once a
+  gamepad input source exists to drive it.

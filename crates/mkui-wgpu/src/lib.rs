@@ -37,7 +37,8 @@
 //!   [`components::chip_group`], [`components::scrollbar`],
 //!   [`components::scroll_area`], [`components::swatch`],
 //!   [`components::heading`], [`components::text`],
-//!   [`components::toast_stack`], [`components::toast_history`], plus the
+//!   [`components::toast_stack`], [`components::toast_history`],
+//!   [`components::dialog`] (modal backdrop + panel, #188), plus the
 //!   [`components::panel`] / [`components::titled_panel`] primitives the
 //!   higher-level components are built from. Mirrors the component surface
 //!   of [`miklabs/ui`] (`mkui-core::components`) — `View` / `Text` /
@@ -139,8 +140,9 @@ pub use types::PlacedVectorPath;
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
-    CardStyle, DotSize, DotStyle, DotVariant, InputStyle, PanelStyle, ScrollbarStyle, ShadowStyle,
-    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
+    CardStyle, DialogStyle, DotSize, DotStyle, DotVariant, InputStyle, PanelStyle, ScrollbarStyle,
+    ShadowStyle, SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant,
+    WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)
