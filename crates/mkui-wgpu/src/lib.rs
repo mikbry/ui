@@ -34,7 +34,8 @@
 //! - [`components`]   — scene builders organized one concern per file under
 //!   `components/`: [`components::card`], [`components::button`],
 //!   [`components::text_field`], [`components::slider`],
-//!   [`components::chip_group`], [`components::scrollbar`],
+//!   [`components::progress_bar`], [`components::chip_group`],
+//!   [`components::counter_chip`], [`components::scrollbar`],
 //!   [`components::scroll_area`], [`components::swatch`],
 //!   [`components::heading`], [`components::text`],
 //!   [`components::toast_stack`], [`components::toast_history`],
@@ -140,13 +141,13 @@ pub use types::PlacedVectorPath;
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
-    CardStyle, DialogStyle, DotSize, DotStyle, DotVariant, InputStyle, PanelStyle, ScrollbarStyle,
-    ShadowStyle, SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant,
-    WgpuTheme,
+    CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, InputStyle,
+    PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle, SliderStyle, SwatchStyle,
+    TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)
-pub use components::SliderRegions;
+pub use components::{CounterChipRegions, SliderRegions};
 
 // Declarative builder layer (immediate-mode mirror of mkui-core's retained
 // `View` / `Stack` / `Row` tree).

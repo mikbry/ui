@@ -204,6 +204,42 @@ breaking changes can land on minor bumps).
     criteria cover selection + activation only; `disabled` wasn't asked for
     and can be added alongside `Button`'s existing `disabled` precedent if
     a future issue needs it.
+- **`mkui-wgpu::components::{progress_bar, counter_chip}` — determinate
+  progress bar and icon+count chip with a hover/focus tooltip (#191, C6 of
+  #173).** `progress_bar` draws a track plus a proportionally filled portion
+  (the `slider` shape minus the thumb — non-interactive, nothing to grab);
+  `fraction` clamps to `[0.0, 1.0]`, with the 0%/100% edge cases covered
+  explicitly (0% emits the track only, no degenerate zero-width fill quad;
+  100% fills flush with the track's own rect and corner radius). `counter_chip`
+  draws an icon (an `IconId` handle placed via the existing `Icon` scene
+  primitive — rasterizing it stays a renderer concern), a count label, and,
+  while the caller-supplied `hovered` or `focused` flag is `true`, a tooltip
+  bubble above the chip — clamped to `scene.viewport` so it flips below the
+  chip and clamps horizontally rather than running off-screen for a HUD
+  counter pinned to a screen edge. Both resolve through new
+  `WgpuTheme::progress_bar` / `WgpuTheme::counter_chip` methods
+  (`ProgressBarStyle` / `CounterChipStyle`), following the existing
+  variant-free atom shape `SliderStyle`/`ScrollbarStyle` already use.
+  - Scope decision: the issue's "Builds on" note asks whether the counter
+    chip is better framed as extending `chip_group`. `chip_group` is a
+    pick-one-of-many row of toggle options (one `HitRegion` per option, a
+    selected index); a counter chip is a single, non-toggling icon+count
+    readout — a different shape, not a row of options — so it ships as a
+    new atom (mirroring `badge`/`dot`) instead.
+  - Scope decision: `hovered` and `focused` are two separate caller-supplied
+    booleans, not one OR'd flag — the acceptance criterion is "hover **or**
+    focus," and a host routing keyboard/gamepad focus has no pointer
+    position of its own to fold into a single bool.
+  - Scope decision: the tooltip bubble drawn here is a minimal inline pill,
+    not the general-purpose `Tooltip` atom tracked separately by #192 (C7 of
+    #173, not yet implemented — confirmed via `miky issue view 192`). Once
+    #192 lands, `counter_chip` should delegate to it instead of drawing its
+    own bubble (noted on #192 for whoever picks it up).
+  - Scope decision: neither atom gets a visual showcase wiring in this PR.
+    `slider`/`chip_group`/`scrollbar`/`swatch` ship the same way — unit-tested
+    scene builders with no example call site — and get wired into a demo
+    only once a panel actually needs them; `progress_bar`/`counter_chip`
+    follow that same precedent rather than inventing one-off example wiring.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which
