@@ -528,11 +528,15 @@ impl LowerToTree for Button {
 /// This is the tree-lowering builder; the keyboard/gamepad navigation
 /// state machine lives in [`crate::headless::MenuList`] and is a separate
 /// type, matching how this [`Button`] and [`crate::headless::Button`] are
-/// two independent types for two independent jobs.
+/// two independent types for two independent jobs. `selected_index` here
+/// is only the *construction-time* default — an interactive backend (e.g.
+/// `mkui-console`) owns the live navigation cursor itself and uses this
+/// only to seed where that cursor starts.
 pub struct MenuList {
     items: Vec<String>,
     selected_index: Option<usize>,
     class: String,
+    on_select: Option<Rc<dyn Fn(usize)>>,
 }
 
 impl MenuList {
@@ -541,6 +545,7 @@ impl MenuList {
             items: Vec::new(),
             selected_index: None,
             class: String::new(),
+            on_select: None,
         }
     }
 
@@ -554,16 +559,33 @@ impl MenuList {
         self
     }
 
-    /// Override the selection. Out-of-range indices are ignored.
+    /// Override the selection. Validated once, at lowering time, against
+    /// the *final* item count — so this can be called before or after
+    /// `.item(...)` calls, in either order. An index that ends up out of
+    /// range is ignored, falling back to the same default `.item()`
+    /// establishes (the first item, if any).
     pub fn selected_index(mut self, index: usize) -> Self {
-        if index < self.items.len() {
-            self.selected_index = Some(index);
-        }
+        self.selected_index = Some(index);
         self
     }
 
     pub fn class(mut self, class: impl Into<String>) -> Self {
         self.class = class.into();
+        self
+    }
+
+    /// `on_select` fires with the activated item's index when a backend's
+    /// confirm input (Enter/Space on keyboard, equivalently gamepad) lands
+    /// on that item — the `MenuList` analogue of [`Button::on_press`].
+    /// Lowering registers one [`ActionId`] per item (each closing over its
+    /// own fixed index), the same "one id, one fixed outcome" shape every
+    /// other action in this crate uses; a backend's render loop is what
+    /// decides *which* item's action to fire based on its own live cursor.
+    pub fn on_select<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(usize) + 'static,
+    {
+        self.on_select = Some(Rc::new(handler));
         self
     }
 
@@ -597,9 +619,41 @@ impl LowerToTree for MenuList {
     ) -> Result<NodeId, ClassParseError> {
         let items = std::mem::take(&mut self.items);
         let class = std::mem::take(&mut self.class);
+        let on_select = self.on_select.take();
+
+        let item_actions: Vec<Option<ActionId>> = items
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                on_select.as_ref().map(|handler| {
+                    let handler = Rc::clone(handler);
+                    // Every action marks dirty + emits RequestRedraw
+                    // (issue #51 §7), matching Button::on_press above even
+                    // though confirming a menu item doesn't itself change
+                    // the tree's structure.
+                    tree.actions_mut().register_local(move |ctx| {
+                        handler(index);
+                        ctx.mark_dirty();
+                    })
+                })
+            })
+            .collect();
+
+        // Validated here (not in `selected_index()`) so that builder method
+        // can be called in either order relative to `.item(...)`: an index
+        // that is out of range against the *final* item count falls back
+        // to the first item (matching what `.item()` defaults to), rather
+        // than silently keeping a now-meaningless value.
+        let selected_index = match self.selected_index {
+            Some(index) if index < items.len() => Some(index),
+            _ if items.is_empty() => None,
+            _ => Some(0),
+        };
+
         let props = json!({
             "items": items,
-            "selected_index": self.selected_index,
+            "selected_index": selected_index,
+            "item_actions": item_actions,
         });
         tree.push_custom(parent, "menu_list", props, class)
     }
@@ -746,5 +800,86 @@ mod tests {
             serde_json::json!(0),
             "an out-of-range selected_index() call must not override the default"
         );
+    }
+
+    #[test]
+    fn menu_list_on_select_registers_one_action_per_item_fired_with_its_own_index() {
+        use std::cell::RefCell;
+
+        let fired = Rc::new(RefCell::new(Vec::new()));
+        let fired_in = Rc::clone(&fired);
+
+        let app = Mkui::new().child(
+            MenuList::new()
+                .item("New Game")
+                .item("Continue")
+                .item("Quit")
+                .on_select(move |index| fired_in.borrow_mut().push(index)),
+        );
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { props, .. } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        let item_actions = props["item_actions"]
+            .as_array()
+            .expect("item_actions must be an array");
+        assert_eq!(item_actions.len(), 3, "one action id per item");
+        assert!(
+            item_actions.iter().all(|v| !v.is_null()),
+            "every item must get an action id when on_select is set"
+        );
+
+        // Firing the action registered for item 1 ("Continue") must call the
+        // handler with index 1 — regardless of which item a backend's own
+        // live cursor currently has selected, matching the "one id, one
+        // fixed outcome" contract documented on `MenuList::on_select`.
+        let continue_action: mkui_runtime::ActionId =
+            serde_json::from_value(item_actions[1].clone()).unwrap();
+        app.tree().actions().fire(continue_action);
+        assert_eq!(*fired.borrow(), vec![1]);
+
+        let quit_action: mkui_runtime::ActionId =
+            serde_json::from_value(item_actions[2].clone()).unwrap();
+        app.tree().actions().fire(quit_action);
+        assert_eq!(*fired.borrow(), vec![1, 2]);
+    }
+
+    #[test]
+    fn menu_list_without_on_select_has_no_item_actions() {
+        let app = Mkui::new().child(MenuList::new().item("A").item("B"));
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { props, .. } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        let item_actions = props["item_actions"]
+            .as_array()
+            .expect("item_actions must be an array");
+        assert!(item_actions.iter().all(|v| v.is_null()));
+    }
+
+    #[test]
+    fn menu_list_selected_index_before_items_is_validated_at_lowering_time() {
+        // `.selected_index()` is validated once, at `lower_to_tree` time,
+        // against the *final* item count — not against however many items
+        // happened to exist at the moment it was called. Calling it before
+        // any `.item(...)` must not silently get dropped.
+        let app = Mkui::new().child(
+            MenuList::new()
+                .selected_index(2)
+                .item("New Game")
+                .item("Continue")
+                .item("Quit"),
+        );
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { props, .. } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        assert_eq!(props["selected_index"], serde_json::json!(2));
     }
 }

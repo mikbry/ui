@@ -2,12 +2,26 @@
 //!
 //! Sprint 4: the console backend now walks the shared runtime tree instead
 //! of the old `Vec<Box<dyn Component>>` shape. Layout is still a flat list
-//! of [`Line`]s plus the [`ConsoleButton`] records (label, variant, action
-//! id) that [`crate::high_level::Mkui`] navigates and renders.
+//! of [`Line`]s plus the [`Selectable`] records (one per interactive
+//! control — `Button` or `MenuList` item) that [`crate::high_level::Mkui`]
+//! navigates and renders.
 //!
 //! Styling decisions come from the *typed* [`TextVariant`] /
 //! [`ButtonVariant`] values on each node — never from sniffing
 //! showcase-specific class strings.
+//!
+//! ## One cursor across every control (#189 round 3)
+//!
+//! `Button` and `MenuList` rows used to be tracked separately — buttons in
+//! their own `Vec`, menu items carrying a baked-in `selected` flag decided
+//! at walk time. That meant a tree with only a `MenuList` had nothing for
+//! the run loop to navigate (it gates on "any buttons?"), and a tree mixing
+//! both only ever moved the button cursor. [`Selectable`] unifies both
+//! kinds into one `Vec` in tree-walk order; [`crate::high_level::Mkui`]
+//! keeps a single live cursor over it, so Up/Down/Enter work the same way
+//! regardless of which kind of control is currently selected, and "is this
+//! row selected" is decided once, at render time, from that one cursor —
+//! never baked into a `Line` at walk time.
 
 use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeKind, TextVariant};
 
@@ -23,39 +37,84 @@ pub struct ConsoleButton {
     pub on_press: Option<ActionId>,
 }
 
+/// Console-side projection of one row of a `"menu_list"` `NodeKind::Custom`
+/// node (written by `mkui_core::components::MenuList::lower_to_tree`).
+#[derive(Clone, Debug)]
+pub struct ConsoleMenuItem {
+    pub label: String,
+    /// Action fired on confirm, if the `MenuList` was built with
+    /// `.on_select(...)`. One action per item, each closing over its own
+    /// fixed index — see `MenuList::on_select`'s doc comment.
+    pub on_select: Option<ActionId>,
+    /// Whether this item was the `MenuList`'s *construction-time* default
+    /// selection (`.selected_index(...)`, or item 0 otherwise). The run
+    /// loop reads this exactly once, to seed its live cursor before the
+    /// first render — it is not consulted again afterwards.
+    pub initial: bool,
+}
+
+/// One interactive control, in tree-walk order. [`crate::high_level::Mkui`]
+/// keeps a single selection cursor as an index into a `Vec<Selectable>`
+/// built by [`walk_tree`], so Up/Down/Enter behave identically whether the
+/// row under the cursor is a `Button` or a `MenuList` item.
+#[derive(Clone, Debug)]
+pub enum Selectable {
+    Button(ConsoleButton),
+    MenuItem(ConsoleMenuItem),
+}
+
+impl Selectable {
+    /// The action to fire when this control is confirmed (Enter/Space),
+    /// if any was registered.
+    pub fn on_activate(&self) -> Option<ActionId> {
+        match self {
+            Selectable::Button(button) => button.on_press,
+            Selectable::MenuItem(item) => item.on_select,
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        match self {
+            Selectable::Button(button) => &button.label,
+            Selectable::MenuItem(item) => &item.label,
+        }
+    }
+}
+
 /// One row in the flattened render plan produced from a runtime tree.
 ///
 /// The console backend can't paint nested boxes, so it flattens the tree
-/// into a sequence of lines. [`Line::Button`] references the matching
-/// [`ConsoleButton`] in the parent app by index. [`Line::MenuListItem`]
-/// carries its own label/selected flag directly rather than indexing a
-/// side table, since a `"menu_list"` [`NodeKind::Custom`] node has no
-/// action id or variant for a parallel record to track (#189).
-#[derive(Clone, Debug, PartialEq)]
+/// into a sequence of lines. [`Line::Button`] and [`Line::MenuListItem`]
+/// both reference the matching [`Selectable`] in the parent app's unified
+/// cursor space by index — "is this row selected" is a render-time
+/// comparison against that one live cursor, not data carried on the `Line`
+/// itself (#189 round 3: a `Line`-baked `selected` flag can't reflect
+/// input that happens after the tree was walked).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Line {
     Heading(String),
     Body(String),
     Muted(String),
     Spacer,
     Button(usize),
-    MenuListItem { label: String, selected: bool },
+    MenuListItem(usize),
 }
 
-/// Walk an [`AppTree`] and flatten it into lines + buttons for the
-/// terminal renderer.
-pub fn walk_tree(tree: &AppTree, layout: &mut Vec<Line>, buttons: &mut Vec<ConsoleButton>) {
+/// Walk an [`AppTree`] and flatten it into lines + a unified list of
+/// interactive controls for the terminal renderer.
+pub fn walk_tree(tree: &AppTree, layout: &mut Vec<Line>, selectables: &mut Vec<Selectable>) {
     let root = match tree.get(tree.root()) {
         Some(node) => node,
         None => return,
     };
-    walk_children(tree, &root.children, layout, buttons);
+    walk_children(tree, &root.children, layout, selectables);
 }
 
 fn walk_children(
     tree: &AppTree,
     children: &[mkui_runtime::NodeId],
     layout: &mut Vec<Line>,
-    buttons: &mut Vec<ConsoleButton>,
+    selectables: &mut Vec<Selectable>,
 ) {
     for child_id in children {
         let Some(node) = tree.get(*child_id) else {
@@ -63,7 +122,7 @@ fn walk_children(
         };
         match &node.kind {
             NodeKind::View(_) => {
-                walk_children(tree, &node.children, layout, buttons);
+                walk_children(tree, &node.children, layout, selectables);
             }
             NodeKind::Text(t) => {
                 let content = t.content.clone();
@@ -79,16 +138,16 @@ fn walk_children(
                 layout.push(Line::Spacer);
             }
             NodeKind::Button(b) => {
-                let index = buttons.len();
-                buttons.push(ConsoleButton {
+                let index = selectables.len();
+                selectables.push(Selectable::Button(ConsoleButton {
                     label: b.label.clone(),
                     variant: b.variant,
                     on_press: b.on_press,
-                });
+                }));
                 layout.push(Line::Button(index));
             }
             NodeKind::Custom { type_name, props } if type_name == "menu_list" => {
-                push_menu_list_lines(props, layout);
+                push_menu_list_lines(props, layout, selectables);
             }
             NodeKind::Root | NodeKind::Custom { .. } => {
                 // Root is unreachable here (we started at its children). An
@@ -98,29 +157,46 @@ fn walk_children(
                 // special case, added ad hoc rather than waiting on that
                 // registry). For now we recurse into any children so a
                 // custom container still surfaces its descendents.
-                walk_children(tree, &node.children, layout, buttons);
+                walk_children(tree, &node.children, layout, selectables);
             }
         }
     }
 }
 
 /// Decode a `"menu_list"` [`NodeKind::Custom`] node's `props` (written by
-/// [`mkui_core::components::MenuList::lower_to_tree`]) into one
-/// [`Line::MenuListItem`] per item, each carrying whether it is the current
-/// selection — the data the renderer needs to make that row visually
-/// distinct (issue #189 acceptance criterion #2).
-fn push_menu_list_lines(props: &serde_json::Value, layout: &mut Vec<Line>) {
+/// `mkui_core::components::MenuList::lower_to_tree`) into one
+/// [`ConsoleMenuItem`]/[`Line::MenuListItem`] pair per item.
+fn push_menu_list_lines(
+    props: &serde_json::Value,
+    layout: &mut Vec<Line>,
+    selectables: &mut Vec<Selectable>,
+) {
     let selected_index = props.get("selected_index").and_then(|v| v.as_u64());
     let items = props
         .get("items")
         .and_then(|v| v.as_array())
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let item_actions = props
+        .get("item_actions")
+        .and_then(|v| v.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
 
-    for (index, item) in items.iter().enumerate() {
+    for (local_index, item) in items.iter().enumerate() {
         let label = item.as_str().unwrap_or_default().to_string();
-        let selected = selected_index == Some(index as u64);
-        layout.push(Line::MenuListItem { label, selected });
+        let on_select = item_actions
+            .get(local_index)
+            .and_then(|v| serde_json::from_value::<ActionId>(v.clone()).ok());
+        let initial = selected_index == Some(local_index as u64);
+
+        let global_index = selectables.len();
+        selectables.push(Selectable::MenuItem(ConsoleMenuItem {
+            label,
+            on_select,
+            initial,
+        }));
+        layout.push(Line::MenuListItem(global_index));
     }
     layout.push(Line::Spacer);
 }
@@ -143,11 +219,13 @@ mod tests {
         }));
 
         let mut layout = Vec::new();
-        let mut buttons = Vec::new();
-        walk_tree(app.tree(), &mut layout, &mut buttons);
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
 
-        assert_eq!(buttons.len(), 1);
-        let action = buttons[0].on_press.expect("on_press must be registered");
+        assert_eq!(selectables.len(), 1);
+        let action = selectables[0]
+            .on_activate()
+            .expect("on_press must be registered");
         app.tree().actions().fire(action);
         app.tree().actions().fire(action);
         assert_eq!(pressed.get(), 2);
@@ -165,11 +243,11 @@ mod tests {
         )));
 
         let mut layout = Vec::new();
-        let mut buttons = Vec::new();
-        walk_tree(app.tree(), &mut layout, &mut buttons);
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
 
-        assert_eq!(buttons.len(), 1);
-        let action = buttons[0].on_press.expect("on_press");
+        assert_eq!(selectables.len(), 1);
+        let action = selectables[0].on_activate().expect("on_press");
         app.tree().actions().fire(action);
         assert!(pressed.get());
     }
@@ -192,8 +270,8 @@ mod tests {
         );
 
         let mut layout = Vec::new();
-        let mut buttons = Vec::new();
-        walk_tree(app.tree(), &mut layout, &mut buttons);
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
 
         let lines: Vec<&Line> = layout
             .iter()
@@ -205,15 +283,17 @@ mod tests {
         assert_eq!(*lines[2], Line::Body("body".into()));
     }
 
-    /// Issue #189 acceptance criterion #2 ("current selection is visually
-    /// distinct"): walking a `MenuList` node must mark exactly the selected
-    /// row's [`Line::MenuListItem`] as `selected`, and the console renderer
-    /// (`high_level::Mkui::render`) styles that flag differently from an
-    /// unselected row. This test is the backend-facing half of that
-    /// guarantee — it proves the indicator survives from the cross-platform
-    /// `MenuList` component through to the console-specific render plan.
+    /// Structural half of issue #189 acceptance criterion #2: every
+    /// `MenuList` item must produce a `Line::MenuListItem` referencing a
+    /// `Selectable::MenuItem` with the right label, and exactly the item
+    /// matching the `MenuList`'s construction-time `selected_index` must
+    /// come back with `initial: true` — that's the only thing `walk_tree`
+    /// itself decides. Whether a row renders as *currently* selected is a
+    /// render-time comparison against the live cursor
+    /// (`high_level::Mkui`'s own test, `menu_list_input_moves_the_rendered_
+    /// highlight_and_confirms`, covers that end to end).
     #[test]
-    fn menu_list_walk_marks_only_the_selected_row() {
+    fn menu_list_walk_produces_one_selectable_per_item_with_the_right_initial_flag() {
         let app = Mkui::new().child(
             MenuList::new()
                 .item("New Game")
@@ -223,74 +303,75 @@ mod tests {
         );
 
         let mut layout = Vec::new();
-        let mut buttons = Vec::new();
-        walk_tree(app.tree(), &mut layout, &mut buttons);
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
 
-        let items: Vec<&Line> = layout
+        let item_lines: Vec<usize> = layout
             .iter()
-            .filter(|l| matches!(l, Line::MenuListItem { .. }))
+            .filter_map(|l| match l {
+                Line::MenuListItem(index) => Some(*index),
+                _ => None,
+            })
             .collect();
-        assert_eq!(items.len(), 3, "every menu item must produce a line");
+        assert_eq!(item_lines, vec![0, 1, 2], "one Line per item, in order");
 
-        assert_eq!(
-            *items[0],
-            Line::MenuListItem {
-                label: "New Game".into(),
-                selected: false
-            }
+        let menu_items: Vec<&ConsoleMenuItem> = selectables
+            .iter()
+            .map(|s| match s {
+                Selectable::MenuItem(item) => item,
+                Selectable::Button(_) => panic!("expected only menu items"),
+            })
+            .collect();
+        assert_eq!(menu_items[0].label, "New Game");
+        assert_eq!(menu_items[1].label, "Continue");
+        assert_eq!(menu_items[2].label, "Quit");
+
+        assert!(!menu_items[0].initial);
+        assert!(
+            menu_items[1].initial,
+            "selected_index(1) must mark exactly item 1 as the initial selection"
         );
-        assert_eq!(
-            *items[1],
-            Line::MenuListItem {
-                label: "Continue".into(),
-                selected: true
-            },
-            "the selection indicator must land on the selected item, not just exist somewhere"
-        );
-        assert_eq!(
-            *items[2],
-            Line::MenuListItem {
-                label: "Quit".into(),
-                selected: false
-            }
-        );
+        assert!(!menu_items[2].initial);
     }
 
-    /// The indicator must move with the selection, not render a fixed row —
-    /// re-walking with a different `selected_index` moves which `Line` has
-    /// `selected: true`.
     #[test]
-    fn menu_list_selection_indicator_tracks_selected_index() {
-        let at_zero = Mkui::new().child(MenuList::new().item("A").item("B").item("C"));
-        let mut layout_zero = Vec::new();
-        let mut buttons_zero = Vec::new();
-        walk_tree(at_zero.tree(), &mut layout_zero, &mut buttons_zero);
-        let selected_in_zero: Vec<bool> = layout_zero
-            .iter()
-            .filter_map(|l| match l {
-                Line::MenuListItem { selected, .. } => Some(*selected),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(selected_in_zero, vec![true, false, false]);
+    fn menu_list_defaults_initial_to_item_zero() {
+        let app = Mkui::new().child(MenuList::new().item("A").item("B").item("C"));
 
-        let at_two = Mkui::new().child(
-            MenuList::new()
-                .item("A")
-                .item("B")
-                .item("C")
-                .selected_index(2),
-        );
-        let mut layout_two = Vec::new();
-        let mut buttons_two = Vec::new();
-        walk_tree(at_two.tree(), &mut layout_two, &mut buttons_two);
-        let selected_in_two: Vec<bool> = layout_two
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        let initial_flags: Vec<bool> = selectables
             .iter()
-            .filter_map(|l| match l {
-                Line::MenuListItem { selected, .. } => Some(*selected),
-                _ => None,
+            .map(|s| match s {
+                Selectable::MenuItem(item) => item.initial,
+                Selectable::Button(_) => panic!("expected only menu items"),
             })
             .collect();
-        assert_eq!(selected_in_two, vec![false, false, true]);
+        assert_eq!(initial_flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn menu_list_item_actions_round_trip_through_walk_tree() {
+        let fired = Rc::new(Cell::new(None));
+        let fired_in = Rc::clone(&fired);
+
+        let app = Mkui::new().child(
+            MenuList::new()
+                .item("New Game")
+                .item("Quit")
+                .on_select(move |index| fired_in.set(Some(index))),
+        );
+
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        let quit_action = selectables[1]
+            .on_activate()
+            .expect("on_select must produce an action for every item");
+        app.tree().actions().fire(quit_action);
+        assert_eq!(fired.get(), Some(1));
     }
 }
