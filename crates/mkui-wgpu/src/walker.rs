@@ -1359,4 +1359,105 @@ mod tests {
         assert_ne!(default_text, swapped_text);
         assert_eq!(swapped_text, swapped.tokens.surface_foreground);
     }
+
+    /// #192 acceptance criterion #2, exercised through the real `AppTree`
+    /// consumer path (not just `bridge.rs`'s isolated-ctx tests): the
+    /// walker inserts a fixed gap before *every* non-first sibling
+    /// regardless of node type (`gap_px`'s `DEFAULT_GAP_PX` fallback, a
+    /// pre-existing behavior #192 does not change — there is currently no
+    /// class token that sets a literal zero gap). Comparing a tree with
+    /// the badge against one without it would conflate that fixed gap
+    /// with the badge's own height, so this isolates exactly what
+    /// `overlay` controls: the same tree, walked twice with only the
+    /// `overlay` prop flipped. The anchor (painted before the badge) must
+    /// be identical either way, and the sibling (painted after) must
+    /// shift by exactly the badge's own height between the two runs.
+    #[test]
+    fn overlay_badge_does_not_add_its_own_height_to_the_next_siblings_offset() {
+        fn tree_with_badge(overlay: bool) -> AppTree {
+            let mut tree = AppTree::new();
+            let root = tree.root();
+            tree.push_text(root, "Anchor", TextVariant::Body, "")
+                .expect("anchor text");
+            // No explicit `x`/`y`: defaults to the walker's current
+            // `(content_x, cursor_y)` — the badge sits right where the
+            // anchor just finished drawing, the realistic "pin a badge on
+            // the icon that was just emitted" shape. `height: 40.0`
+            // deliberately exceeds the walker's default gap (8px) so a
+            // flow-mode badge's own height dominates the `.max()` in
+            // `BadgeRenderer::render`, making the overlay/flow difference
+            // unambiguous.
+            tree.push_custom(
+                root,
+                "badge",
+                serde_json::json!({
+                    "label": "3",
+                    "height": 40.0,
+                    "overlay": overlay,
+                }),
+                "",
+            )
+            .expect("badge");
+            tree.push_text(root, "Sibling", TextVariant::Body, "")
+                .expect("sibling text");
+            tree
+        }
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+        };
+
+        let flow_tree = tree_with_badge(false);
+        let flow_out = walk_app_tree(&flow_tree, &registry, &options).expect("walk flow");
+        let overlay_tree = tree_with_badge(true);
+        let overlay_out = walk_app_tree(&overlay_tree, &registry, &options).expect("walk overlay");
+
+        let flow_texts = text_primitives(&flow_out.scene);
+        let overlay_texts = text_primitives(&overlay_out.scene);
+        let y_of = |texts: &[&Text], content: &str| -> f32 {
+            texts
+                .iter()
+                .find(|t| t.content == content)
+                .unwrap_or_else(|| panic!("no text primitive with content {content:?}"))
+                .rect
+                .origin
+                .y
+        };
+
+        assert_eq!(
+            y_of(&flow_texts, "Anchor"),
+            y_of(&overlay_texts, "Anchor"),
+            "the anchor paints before the badge either way and must be unaffected by `overlay`"
+        );
+        assert_eq!(
+            y_of(&overlay_texts, "Sibling") + 40.0,
+            y_of(&flow_texts, "Sibling"),
+            "overlay must remove exactly the badge's own height from the \
+             sibling's offset, leaving every other layout contribution \
+             (padding, the walker's fixed inter-sibling gap) unchanged"
+        );
+
+        let badge_quad_pos = overlay_out
+            .scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::Quad(_)))
+            .expect("badge paints a quad");
+        let anchor_text_pos = overlay_out
+            .scene
+            .primitives
+            .iter()
+            .position(|p| matches!(p, Primitive::Text(t) if t.content == "Anchor"))
+            .expect("anchor text");
+        assert!(
+            anchor_text_pos < badge_quad_pos,
+            "the badge must paint after (on top of) its anchor in paint order"
+        );
+        assert!(
+            overlay_out.hit_tests.is_empty(),
+            "plain Text nodes and a Badge atom register no hit entries"
+        );
+    }
 }

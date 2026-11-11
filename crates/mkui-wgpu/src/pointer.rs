@@ -90,6 +90,20 @@ impl PointerState {
         self.armed
     }
 
+    /// Node currently under the latched cursor, if any — a read-only
+    /// hit-test (#192, tooltip hover trigger). Unlike
+    /// [`PointerState::on_press`] / [`PointerState::on_release`], this
+    /// mutates nothing: calling it any number of times in a frame (a
+    /// tooltip anchor check alongside the normal press-to-arm routing) is
+    /// side-effect-free, so the Codex round-10 Q4 press-to-arm contract
+    /// stays untouched. Returns `None` before the first `CursorMoved`
+    /// (same as [`PointerState::cursor_logical`]) and whenever the cursor
+    /// is over empty space.
+    pub fn hovered(&self, hit_entries: &[HitTestEntry], scale_factor: f64) -> Option<NodeId> {
+        let cursor = self.cursor_logical(scale_factor)?;
+        hit_test(hit_entries, cursor).map(|hit| hit.node)
+    }
+
     /// Press handler. Hit-tests `hit_entries` at `cursor` in reverse
     /// paint order and arms the topmost matching node. Returns the
     /// armed `NodeId` if the press landed on an interactive region;
@@ -272,6 +286,43 @@ mod tests {
         ];
         let hit = hit_test(&entries, Point::new(30.0, 30.0)).expect("inside outer only");
         assert_eq!(hit.node, NodeId::from_raw(1, 0));
+    }
+
+    // ---- hover query (#192 tooltip trigger) ----
+
+    #[test]
+    fn hovered_is_none_before_first_cursor_move() {
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let p = PointerState::new();
+        assert!(p.hovered(&entries, 1.0).is_none());
+    }
+
+    #[test]
+    fn hovered_returns_node_under_cursor() {
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        assert_eq!(p.hovered(&entries, 1.0), Some(NodeId::from_raw(1, 0)));
+    }
+
+    #[test]
+    fn hovered_is_none_over_empty_space() {
+        let entries = vec![entry(0.0, 0.0, 50.0, 50.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(500.0, 500.0);
+        assert!(p.hovered(&entries, 1.0).is_none());
+    }
+
+    #[test]
+    fn hovered_does_not_arm_or_disturb_the_press_state() {
+        // A tooltip anchor check must be a pure query — it must not arm a
+        // node the way `on_press` does, or a later release could fire a
+        // click the user never pressed.
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        p.hovered(&entries, 1.0);
+        assert!(p.armed().is_none());
     }
 
     // ---- press-to-arm state machine (Codex round-10 Q4 contract) ----

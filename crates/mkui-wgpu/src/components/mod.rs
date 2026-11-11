@@ -29,8 +29,11 @@
 //!   [`toast_stack`], [`toast_history`], [`dialog`], [`titled_dialog`].
 //!   Each takes a variant / size / state and pulls concrete colors from
 //!   the theme. This is the layer view code calls.
-//! - **atoms** — [`badge`], [`dot`], [`counter_chip`]. Self-contained
-//!   shadcn-aligned signals.
+//! - **atoms** — [`badge`], [`dot`], [`counter_chip`], [`tooltip`].
+//!   Self-contained shadcn-aligned signals. `tooltip` additionally needs
+//!   caller-owned hover/focus state ([`crate::tooltip::TooltipState`]) to
+//!   decide visibility — see that module and `components::tooltip`'s docs
+//!   (#192).
 //!
 //! Built-in components registered with `WgpuRendererRegistry` (see `bridge.rs`)
 //! cover the shadcn-aligned atoms; custom components register via
@@ -69,6 +72,7 @@ mod text;
 mod text_field;
 mod toast;
 mod toggle;
+mod tooltip;
 
 pub use badge::badge;
 pub use button::{button, button_with, ButtonRegions, MIN_TOUCH_TARGET_PX};
@@ -89,3 +93,4 @@ pub use text::{heading, label, text};
 pub use text_field::{text_field, text_field_editable};
 pub use toast::{toast_history, toast_stack};
 pub use toggle::{toggle, ToggleRegions};
+pub use tooltip::{tooltip, tooltip_rect, TooltipPlacement, TOOLTIP_GAP_PX};

@@ -311,6 +311,19 @@ impl InputRouter {
         self.pointer.armed()
     }
 
+    /// Node currently under the latched cursor, independent of the
+    /// press-to-arm gesture ([`InputRouter::armed`]) and of keyboard focus
+    /// ([`InputRouter::focused_text_node`]). A tooltip anchor (#192) reads
+    /// this — and its own focus state — to decide whether it should be
+    /// visible; see [`crate::tooltip::TooltipState`].
+    ///
+    /// A read-only query: it never mutates the router, so embedding hosts
+    /// can call it from anywhere in their frame (not only from `route`)
+    /// without affecting the press-to-arm or text-focus contracts.
+    pub fn hovered_node(&self, hit_entries: &[HitTestEntry], scale_factor: f64) -> Option<NodeId> {
+        self.pointer.hovered(hit_entries, scale_factor)
+    }
+
     /// Route one `winit::WindowEvent` against the current frame's
     /// `hit_entries`. `scale_factor` converts a `MouseInput`'s latched
     /// physical cursor position to the logical coordinates `hit_entries`
@@ -674,6 +687,36 @@ mod tests {
             state,
             button: MouseButton::Left,
         }
+    }
+
+    // ---- hover query (#192 tooltip trigger) ----
+
+    #[test]
+    fn hovered_node_tracks_cursor_moves() {
+        let mut router = InputRouter::new();
+        let entries = vec![hud_button(1)];
+        router.route(&cursor_moved(50.0, 20.0), &entries, 1.0);
+        assert_eq!(
+            router.hovered_node(&entries, 1.0),
+            Some(NodeId::from_raw(1, 0))
+        );
+
+        router.route(&cursor_moved(900.0, 900.0), &entries, 1.0);
+        assert!(router.hovered_node(&entries, 1.0).is_none());
+    }
+
+    #[test]
+    fn hovered_node_is_independent_of_press_arming() {
+        // Hovering a control must not require (or trigger) a press — a
+        // tooltip has to show on plain hover, with no click involved.
+        let mut router = InputRouter::new();
+        let entries = vec![hud_button(1)];
+        router.route(&cursor_moved(50.0, 20.0), &entries, 1.0);
+        assert_eq!(
+            router.hovered_node(&entries, 1.0),
+            Some(NodeId::from_raw(1, 0))
+        );
+        assert!(router.armed().is_none(), "hover alone must not arm a press");
     }
 
     // ---- "Clicking a HUD control never reaches the host's gameplay input" ----

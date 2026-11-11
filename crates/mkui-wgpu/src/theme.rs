@@ -447,6 +447,23 @@ pub struct BadgeStyle {
     pub label_style: TextStyle,
 }
 
+/// Concrete, resolved tooltip bubble look-and-feel. Atoms
+/// (`components::tooltip`) resolve this through [`WgpuTheme::tooltip_style`]
+/// before painting. Reuses the `card_fill` / `card_border` tokens — a
+/// tooltip is, visually, a small floating card — rather than introducing a
+/// dedicated `tooltip_*` token pair; split them out if a distinct popover
+/// palette is ever needed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TooltipStyle {
+    pub fill: Color,
+    pub stroke: Color,
+    pub stroke_width: f32,
+    pub label_color: Color,
+    pub corner_radius: f32,
+    pub padding: Insets,
+    pub label_style: TextStyle,
+}
+
 /// Dot status-color variant. Tokens only — application semantics (what
 /// "ok" means in a given product) are decided by the consumer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1021,6 +1038,26 @@ impl WgpuTheme {
                 corner_radius: 0.0,
                 padding,
                 label_style: label_text,
+            },
+        }
+    }
+
+    /// Resolve the tooltip bubble's look-and-feel (#192). Unlike `badge`
+    /// and `dot`, a tooltip has no variant/size axis — one look for every
+    /// anchor, matching shadcn's single-variant `Tooltip`.
+    pub fn tooltip_style(&self) -> TooltipStyle {
+        TooltipStyle {
+            fill: self.tokens.card_fill,
+            stroke: self.tokens.card_border,
+            stroke_width: self.tokens.spacing.stroke_width_hairline,
+            label_color: self.tokens.surface_foreground,
+            corner_radius: self.tokens.spacing.radius_compact,
+            padding: Insets::symmetric(8.0, 6.0),
+            label_style: TextStyle {
+                font_size_px: 12.0,
+                line_height_px: 16.0,
+                align: TextAlign::Center,
+                ..self.body_style()
             },
         }
     }

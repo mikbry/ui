@@ -1341,6 +1341,31 @@ breaking changes can land on minor bumps).
     the wasted matrix legs; a 4-commit review round that marks the first three
     `[skip ci]` pays for one CI run instead of four. No public API change, no
     MSRV bump, no new dependencies; `ci.yml` remains a single file.
+- **`mkui-wgpu` `Tooltip` atom — hover- and focus-triggered, plus a `Badge`
+  overlay mode (#192).** `TooltipState` (`crates/mkui-wgpu/src/tooltip.rs`)
+  is a caller-owned, per-frame hover/focus visibility state — the same
+  pattern as `PointerState`/`TextEditState` — whose `is_visible()` ORs
+  `hovered` and `focused` so a tooltip never shows on hover alone.
+  `components::tooltip` paints the bubble (reusing the `card_fill`/
+  `card_border` tokens via a new `WgpuTheme::tooltip_style`); `tooltip_rect`
+  places it against an anchor rect, flipping to the opposite side when the
+  preferred placement would run off the viewport and clamping into the
+  viewport as a last resort. `PointerState::hovered` and the new
+  `InputRouter::hovered_node` expose a read-only cursor-vs-hit-test query
+  (independent of the press-to-arm gesture) that any anchor — not just
+  `Tooltip` — can use to discover hover. The `AppTree` `Badge` renderer
+  gains an `overlay` prop that skips the walker's `cursor_y` advance, so a
+  badge pinned to an icon/button no longer pushes the next declarative
+  sibling down. `Dot` needed no code change — its existing `Ok`/`Warn`/
+  `Danger`/`Neutral` theme-token fills already satisfy "at least two states
+  via theme tokens" (`Ok` ≙ active, `Neutral` ≙ inactive); added a test
+  pinning that the fill tracks `ThemeTokens::success`, not a baked-in
+  literal.
+  - Scope decision: gamepad focus-traversal and a show/hide delay timer are
+    deferred to #240 — `TooltipState::set_focused` already accepts the
+    plain bool a future gamepad system would feed through the same path a
+    keyboard Tab does, so neither is a blocker for #192's acceptance
+    criteria.
 
 ## [0.10.0] — 2026-07-03
 

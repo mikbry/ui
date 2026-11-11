@@ -441,8 +441,10 @@ the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
   from-scratch bitmap implementation (`BitmapTextSystem`). No external
   text-stack dependencies. The bitmap path is the current default and
   stays as the permanent debug-fallback / visual-regression oracle.
-- **First shadcn-aligned atoms** — `Badge` (6 variants) and `Dot` (status
-  variants + halo + animation modifiers) in `mkui-wgpu`.
+- **First shadcn-aligned atoms** — `Badge` (6 variants, plus an overlay
+  mode that doesn't disturb layout), `Dot` (status variants + halo +
+  animation modifiers), and `Tooltip` (hover- or focus-triggered, with
+  viewport-aware placement) in `mkui-wgpu`.
 - **CI** — `fmt`, `clippy -D warnings`, `test`, and release build fully
   gated.
 
