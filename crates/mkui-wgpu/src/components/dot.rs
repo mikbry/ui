@@ -276,6 +276,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ok_variant_fill_follows_the_success_token() {
+        // #192 acceptance criterion #3 ("at least two states via theme
+        // tokens"): `variants_resolve_to_distinct_fills` proves the four
+        // variants differ, but not that each actually reads from
+        // `ThemeTokens` rather than a baked-in literal. Swapping
+        // `tokens.success` and watching the `Ok` dot's fill move with it
+        // proves the token path end-to-end.
+        let mut theme = WgpuTheme::default();
+        let swapped = Color::rgba(0.01, 0.02, 0.03, 0.99);
+        theme.tokens.success = swapped;
+
+        let mut s = scene();
+        dot(
+            &mut s,
+            Point::new(10.0, 10.0),
+            DotVariant::Ok,
+            DotSize::Md,
+            false,
+            DotAnimation::None,
+            &theme,
+        );
+        assert_eq!(dot_shapes(&s)[0].0, swapped);
+    }
+
     #[cfg(not(feature = "slug"))]
     #[test]
     fn off_slug_dot_is_byte_identical_to_v0_10_0() {

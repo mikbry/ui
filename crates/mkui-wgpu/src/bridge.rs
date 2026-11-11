@@ -151,18 +151,20 @@ impl WgpuRendererRegistry {
     }
 
     /// Registry pre-populated with the wgpu-side built-in atoms (`Badge`,
-    /// `Dot`). The built-in node kinds (`View` / `Text` / `Button`)
-    /// render through fixed paths in [`crate::walker`]; this constructor
-    /// adds the two scene-primitive atoms the wgpu backend ships so
-    /// downstream apps can drop them into the AppTree via
+    /// `Dot`, `Tooltip`). The built-in node kinds (`View` / `Text` /
+    /// `Button`) render through fixed paths in [`crate::walker`]; this
+    /// constructor adds the scene-primitive atoms the wgpu backend ships
+    /// so downstream apps can drop them into the AppTree via
     /// `NodeKind::Custom` without registering a renderer first.
     ///
     /// Acceptance criterion #6: built-ins (Badge, Dot, View, Text,
-    /// Button) register at app construction.
+    /// Button) register at app construction. `Tooltip` (#192) joined the
+    /// same way.
     pub fn with_defaults() -> Self {
         let mut registry = Self::new();
         registry.register(builtins::BadgeRenderer);
         registry.register(builtins::DotRenderer);
+        registry.register(builtins::TooltipRenderer);
         registry
     }
 
@@ -238,18 +240,20 @@ impl std::fmt::Debug for WgpuRendererRegistry {
 
 /// Built-in custom renderers shipped with [`WgpuRendererRegistry::with_defaults`].
 ///
-/// `BadgeRenderer` and `DotRenderer` give the wgpu backend access to the
-/// scene-primitive atoms it has shipped since v0.4.0
-/// ([`crate::components::badge`] / [`crate::components::dot`]) through
-/// the AppTree `NodeKind::Custom` path. Props are JSON value bags;
-/// missing fields fall back to documented defaults so an author can
-/// drop a `tree.push_custom(parent, "badge", json!({...}), "")` in
-/// without a schema lookup.
+/// `BadgeRenderer`, `DotRenderer`, and `TooltipRenderer` give the wgpu
+/// backend access to the scene-primitive atoms it ships
+/// ([`crate::components::badge`] / [`crate::components::dot`] /
+/// [`crate::components::tooltip`]) through the AppTree `NodeKind::Custom`
+/// path. Props are JSON value bags; missing fields fall back to
+/// documented defaults so an author can drop a
+/// `tree.push_custom(parent, "badge", json!({...}), "")` in without a
+/// schema lookup.
 pub mod builtins {
     use mkui_core::error::MkuiError;
     use mkui_runtime::Node;
 
     use super::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRenderable};
+    use crate::components::{TooltipPlacement, TOOLTIP_GAP_PX};
     use crate::theme::{BadgeSize, BadgeVariant, DotSize, DotVariant};
     use crate::types::{DotAnimation, Point, Rect, Size};
 
@@ -262,6 +266,21 @@ pub mod builtins {
     /// - `x`, `y` (number, optional) — absolute origin; defaults to the
     ///   walker's current `(content_x, cursor_y)`
     /// - `width`, `height` (number, optional) — defaults to `(80, 22)`
+    /// - `overlay` (bool, default `false`, #192) — when `true`, the
+    ///   badge's own rect is excluded from the walker's vertical flow:
+    ///   `cursor_y` is left exactly as it was before this node, instead
+    ///   of advancing past `y + height`. Pass explicit `x`/`y` pinning
+    ///   the badge to the anchor's corner — the default `(content_x,
+    ///   cursor_y)` origin sits *below* the previous sibling, not on top
+    ///   of it, so an overlay badge with no explicit `x`/`y` would float
+    ///   in empty space rather than pin to anything. Note the walker
+    ///   still inserts its usual fixed gap *before* this node (same as
+    ///   before any non-first sibling, independent of `overlay`) — that
+    ///   gap is a pre-existing, orthogonal walker behavior #192 does not
+    ///   change. When `false` (the default, unchanged pre-#192
+    ///   behavior), the badge participates in normal vertical flow and
+    ///   advances `cursor_y` past itself, same as any other declarative
+    ///   row.
     pub struct BadgeRenderer;
 
     impl WgpuRenderable for BadgeRenderer {
@@ -301,11 +320,20 @@ pub mod builtins {
                 .and_then(|v| v.as_f64())
                 .map(|v| v as f32)
                 .unwrap_or(ctx.cursor_y);
+            let overlay = props
+                .get("overlay")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let rect = Rect::new(Point::new(x, y), Size::new(width, height));
             crate::components::badge(ctx.scene, rect, label, variant, size, ctx.theme);
-            // Advance the walker cursor underneath the badge so adjacent
-            // declarative children stack normally below it.
-            ctx.cursor_y = (y + height).max(ctx.cursor_y);
+            if !overlay {
+                // Advance the walker cursor underneath the badge so
+                // adjacent declarative children stack normally below it.
+                ctx.cursor_y = (y + height).max(ctx.cursor_y);
+            }
+            // `overlay == true`: the badge sits on top of an
+            // already-laid-out anchor and must not disturb its layout
+            // (#192 acceptance criterion #2) — `cursor_y` is left as-is.
             Ok(WgpuRenderOutcome::ChildrenHandled)
         }
     }
@@ -358,6 +386,90 @@ pub mod builtins {
         }
     }
 
+    /// Built-in `Tooltip` renderer (#192). Props:
+    ///
+    /// - `visible` (bool, default `false`) — the caller computes this
+    ///   per-frame from [`crate::tooltip::TooltipState::is_visible`]
+    ///   (hover OR keyboard/gamepad focus of the anchor); when `false`
+    ///   nothing is emitted.
+    /// - `content` (string, required) — tooltip text
+    /// - `anchor_x`, `anchor_y`, `anchor_width`, `anchor_height` (number,
+    ///   required) — the hovered/focused control's rect
+    /// - `content_width`, `content_height` (number, optional) — the
+    ///   bubble's size; defaults to `(80, 22)` (same default as `Badge`)
+    /// - `placement` (string, default `"top"`) — `top / bottom / left / right`
+    /// - `gap` (number, optional) — defaults to [`TOOLTIP_GAP_PX`]
+    ///
+    /// Emits nothing when `visible` is `false`, and never advances
+    /// `ctx.cursor_y` — a tooltip floats over the layout, it never
+    /// participates in it. Paint order in the `AppTree` path is tree
+    /// order (the walker visits children in document order and the
+    /// `Scene`'s primitive order is paint order), so this node must be
+    /// placed as the **last** child under its anchor's common ancestor
+    /// for the bubble to draw on top of everything else, matching
+    /// [`crate::components::tooltip`]'s "call last in the frame"
+    /// contract for direct scene callers.
+    pub struct TooltipRenderer;
+
+    impl WgpuRenderable for TooltipRenderer {
+        fn type_name(&self) -> &str {
+            "tooltip"
+        }
+
+        fn render(
+            &self,
+            _node: &Node,
+            props: &serde_json::Value,
+            ctx: &mut WgpuRenderCtx<'_>,
+        ) -> Result<WgpuRenderOutcome, MkuiError> {
+            let visible = props
+                .get("visible")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !visible {
+                return Ok(WgpuRenderOutcome::ChildrenHandled);
+            }
+
+            let content = props.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let num = |key: &str, default: f32| -> f32 {
+                props
+                    .get(key)
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as f32)
+                    .unwrap_or(default)
+            };
+            let anchor = Rect::new(
+                Point::new(
+                    num("anchor_x", ctx.content_x),
+                    num("anchor_y", ctx.cursor_y),
+                ),
+                Size::new(num("anchor_width", 0.0), num("anchor_height", 0.0)),
+            );
+            let content_size = Size::new(num("content_width", 80.0), num("content_height", 22.0));
+            let placement = tooltip_placement(props.get("placement").and_then(|v| v.as_str()));
+            let gap = num("gap", TOOLTIP_GAP_PX);
+
+            let rect = crate::components::tooltip_rect(
+                anchor,
+                content_size,
+                placement,
+                gap,
+                ctx.scene.viewport,
+            );
+            crate::components::tooltip(ctx.scene, rect, content, ctx.theme);
+            Ok(WgpuRenderOutcome::ChildrenHandled)
+        }
+    }
+
+    fn tooltip_placement(s: Option<&str>) -> TooltipPlacement {
+        match s.unwrap_or("top") {
+            "bottom" => TooltipPlacement::Bottom,
+            "left" => TooltipPlacement::Left,
+            "right" => TooltipPlacement::Right,
+            _ => TooltipPlacement::Top,
+        }
+    }
+
     fn badge_variant(s: Option<&str>) -> BadgeVariant {
         match s.unwrap_or("default") {
             "destructive" => BadgeVariant::Destructive,
@@ -407,7 +519,7 @@ mod tests {
     use super::*;
     use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size};
-    use mkui_runtime::AppTree;
+    use mkui_runtime::{AppTree, NodeId};
     use mkui_text::BitmapTextSystem;
 
     #[test]
@@ -415,6 +527,7 @@ mod tests {
         let registry = WgpuRendererRegistry::with_defaults();
         assert!(registry.has_renderer_for("badge"));
         assert!(registry.has_renderer_for("dot"));
+        assert!(registry.has_renderer_for("tooltip"));
         assert!(!registry.has_renderer_for("anything-else"));
         assert!(!registry.has_fallback());
     }
@@ -424,6 +537,7 @@ mod tests {
         let registry = WgpuRendererRegistry::new();
         assert!(!registry.has_renderer_for("badge"));
         assert!(!registry.has_renderer_for("dot"));
+        assert!(!registry.has_renderer_for("tooltip"));
         assert!(!registry.has_fallback());
     }
 
@@ -579,5 +693,221 @@ mod tests {
             )
             .expect("fallback dispatch ok");
         assert_eq!(fired.get(), 1, "fallback must fire for unknown type_name");
+    }
+
+    // ---- #192: Badge overlay must not disturb layout ----
+
+    fn render_ctx<'a>(
+        tree: &'a AppTree,
+        registry: &'a WgpuRendererRegistry,
+        scene: &'a mut Scene,
+        theme: &'a WgpuTheme,
+        hits: &'a mut Vec<HitTestEntry>,
+        text_system: &'a dyn TextSystem,
+    ) -> WgpuRenderCtx<'a> {
+        WgpuRenderCtx {
+            tree,
+            registry,
+            scene,
+            theme,
+            hits,
+            viewport_width: 400.0,
+            cursor_y: 10.0,
+            content_x: 0.0,
+            current_foreground: theme.body_style().color,
+            text_system,
+        }
+    }
+
+    /// A valid `&Node` to hand a custom renderer. The renderer's own
+    /// `props` argument (not the node's stored props) is what every
+    /// built-in renderer actually reads, so an empty-props placeholder
+    /// node is enough here.
+    fn dummy_custom_node(tree: &mut AppTree, type_name: &str) -> NodeId {
+        let root = tree.root();
+        tree.push_custom(root, type_name, serde_json::Value::Null, "")
+            .unwrap()
+    }
+
+    #[test]
+    fn badge_without_overlay_advances_cursor_y() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut tree = AppTree::new();
+        let node_id = dummy_custom_node(&mut tree, "badge");
+        let node = tree.get(node_id).expect("node").clone();
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(400.0, 300.0));
+        let mut hits: Vec<HitTestEntry> = Vec::new();
+        let props = serde_json::json!({ "label": "v1", "x": 5.0, "y": 10.0, "height": 22.0 });
+        let text_system = BitmapTextSystem::new();
+
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
+        registry
+            .render_custom_node("badge", &node, &props, &mut ctx)
+            .expect("badge dispatch ok");
+        assert_eq!(
+            ctx.cursor_y, 32.0,
+            "default badge flow must push the cursor past itself"
+        );
+    }
+
+    #[test]
+    fn badge_overlay_leaves_cursor_y_untouched() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut tree = AppTree::new();
+        let node_id = dummy_custom_node(&mut tree, "badge");
+        let node = tree.get(node_id).expect("node").clone();
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(400.0, 300.0));
+        let mut hits: Vec<HitTestEntry> = Vec::new();
+        let props = serde_json::json!({
+            "label": "3", "x": 5.0, "y": 10.0, "height": 22.0, "overlay": true,
+        });
+        let text_system = BitmapTextSystem::new();
+
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
+        registry
+            .render_custom_node("badge", &node, &props, &mut ctx)
+            .expect("badge dispatch ok");
+        assert_eq!(
+            ctx.cursor_y, 10.0,
+            "an overlay badge must not push the anchor's next sibling down"
+        );
+    }
+
+    #[test]
+    fn badge_overlay_still_paints_the_same_primitives_as_non_overlay() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut tree = AppTree::new();
+        let node_id = dummy_custom_node(&mut tree, "badge");
+        let node = tree.get(node_id).expect("node").clone();
+        let theme = WgpuTheme::default();
+        let props_base = serde_json::json!({ "label": "9", "x": 5.0, "y": 10.0 });
+
+        let mut scene_flow = Scene::new(Size::new(400.0, 300.0));
+        let mut hits_flow: Vec<HitTestEntry> = Vec::new();
+        let text_system = BitmapTextSystem::new();
+        let mut ctx_flow = render_ctx(
+            &tree,
+            &registry,
+            &mut scene_flow,
+            &theme,
+            &mut hits_flow,
+            &text_system,
+        );
+        registry
+            .render_custom_node("badge", &node, &props_base, &mut ctx_flow)
+            .unwrap();
+
+        let mut props_overlay = props_base.clone();
+        props_overlay["overlay"] = serde_json::Value::Bool(true);
+        let mut scene_overlay = Scene::new(Size::new(400.0, 300.0));
+        let mut hits_overlay: Vec<HitTestEntry> = Vec::new();
+        let mut ctx_overlay = render_ctx(
+            &tree,
+            &registry,
+            &mut scene_overlay,
+            &theme,
+            &mut hits_overlay,
+            &text_system,
+        );
+        registry
+            .render_custom_node("badge", &node, &props_overlay, &mut ctx_overlay)
+            .unwrap();
+
+        assert_eq!(
+            scene_flow.primitives, scene_overlay.primitives,
+            "overlay must change layout bookkeeping only, not what's painted"
+        );
+    }
+
+    // ---- #192: Tooltip renders only when visible, floats over layout ----
+
+    #[test]
+    fn tooltip_emits_nothing_when_not_visible() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut tree = AppTree::new();
+        let node_id = dummy_custom_node(&mut tree, "tooltip");
+        let node = tree.get(node_id).expect("node").clone();
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(400.0, 300.0));
+        let mut hits: Vec<HitTestEntry> = Vec::new();
+        let props = serde_json::json!({ "content": "Save", "anchor_x": 10.0, "anchor_y": 10.0 });
+        let text_system = BitmapTextSystem::new();
+
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
+        registry
+            .render_custom_node("tooltip", &node, &props, &mut ctx)
+            .expect("tooltip dispatch ok");
+        assert!(
+            scene.primitives.is_empty(),
+            "an invisible tooltip must emit no primitives"
+        );
+    }
+
+    #[test]
+    fn tooltip_paints_and_never_advances_cursor_y_when_visible() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut tree = AppTree::new();
+        let node_id = dummy_custom_node(&mut tree, "tooltip");
+        let node = tree.get(node_id).expect("node").clone();
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(400.0, 300.0));
+        let mut hits: Vec<HitTestEntry> = Vec::new();
+        let props = serde_json::json!({
+            "visible": true,
+            "content": "Save",
+            "anchor_x": 100.0,
+            "anchor_y": 100.0,
+            "anchor_width": 40.0,
+            "anchor_height": 20.0,
+        });
+        let text_system = BitmapTextSystem::new();
+
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
+        let cursor_before = ctx.cursor_y;
+        registry
+            .render_custom_node("tooltip", &node, &props, &mut ctx)
+            .expect("tooltip dispatch ok");
+        assert!(
+            !ctx.scene.primitives.is_empty(),
+            "a visible tooltip must paint its bubble"
+        );
+        assert_eq!(
+            ctx.cursor_y, cursor_before,
+            "a tooltip floats over the layout and must never move the cursor"
+        );
+        assert!(
+            ctx.hits.is_empty(),
+            "a tooltip must not become hoverable itself"
+        );
     }
 }

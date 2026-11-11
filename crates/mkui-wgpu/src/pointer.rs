@@ -51,13 +51,25 @@ pub struct PointerState {
     /// Most recent cursor position in *physical* pixels. `None` until the
     /// first `CursorMoved` event lands — wgpu apps that get a click on
     /// the very first frame before any cursor motion would otherwise
-    /// dereference a default-initialised origin.
+    /// dereference a default-initialised origin. Deliberately **not**
+    /// cleared on `CursorLeft`: a `MouseInput::Released` that arrives
+    /// before any new `CursorMoved` (the cursor left mid-drag and the
+    /// button comes up outside the window) still needs this latched
+    /// position to resolve the gesture-ownership contract (review
+    /// P2#1) — see [`PointerState::cursor_present`] for the flag that
+    /// *does* track whether the cursor is actually inside the window.
     physical_pos: Option<(f64, f64)>,
     /// Node armed by the most recent press, awaiting release. `None`
     /// between releases, after a cancellation, and at startup. Cleared
     /// on release (regardless of fire/no-fire), on `CursorLeft`, and on
     /// `Escape` press.
     armed: Option<NodeId>,
+    /// Whether the cursor is currently known to be inside the window
+    /// (#192, tooltip hover trigger). Set on `update_cursor`/
+    /// `update_cursor_raw`; cleared by [`PointerState::on_cursor_left`].
+    /// Distinct from `physical_pos.is_some()` — see that field's doc for
+    /// why the two must not be conflated.
+    cursor_present: bool,
 }
 
 impl PointerState {
@@ -66,15 +78,29 @@ impl PointerState {
     }
 
     /// Update the latched cursor position. Call from `WindowEvent::CursorMoved`.
+    /// `winit` only emits `CursorMoved` while the pointer is inside the
+    /// window, so this also marks the cursor present again after a prior
+    /// `CursorLeft`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn update_cursor(&mut self, position: PhysicalPosition<f64>) {
         self.physical_pos = Some((position.x, position.y));
+        self.cursor_present = true;
     }
 
     /// Convenience updater for tests that don't want to depend on winit
     /// types — both arms feed the same internal state.
     pub fn update_cursor_raw(&mut self, x: f64, y: f64) {
         self.physical_pos = Some((x, y));
+        self.cursor_present = true;
+    }
+
+    /// Whether the cursor is currently known to be inside the window.
+    /// `false` before the first `CursorMoved` and after `CursorLeft`
+    /// (via [`PointerState::on_cursor_left`]), even though
+    /// [`PointerState::cursor_logical`] may still return the stale
+    /// last-known position for in-flight gesture math.
+    pub fn is_cursor_present(&self) -> bool {
+        self.cursor_present
     }
 
     pub fn cursor_logical(&self, scale_factor: f64) -> Option<Point> {
@@ -88,6 +114,26 @@ impl PointerState {
     /// / [`PointerState::on_release`] / [`PointerState::cancel`].
     pub fn armed(&self) -> Option<NodeId> {
         self.armed
+    }
+
+    /// Node currently under the latched cursor, if any — a read-only
+    /// hit-test (#192, tooltip hover trigger). Unlike
+    /// [`PointerState::on_press`] / [`PointerState::on_release`], this
+    /// mutates nothing: calling it any number of times in a frame (a
+    /// tooltip anchor check alongside the normal press-to-arm routing) is
+    /// side-effect-free, so the Codex round-10 Q4 press-to-arm contract
+    /// stays untouched. Returns `None` before the first `CursorMoved`,
+    /// whenever the cursor is over empty space, and — critically — after
+    /// a `CursorLeft` ([`PointerState::on_cursor_left`]): without the
+    /// `cursor_present` check, this would otherwise keep reporting the
+    /// last node the (now-stale) latched position happened to sit over,
+    /// showing a tooltip for a control the mouse has actually left.
+    pub fn hovered(&self, hit_entries: &[HitTestEntry], scale_factor: f64) -> Option<NodeId> {
+        if !self.cursor_present {
+            return None;
+        }
+        let cursor = self.cursor_logical(scale_factor)?;
+        hit_test(hit_entries, cursor).map(|hit| hit.node)
     }
 
     /// Press handler. Hit-tests `hit_entries` at `cursor` in reverse
@@ -123,10 +169,26 @@ impl PointerState {
         }
     }
 
-    /// Clear the armed slot without firing. Call from `CursorLeft`
-    /// (mouse left the window) and from `Escape` press (user cancel).
+    /// Clear the armed slot without firing. Call from `Escape` press
+    /// (user cancel) — and, bundled with [`PointerState::on_cursor_left`],
+    /// from `CursorLeft`. Does **not** touch `cursor_present`: Escape
+    /// does not move the mouse out of the window, so a hover query must
+    /// keep reporting whatever is actually under the cursor.
     pub fn cancel(&mut self) {
         self.armed = None;
+    }
+
+    /// Mouse left the window entirely. Clears the armed slot (no fire —
+    /// same as [`PointerState::cancel`]) **and** marks the cursor
+    /// absent, so [`PointerState::hovered`] stops reporting a stale hover
+    /// once the pointer has actually left. Deliberately leaves
+    /// `physical_pos` itself untouched — see that field's doc for why a
+    /// release that arrives before the next `CursorMoved` still needs it
+    /// (review P2#1, gesture ownership is a separate, unaffected
+    /// concern from hover).
+    pub fn on_cursor_left(&mut self) {
+        self.armed = None;
+        self.cursor_present = false;
     }
 }
 
@@ -272,6 +334,96 @@ mod tests {
         ];
         let hit = hit_test(&entries, Point::new(30.0, 30.0)).expect("inside outer only");
         assert_eq!(hit.node, NodeId::from_raw(1, 0));
+    }
+
+    // ---- hover query (#192 tooltip trigger) ----
+
+    #[test]
+    fn hovered_is_none_before_first_cursor_move() {
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let p = PointerState::new();
+        assert!(p.hovered(&entries, 1.0).is_none());
+    }
+
+    #[test]
+    fn hovered_returns_node_under_cursor() {
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        assert_eq!(p.hovered(&entries, 1.0), Some(NodeId::from_raw(1, 0)));
+    }
+
+    #[test]
+    fn hovered_is_none_over_empty_space() {
+        let entries = vec![entry(0.0, 0.0, 50.0, 50.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(500.0, 500.0);
+        assert!(p.hovered(&entries, 1.0).is_none());
+    }
+
+    #[test]
+    fn hovered_does_not_arm_or_disturb_the_press_state() {
+        // A tooltip anchor check must be a pure query — it must not arm a
+        // node the way `on_press` does, or a later release could fire a
+        // click the user never pressed.
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        p.hovered(&entries, 1.0);
+        assert!(p.armed().is_none());
+    }
+
+    #[test]
+    fn hovered_is_none_after_cursor_left() {
+        // Without the `cursor_present` flag, `hovered()` would keep
+        // reporting the node under the *stale* latched position even
+        // after the mouse has actually left the window.
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        assert_eq!(p.hovered(&entries, 1.0), Some(NodeId::from_raw(1, 0)));
+
+        p.on_cursor_left();
+        assert!(
+            p.hovered(&entries, 1.0).is_none(),
+            "a tooltip must not keep showing once the cursor has left the window"
+        );
+    }
+
+    #[test]
+    fn on_cursor_left_keeps_the_latched_position_for_gesture_math() {
+        // `cursor_logical` (what press/release math reads) must stay
+        // available after `CursorLeft` — only the hover-facing
+        // `cursor_present` flag changes. See `PointerState::physical_pos`'s
+        // doc for why: a release arriving before the next `CursorMoved`
+        // still needs the last-known position to resolve gesture
+        // ownership (review P2#1).
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        p.on_cursor_left();
+        assert_eq!(p.cursor_logical(1.0), Some(Point::new(50.0, 50.0)));
+    }
+
+    #[test]
+    fn cancel_does_not_clear_cursor_presence() {
+        // `cancel()` is also the Escape-key path, which does not move
+        // the mouse out of the window — a hover query must keep
+        // reflecting reality, unlike after a real `CursorLeft`.
+        let entries = vec![entry(0.0, 0.0, 100.0, 100.0, 1)];
+        let mut p = PointerState::new();
+        p.update_cursor_raw(50.0, 50.0);
+        p.cancel();
+        assert_eq!(p.hovered(&entries, 1.0), Some(NodeId::from_raw(1, 0)));
+    }
+
+    #[test]
+    fn is_cursor_present_tracks_move_and_leave() {
+        let mut p = PointerState::new();
+        assert!(!p.is_cursor_present());
+        p.update_cursor_raw(1.0, 1.0);
+        assert!(p.is_cursor_present());
+        p.on_cursor_left();
+        assert!(!p.is_cursor_present());
     }
 
     // ---- press-to-arm state machine (Codex round-10 Q4 contract) ----

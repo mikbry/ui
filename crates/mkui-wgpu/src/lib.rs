@@ -53,6 +53,10 @@
 //! - [`app`] / [`renderer`] / [`high_level`] — backend-oriented wrappers so
 //!   the crate can evolve like `mkui-web` and `mkui-console`, rather than
 //!   staying a loose pile of scene helpers.
+//! - [`tooltip`]      — [`TooltipState`]: caller-owned hover/focus
+//!   visibility state for the `Tooltip` atom (#192), the same
+//!   per-frame-state pattern as [`pointer::PointerState`] /
+//!   [`text_edit::TextEditState`].
 //! - [`EmbeddedRenderer`] — the host-owned GPU and frame entry point (#175):
 //!   no instance / surface / window of its own, built from a borrowed
 //!   `wgpu::Device` + target format + an explicit [`EmbeddedColorSpace`],
@@ -87,6 +91,7 @@ pub mod scroll;
 pub mod text_edit;
 pub mod theme;
 pub mod toast_stack;
+pub mod tooltip;
 pub mod types;
 pub mod walker;
 
@@ -112,6 +117,7 @@ pub use renderer::WgpuRenderer;
 pub use scroll::{ScrollState, WheelDelta};
 pub use text_edit::TextEditState;
 pub use toast_stack::{Toast, ToastId, ToastStack, ToastTarget};
+pub use tooltip::TooltipState;
 pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
 
 // Native Slug adapter re-exports (#66), available only when the `slug` feature
@@ -144,11 +150,11 @@ pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
     CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, GlassMode, GlassStyle,
     InputStyle, PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle, SliderStyle,
-    SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
+    SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, TooltipStyle, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)
-pub use components::{CounterChipRegions, SliderRegions};
+pub use components::{CounterChipRegions, SliderRegions, TooltipPlacement};
 
 // Declarative builder layer (immediate-mode mirror of mkui-core's retained
 // `View` / `Stack` / `Row` tree).
