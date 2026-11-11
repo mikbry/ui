@@ -482,6 +482,21 @@ impl Rect {
         }
     }
 
+    /// Expand to at least `min` on each axis, independently per axis, about
+    /// the same center — unlike [`Self::expand`], which grows both axes by
+    /// the same amount. A dimension that already meets `min` is left
+    /// untouched. Used by widgets (e.g. `button`'s hit-target) whose
+    /// *visual* rect may be smaller than a platform's minimum hit-target
+    /// size on one or both axes.
+    pub fn expand_to_min_size(self, min: Size) -> Self {
+        let extra_w = (min.width - self.size.width).max(0.0);
+        let extra_h = (min.height - self.size.height).max(0.0);
+        Self {
+            origin: Point::new(self.origin.x - extra_w * 0.5, self.origin.y - extra_h * 0.5),
+            size: Size::new(self.size.width + extra_w, self.size.height + extra_h),
+        }
+    }
+
     pub fn inset(self, insets: Insets) -> Self {
         Self {
             origin: Point::new(self.origin.x + insets.left, self.origin.y + insets.top),

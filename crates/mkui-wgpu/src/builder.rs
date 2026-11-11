@@ -312,6 +312,12 @@ impl<'a, T> UiBuilder<'a, T> {
             Size::new(stepper_size, stepper_size),
         );
         for (rect, symbol, target) in [(minus_rect, "-", minus), (plus_rect, "+", plus)] {
+            // `components::button` now returns a widened `hit_rect` (#186)
+            // for touch-target purposes, but the steppers sit close enough
+            // together (6px gap) that widening each to 44px would make
+            // their hit regions overlap; this row keeps hit-testing the
+            // painted `rect` and leaves adoption of the wider target to a
+            // layout that has room for it.
             components::button(
                 self.scene,
                 rect,
@@ -319,6 +325,8 @@ impl<'a, T> UiBuilder<'a, T> {
                 ButtonVariant::Ghost,
                 ButtonSize::Icon,
                 ButtonState::Idle,
+                false,
+                false,
                 self.theme,
             );
             self.layout.hit_regions.push(HitRegion { rect, target });

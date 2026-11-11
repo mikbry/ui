@@ -54,6 +54,7 @@ use mkui_runtime::{
 use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
+use crate::components::MIN_TOUCH_TARGET_PX;
 use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
@@ -493,18 +494,115 @@ fn render_button(
         style: label_style,
     });
 
+    // The touch target (#186) is widened to the platform's minimum
+    // size, independent of the painted `rect` — the layout size stays
+    // untouched; the visible button doesn't need to grow for its tap area
+    // to meet a touch-friendly floor. This is registered as the exact
+    // silhouette's unchanged hit entry (same `rect`/`corner_radii` as
+    // before #186 — a click in the chamfered-off rounded corner still
+    // misses, matching what's actually painted) *plus* zero or more plain
+    // rectangular padding-strip entries tiling the ring between `rect` and
+    // the widened target, for the same `node`/`action` (#176 Codex round:
+    // a single rounded rect sized to the wider target can't represent
+    // this — growing `corner_radii` to match only one axis (here,
+    // vertical-only, since the width floor already clears the target)
+    // drags the exclusion circle's center off the original silhouette,
+    // which both re-admits clicks in the real rounded-off corner and, in
+    // the other direction, rejects clicks in the padding strip near a
+    // corner. Plain rectangles have no visual counterpart, so they need
+    // no rounding at all — see `touch_target_padding_strips`).
     ctx.hits.push(HitTestEntry {
         rect,
         node: node.id,
         action: button.on_press,
         corner_radii,
     });
+    let hit_rect = rect.expand_to_min_size(Size::new(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX));
+    for padding in touch_target_padding_strips(rect, hit_rect)
+        .into_iter()
+        .flatten()
+    {
+        ctx.hits.push(HitTestEntry {
+            rect: padding,
+            node: node.id,
+            action: button.on_press,
+            corner_radii: CornerRadii::all(0.0),
+        });
+    }
     layouts.push(NodeLayout {
         node: node.id,
         rect,
     });
 
     ctx.cursor_y += BUTTON_HEIGHT_PX + BUTTON_GAP_PX;
+}
+
+/// Sub-pixel (below rendering precision) inset applied to each padding
+/// strip's edge that touches `rect`, so the strip stops strictly before
+/// `rect`'s own boundary instead of landing exactly on it. Needed because
+/// `rect_contains`/`rect_contains_rounded` ([`crate::types`]) are both
+/// inclusive on every edge (`>=`/`<=`): without this inset, a query point
+/// sitting exactly on the shared line matches *both* `rect`'s hit entry
+/// and the (uncornered) strip, and since [`pointer::hit_test`] falls
+/// through to the next entry on a miss, `rect`'s correct corner-exclusion
+/// rejection at that line doesn't propagate to an overall miss — the
+/// strip still claims the point.
+const PADDING_STRIP_INSET_PX: f32 = 0.01;
+
+/// Decompose the ring between `rect` (the painted silhouette) and
+/// `hit_rect` (`rect` widened to the touch-target floor) into up to four
+/// non-overlapping plain rectangles: a full-width strip above/below `rect`
+/// and, flanking only `rect`'s own height, a strip to its left/right. Each
+/// strip's edge touching `rect` is inset by [`PADDING_STRIP_INSET_PX`] so
+/// it never shares a boundary line with `rect` (see that constant's docs
+/// for why). This tiles the widened area without ever covering a pixel of
+/// `rect` itself, so pairing it with an unchanged, unexpanded hit entry
+/// for `rect` (see `render_button`) exactly reproduces the pre-#186
+/// rounded-corner exclusion for every point inside `rect`, while every
+/// point strictly outside `rect` but inside `hit_rect` still hits (#186).
+/// Returns `None` for a strip with no area once the inset is applied — in
+/// particular, every entry is `None` when `hit_rect == rect`.
+fn touch_target_padding_strips(rect: Rect, hit_rect: Rect) -> [Option<Rect>; 4] {
+    let top = (rect.origin.y - hit_rect.origin.y > PADDING_STRIP_INSET_PX).then(|| {
+        Rect::new(
+            Point::new(hit_rect.origin.x, hit_rect.origin.y),
+            Size::new(
+                hit_rect.size.width,
+                rect.origin.y - hit_rect.origin.y - PADDING_STRIP_INSET_PX,
+            ),
+        )
+    });
+    let bottom = (hit_rect.height_end() - rect.height_end() > PADDING_STRIP_INSET_PX).then(|| {
+        Rect::new(
+            Point::new(
+                hit_rect.origin.x,
+                rect.height_end() + PADDING_STRIP_INSET_PX,
+            ),
+            Size::new(
+                hit_rect.size.width,
+                hit_rect.height_end() - rect.height_end() - PADDING_STRIP_INSET_PX,
+            ),
+        )
+    });
+    let left = (rect.origin.x - hit_rect.origin.x > PADDING_STRIP_INSET_PX).then(|| {
+        Rect::new(
+            Point::new(hit_rect.origin.x, rect.origin.y),
+            Size::new(
+                rect.origin.x - hit_rect.origin.x - PADDING_STRIP_INSET_PX,
+                rect.size.height,
+            ),
+        )
+    });
+    let right = (hit_rect.width_end() - rect.width_end() > PADDING_STRIP_INSET_PX).then(|| {
+        Rect::new(
+            Point::new(rect.width_end() + PADDING_STRIP_INSET_PX, rect.origin.y),
+            Size::new(
+                hit_rect.width_end() - rect.width_end() - PADDING_STRIP_INSET_PX,
+                rect.size.height,
+            ),
+        )
+    });
+    [top, bottom, left, right]
 }
 
 fn map_button_variant(v: ButtonVariant) -> ThemeButtonVariant {
@@ -611,6 +709,7 @@ fn padding_y_px(style: &ResolvedStyle) -> f32 {
 mod tests {
     use super::*;
     use crate::bridge::WgpuRendererRegistry;
+    use crate::pointer;
     use crate::types::{Primitive, Size, Text as PrimitiveText};
     use mkui_core::components::{Button, Mkui as CoreMkui, Text as CoreText, View};
     use mkui_text::BitmapTextSystem;
@@ -752,15 +851,143 @@ mod tests {
             .count();
         assert!(quads >= 1, "button must paint a quad");
         assert_eq!(texts, 1, "button must paint a single label");
-        assert_eq!(
-            out.hit_tests.len(),
-            1,
-            "button must register exactly one hit entry"
+        assert!(
+            !out.hit_tests.is_empty(),
+            "button must register at least one hit entry"
         );
         assert!(
-            out.hit_tests[0].action.is_some(),
-            "action must propagate to hit entry"
+            out.hit_tests.iter().all(|h| h.action.is_some()),
+            "action must propagate to every hit entry registered for the button"
         );
+    }
+
+    /// Bounding box of every hit entry sharing `node` — the union of the
+    /// exact-silhouette entry plus any touch-target padding strips (#186).
+    fn hit_bounds_for(hit_tests: &[HitTestEntry], node: NodeId) -> Rect {
+        let mut entries = hit_tests.iter().filter(|h| h.node == node);
+        let first = entries
+            .next()
+            .expect("at least one hit entry for node")
+            .rect;
+        entries.fold(first, |acc, h| {
+            let min_x = acc.origin.x.min(h.rect.origin.x);
+            let min_y = acc.origin.y.min(h.rect.origin.y);
+            let max_x = acc.width_end().max(h.rect.width_end());
+            let max_y = acc.height_end().max(h.rect.height_end());
+            Rect::new(
+                Point::new(min_x, min_y),
+                Size::new(max_x - min_x, max_y - min_y),
+            )
+        })
+    }
+
+    /// Acceptance (#186): `BUTTON_HEIGHT_PX` (36px) is under the 44px touch
+    /// target floor. The union of the button's hit entries must meet the
+    /// floor even though the painted layout rect doesn't; the unchanged
+    /// painted rect's own entry is still exactly `rect` (see the dedicated
+    /// corner-exclusion regression test below for why).
+    #[test]
+    fn button_hit_entries_union_meets_the_minimum_touch_target() {
+        let core = CoreMkui::new().child(
+            Button::new("Ok")
+                .variant(ButtonVariant::Primary)
+                .on_press(|| {}),
+        );
+        let out = walk(&core);
+        let node = out.layouts[0].node;
+
+        assert_eq!(out.layouts[0].rect.size.height, BUTTON_HEIGHT_PX);
+
+        let bounds = hit_bounds_for(&out.hit_tests, node);
+        assert!(bounds.size.height >= MIN_TOUCH_TARGET_PX);
+        assert!(bounds.size.width >= MIN_TOUCH_TARGET_PX);
+
+        let layout_rect = out.layouts[0].rect;
+        let layout_center_y = layout_rect.origin.y + layout_rect.size.height * 0.5;
+        let bounds_center_y = bounds.origin.y + bounds.size.height * 0.5;
+        assert!(
+            (layout_center_y - bounds_center_y).abs() < 1e-4,
+            "the widened hit-entry union must stay centered on the painted button"
+        );
+    }
+
+    /// Regression (#186 review): widening the touch target must not widen
+    /// the *rounded-corner* exclusion test too — a click in the chamfered-off
+    /// corner sliver of the painted silhouette must still miss, exactly as
+    /// it did before the touch-target floor existed, even though that same
+    /// click now falls well inside the widened bounding box. A click
+    /// strictly outside the painted rect but inside the touch-target
+    /// padding must still hit.
+    #[test]
+    fn button_hit_test_preserves_rounded_corner_while_widening_touch_target() {
+        let core = CoreMkui::new().child(
+            Button::new("Ok")
+                .variant(ButtonVariant::Primary)
+                .on_press(|| {}),
+        );
+        let out = walk(&core);
+        let rect = out.layouts[0].rect;
+        assert!(
+            rect.size.height < MIN_TOUCH_TARGET_PX,
+            "this test only means something below the touch-target floor"
+        );
+
+        // 1px inside the painted rect's top-left corner — inside its
+        // bounding box, but outside the rounded silhouette's quarter-circle
+        // (default `radius_card` is 8px, far bigger than a 1px offset).
+        let corner_sliver = Point::new(rect.origin.x + 1.0, rect.origin.y + 1.0);
+        assert!(
+            pointer::hit_test(&out.hit_tests, corner_sliver).is_none(),
+            "a click in the painted button's own rounded-off corner must \
+             still miss, touch-target floor or not"
+        );
+
+        // Directly above the button's horizontal center, 2px above its top
+        // edge: outside the painted rect entirely, but inside the widened
+        // touch target (which extends it toward the 44px floor).
+        let padding_above = Point::new(rect.origin.x + rect.size.width * 0.5, rect.origin.y - 2.0);
+        let hit = pointer::hit_test(&out.hit_tests, padding_above)
+            .expect("a click just above the button must land in its widened touch target");
+        assert_eq!(hit.node, out.layouts[0].node);
+        assert!(hit.action.is_some());
+
+        // Well above even the widened touch target: must still miss.
+        let far_above = Point::new(rect.origin.x + rect.size.width * 0.5, rect.origin.y - 20.0);
+        assert!(pointer::hit_test(&out.hit_tests, far_above).is_none());
+
+        // Regression (review round 2): a point exactly ON the painted
+        // rect's own boundary, in the near-corner sliver, used to hit the
+        // padding strip instead of correctly falling through to rect's
+        // own (rejecting) corner-exclusion test — because the strip's
+        // near edge landed exactly on that shared line and both
+        // `rect_contains` checks are inclusive. All four corners, right
+        // on the boundary, must still miss.
+        let top_edge_near_left_corner = Point::new(rect.origin.x + 1.0, rect.origin.y);
+        let top_edge_near_right_corner = Point::new(rect.width_end() - 1.0, rect.origin.y);
+        let bottom_edge_near_left_corner = Point::new(rect.origin.x + 1.0, rect.height_end());
+        let bottom_edge_near_right_corner = Point::new(rect.width_end() - 1.0, rect.height_end());
+        for point in [
+            top_edge_near_left_corner,
+            top_edge_near_right_corner,
+            bottom_edge_near_left_corner,
+            bottom_edge_near_right_corner,
+        ] {
+            assert!(
+                pointer::hit_test(&out.hit_tests, point).is_none(),
+                "a click on rect's own boundary, in the near-corner sliver, \
+                 must still miss: {point:?}"
+            );
+        }
+
+        // Just past the inset, still inside the widened padding strip:
+        // must still hit (the inset must not eat the whole strip).
+        let padding_just_past_inset = Point::new(
+            rect.origin.x + rect.size.width * 0.5,
+            rect.origin.y - PADDING_STRIP_INSET_PX - 0.5,
+        );
+        let hit = pointer::hit_test(&out.hit_tests, padding_just_past_inset)
+            .expect("a click just past the inset must still land in the padding strip");
+        assert_eq!(hit.node, out.layouts[0].node);
     }
 
     #[test]
@@ -810,8 +1037,20 @@ mod tests {
             .child(Button::new("first").on_press(|| {}))
             .child(Button::new("second").on_press(|| {}));
         let out = walk(&core);
-        assert_eq!(out.hit_tests.len(), 2);
-        assert!(out.hit_tests[1].rect.origin.y > out.hit_tests[0].rect.origin.y);
+        // Each button contributes one *exact* entry (the unexpanded,
+        // rounded-corner-aware silhouette, uniquely identified by its
+        // unwidened `BUTTON_HEIGHT_PX` height — see
+        // `button_hit_test_preserves_rounded_corner_while_widening_touch_target`)
+        // plus zero or more touch-target padding strips (#186); compare
+        // only the exact entries for paint order, since the strip count is
+        // an implementation detail orthogonal to this test's intent.
+        let exact: Vec<_> = out
+            .hit_tests
+            .iter()
+            .filter(|h| h.rect.size.height == BUTTON_HEIGHT_PX)
+            .collect();
+        assert_eq!(exact.len(), 2);
+        assert!(exact[1].rect.origin.y > exact[0].rect.origin.y);
     }
 
     #[test]
@@ -823,7 +1062,7 @@ mod tests {
         let out = walk(&core);
         // All three fields are populated for this tree.
         assert!(!out.scene.primitives.is_empty());
-        assert_eq!(out.hit_tests.len(), 1);
+        assert!(!out.hit_tests.is_empty());
         assert!(!out.layouts.is_empty());
     }
 

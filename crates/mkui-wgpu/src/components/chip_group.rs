@@ -61,7 +61,7 @@ pub fn chip_group<T>(
         } else {
             ButtonState::Idle
         };
-        button_with(scene, chip_rect, label_text, state, &style);
+        button_with(scene, chip_rect, label_text, state, false, false, &style);
         layout.hit_regions.push(HitRegion {
             rect: chip_rect,
             target: to_target(index),

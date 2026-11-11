@@ -104,6 +104,59 @@ breaking changes can land on minor bumps).
     directly and can call `set_ui_scale` at any time. Wiring a
     settings-change signal through the action/runtime-signal path for the
     winit-owned path is a separate, orthogonal issue.
+- **`mkui-wgpu::components::button` — disabled state, keyboard/gamepad focus
+  ring, and a touch-friendly hit target (#186, C1 of #173).** `button` /
+  `button_with` now take `disabled: bool` and `focused: bool` alongside the
+  existing `state`, and return a `ButtonRegions { visual_rect, hit_rect }`
+  (mirroring `SliderRegions`). `disabled` dims the resolved chrome/label so
+  a disabled button is visually distinct regardless of variant, and
+  `hit_rect` is `None` when disabled — a caller that only ever registers
+  `Some` hit rects into its hit-test layout can never fire a disabled
+  button's action. `focused` draws an outer ring in the new
+  `ButtonStyle::focus_ring_color` token, driven only by this explicit flag
+  (never by mouse hover, which this module has no concept of). When
+  enabled, `hit_rect` expands `visual_rect` to at least the new
+  `MIN_TOUCH_TARGET_PX` (44px) on each axis via the new
+  `Rect::expand_to_min_size`, so a compact `ButtonSize::Icon` button keeps
+  its small visible chrome while still exposing a touch-friendly tap area.
+  The three variants the issue asks for — primary (`ButtonVariant::Default`),
+  `ButtonVariant::Ghost`, and `ButtonSize::Icon` — already existed and
+  already resolved independently through theme tokens; this issue's net new
+  surface is the disabled/focus/touch-target behavior layered on top.
+  `mkui-wgpu::walker::render_button` (the `AppTree`/`NodeKind::Button` path
+  real embedding hosts draw through, per #176's input-routing contract) also
+  now widens its `HitTestEntry` coverage to `MIN_TOUCH_TARGET_PX` — its
+  36px `BUTTON_HEIGHT_PX` row height is otherwise 8px short of the floor.
+  It registers the exact, unchanged silhouette entry (same `rect`/
+  `corner_radii` as always, so a click in the chamfered-off rounded corner
+  still misses exactly as before) plus zero or more plain-rectangle padding
+  strips tiling the gap out to the touch-target floor, via a new
+  `touch_target_padding_strips` helper — a single rounded rect sized to the
+  wider target can't represent this without re-admitting clicks into that
+  same corner sliver (a regression caught in review before merge: an
+  earlier revision widened the rect and zeroed its `corner_radii`
+  wholesale, which did exactly that). Only the hit-test rects change;
+  the painted/layout rect, `ButtonProps`, and the FFI-facing tree shape
+  are untouched.
+  - Scope decision: shipped disabled dimming, the focus-ring render path,
+    and the touch-target hit-rect for `mkui-wgpu`'s low-level
+    `components::button`, per the issue's own framing ("Builds on
+    `mkui-wgpu`'s existing button component ... this is an extension, not a
+    new component from scratch"). Deferred: wiring an actual
+    keyboard/gamepad focus-traversal manager that sets `focused` — tracked
+    separately as #203 ("gamepad and focus navigation") in #173's own
+    ordering, after the component-coverage phase this issue belongs to.
+    Also deferred: a literal gradient fill for the primary variant — the
+    issue's "(filled/gradient-capable)" is read as describing the general
+    class of primary-button looks, since `Scene`'s `Quad`/`VectorPath`
+    primitives only support a single solid fill color today; adding a real
+    gradient fill is a renderer-primitive change, not a `button`-level one.
+    Not touched: the higher-level, FFI-serialized `mkui_runtime::ButtonProps`
+    / `NodeKind::Button` tree layer (used by `mkui-c`/`mkui-py`/`mkui-web`
+    parity) — the issue names the `mkui-wgpu` component file specifically,
+    and adding `disabled`/`focused` there would ripple through the C/Python
+    FFI surface and every binding's parity tests, well past this issue's
+    scope.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

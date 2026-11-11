@@ -5,6 +5,30 @@
 //! site. `button_with` is the escape hatch that takes a pre-resolved
 //! [`ButtonStyle`] for one-off looks the theme does not cover.
 //!
+//! ## Disabled, focus ring, touch target (#186)
+//!
+//! `disabled` and `focused` are supplied by the caller each frame, the same
+//! immediate-mode contract as [`ButtonState`] and `text_field_editable`'s
+//! `caret_visible` — this module never tracks interaction state itself.
+//! `disabled` dims the resolved chrome/label by [`DISABLED_ALPHA_FACTOR`] so
+//! a disabled button reads as visually distinct regardless of variant, and
+//! both `button`/`button_with` return [`ButtonRegions`] whose `hit_rect` is
+//! `None` for a disabled button — a caller that only ever registers
+//! `hit_rect.map(...)`/`if let Some(hit_rect) = ...` into its hit-test layout
+//! structurally cannot fire a disabled button's action. `focused` draws an
+//! outer ring ([`ButtonStyle::focus_ring_color`]) outset from the button by
+//! [`FOCUS_RING_GAP_PX`] — driven only by this explicit flag, never by mouse
+//! position, so a mouse hover alone never produces a ring. Wiring an actual
+//! keyboard/gamepad focus-traversal manager to set `focused` is tracked
+//! separately (#203); this module only renders the signal it's handed.
+//!
+//! When enabled, `hit_rect` is `rect` expanded to at least
+//! [`MIN_TOUCH_TARGET_PX`] on each axis (via
+//! [`crate::types::Rect::expand_to_min_size`]) — the *visual* button can
+//! stay small (e.g. an icon button) while the clickable/tappable area still
+//! meets a touch-friendly minimum, mirroring [`super::slider::SliderRegions`]'s
+//! `hit_rect` pattern.
+//!
 //! ## Chrome rendering (#140)
 //!
 //! The rounded-rect fill + border forks on the `slug` feature, resolved at
@@ -18,14 +42,16 @@
 //! triangulated tessellator (its border ring starts exactly at `rect`'s own
 //! boundary and never extends past it) — a plain shared centreline would
 //! stroke outward past `rect` by half the border width (#213 Codex round 1).
-//! `button`/`button_with`'s own signatures never change — the fork is
-//! entirely internal.
+//! [`emit_chrome`]'s own fork is entirely internal — it never sees
+//! `disabled`/`focused`, which are handled once in `button_with` by dimming
+//! the colors handed to it and, for the ring, by a separate always-`Quad`
+//! [`emit_focus_ring`] call (a focus ring is a plain decorative outline, not
+//! part of the `Quad`-vs-`VectorPath` chrome-fidelity contract #213 guards).
 
 use crate::theme::{ButtonSize, ButtonState, ButtonStyle, ButtonVariant, WgpuTheme};
-use crate::types::{Color, Point, Rect, Scene, Size, TextAlign, TextStyle};
-
-#[cfg(not(feature = "slug"))]
-use crate::types::{CornerRadii, Quad, Stroke};
+use crate::types::{
+    Color, CornerRadii, Point, Quad, Rect, Scene, Size, Stroke, TextAlign, TextStyle,
+};
 
 #[cfg(feature = "slug")]
 use crate::types::PlacedVectorPath;
@@ -34,20 +60,65 @@ use mkui_vector2d_wgpu::{Bounds, FillRule, PathCommand, Stroke as PathStroke, Ve
 
 use super::label;
 
+/// Minimum clickable/tappable hit-target size (Apple HIG / Material both
+/// land on 44-48px; this picks the 44px floor shared by both) (#186). A
+/// button's *visual* rect may be smaller — e.g. a compact `ButtonSize::Icon`
+/// — so `hit_rect` in [`ButtonRegions`] expands up to this floor rather than
+/// shrinking the rendered chrome.
+pub const MIN_TOUCH_TARGET_PX: f32 = 44.0;
+
+/// Alpha multiplier applied to a disabled button's fill/stroke/label so it
+/// reads as visually distinct regardless of variant (#186). A widget-level
+/// geometry/look constant, not a themed color — same category as
+/// `DotSize::diameter` per the theme module's token-sourcing rule.
+const DISABLED_ALPHA_FACTOR: f32 = 0.45;
+
+/// Gap, in px, between the button's own border and the outer focus ring
+/// (#186). Widget-intrinsic geometry, not a themed token — see
+/// [`DISABLED_ALPHA_FACTOR`]'s doc comment.
+const FOCUS_RING_GAP_PX: f32 = 2.0;
+
+/// Stroke width, in px, of the focus ring itself (#186).
+const FOCUS_RING_WIDTH_PX: f32 = 2.0;
+
+/// Regions [`button`]/[`button_with`] hand back for the caller to hit-test
+/// and lay out, mirroring [`super::slider::SliderRegions`] (#186).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ButtonRegions {
+    /// The rect actually painted — unchanged from the caller's input `rect`.
+    pub visual_rect: Rect,
+    /// Where the caller should hit-test pointer/touch input: `visual_rect`
+    /// expanded to [`MIN_TOUCH_TARGET_PX`] on each axis, or `None` when the
+    /// button is disabled. A caller that only ever registers `Some(rect)`
+    /// into its hit-test layout can never make a disabled button fire.
+    pub hit_rect: Option<Rect>,
+}
+
 /// Low-level two-state button. Takes a pre-resolved `ButtonStyle` — reserved
 /// for callers that need a one-off style. Most call sites should use the
 /// themed [`button`] instead.
+///
+/// `disabled` dims the chrome/label and suppresses `hit_rect`; `focused`
+/// draws the style's `focus_ring_color` outset from `rect`. Both are
+/// caller-supplied every frame — see the module doc.
 pub fn button_with(
     scene: &mut Scene,
     rect: Rect,
     label_text: &str,
     state: ButtonState,
+    disabled: bool,
+    focused: bool,
     style: &ButtonStyle,
-) {
-    let (fill, stroke_color, label_color) = match state {
+) -> ButtonRegions {
+    let (mut fill, mut stroke_color, mut label_color) = match state {
         ButtonState::Idle => (style.idle_fill, style.idle_stroke, style.idle_label),
         ButtonState::Active => (style.active_fill, style.active_stroke, style.active_label),
     };
+    if disabled {
+        fill = fill.multiply_alpha(DISABLED_ALPHA_FACTOR);
+        stroke_color = stroke_color.multiply_alpha(DISABLED_ALPHA_FACTOR);
+        label_color = label_color.multiply_alpha(DISABLED_ALPHA_FACTOR);
+    }
     emit_chrome(
         scene,
         rect,
@@ -56,6 +127,9 @@ pub fn button_with(
         style.corner_radius,
         style.stroke_width,
     );
+    if focused {
+        emit_focus_ring(scene, rect, style.corner_radius, style.focus_ring_color);
+    }
     let text_style = TextStyle {
         align: TextAlign::Center,
         color: label_color,
@@ -70,11 +144,22 @@ pub fn button_with(
         Size::new(rect.size.width, label_height),
     );
     label(scene, label_rect, label_text, text_style);
+
+    ButtonRegions {
+        visual_rect: rect,
+        hit_rect: (!disabled)
+            .then(|| rect.expand_to_min_size(Size::new(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX))),
+    }
 }
 
 /// Two-state button with shadcn-style `variant` + `size`. Resolves through
 /// the provided [`WgpuTheme`] so a theme swap is a one-line change at every
 /// call site.
+// allow: `disabled` + `focused` (#186) added alongside the existing
+// variant/size/state/theme axes; bundling them into a param-struct would
+// diverge from every other themed widget in this module (`chip_group` makes
+// the same call for its two extra params).
+#[allow(clippy::too_many_arguments)]
 pub fn button(
     scene: &mut Scene,
     rect: Rect,
@@ -82,10 +167,37 @@ pub fn button(
     variant: ButtonVariant,
     size: ButtonSize,
     state: ButtonState,
+    disabled: bool,
+    focused: bool,
     theme: &WgpuTheme,
-) {
+) -> ButtonRegions {
     let style = theme.button_style(variant, size);
-    button_with(scene, rect, label_text, state, &style);
+    button_with(scene, rect, label_text, state, disabled, focused, &style)
+}
+
+/// Stroke-only ring drawn outside `rect`, leaving a [`FOCUS_RING_GAP_PX`]
+/// gap to the button's own edge. A `Quad` stroke draws *inside* its own
+/// `rect` — from `rect`'s edge inward by `width`, never centred on it (see
+/// `push_rounded_rect_stroke`'s inset-boundary construction, the same
+/// convention [`emit_chrome`]'s triangulated border relies on) — so the
+/// ring's own `rect` is outset by the full `gap + width`: that outer
+/// boundary becomes the ring's *outer* edge, and the inset-by-`width` inner
+/// boundary lands exactly `gap` past the button. `corner_radii` grows by
+/// the same outset so the ring stays concentric with `corner_radius`.
+/// Always a plain [`Quad`], independent of the `slug` feature: a focus ring
+/// is a decorative affordance, not part of the chrome-fidelity contract
+/// `emit_chrome`'s fork guards (#213).
+fn emit_focus_ring(scene: &mut Scene, rect: Rect, corner_radius: f32, color: Color) {
+    let outset = FOCUS_RING_GAP_PX + FOCUS_RING_WIDTH_PX;
+    scene.quad(Quad {
+        rect: rect.expand(outset),
+        fill: Color::TRANSPARENT,
+        corner_radii: CornerRadii::all(corner_radius + outset),
+        stroke: Some(Stroke {
+            color,
+            width: FOCUS_RING_WIDTH_PX,
+        }),
+    });
 }
 
 /// Triangulated rounded-rect fill + border. `corner_radii` is faceted into a
@@ -242,6 +354,8 @@ mod tests {
             ButtonVariant::Default,
             ButtonSize::Default,
             ButtonState::Idle,
+            false,
+            false,
             &theme,
         );
         button(
@@ -251,6 +365,8 @@ mod tests {
             ButtonVariant::Default,
             ButtonSize::Default,
             ButtonState::Active,
+            false,
+            false,
             &theme,
         );
         let idle_fill = first_fill(&idle_scene).expect("idle chrome");
@@ -270,6 +386,8 @@ mod tests {
             ButtonVariant::Default,
             ButtonSize::Default,
             ButtonState::Idle,
+            false,
+            false,
             &theme,
         );
         let quad = scene
@@ -295,6 +413,8 @@ mod tests {
             ButtonVariant::Default,
             ButtonSize::Default,
             ButtonState::Idle,
+            false,
+            false,
             &theme,
         );
         let vector_paths: Vec<_> = scene
@@ -332,7 +452,15 @@ mod tests {
         let style = theme.button_style(ButtonVariant::Default, ButtonSize::Default);
         let rect = Rect::new(Point::new(10.0, 10.0), Size::new(60.0, 40.0));
         let mut scene = Scene::new(Size::new(200.0, 80.0));
-        button_with(&mut scene, rect, "", ButtonState::Idle, &style);
+        button_with(
+            &mut scene,
+            rect,
+            "",
+            ButtonState::Idle,
+            false,
+            false,
+            &style,
+        );
 
         let border = scene
             .primitives
@@ -407,5 +535,221 @@ mod tests {
             Some(PathCommand::MoveTo(p)) => assert_eq!(p.x, 2.0),
             other => panic!("expected MoveTo as the first command, got {other:?}"),
         }
+    }
+
+    fn small_rect() -> Rect {
+        Rect::new(Point::new(10.0, 10.0), Size::new(60.0, 40.0))
+    }
+
+    /// Acceptance: all three variants (primary = `Default`, ghost, icon-sized)
+    /// render and each resolves an independent fill via theme tokens (#186).
+    #[test]
+    fn primary_ghost_and_icon_variants_resolve_distinct_idle_fills() {
+        let theme = WgpuTheme::default();
+        let primary = theme.button_style(ButtonVariant::Default, ButtonSize::Default);
+        let ghost = theme.button_style(ButtonVariant::Ghost, ButtonSize::Default);
+        let icon = theme.button_style(ButtonVariant::Default, ButtonSize::Icon);
+
+        assert_ne!(
+            primary.idle_fill, ghost.idle_fill,
+            "primary and ghost must resolve to different idle fills"
+        );
+        // Icon shares Default's color tokens (only the size axis differs) —
+        // independence here means its own geometry (corner radius), not fill.
+        assert_ne!(
+            primary.corner_radius, icon.corner_radius,
+            "icon size must resolve its own corner radius independent of Default size"
+        );
+
+        let mut scene = Scene::new(Size::new(200.0, 80.0));
+        for (variant, size) in [
+            (ButtonVariant::Default, ButtonSize::Default),
+            (ButtonVariant::Ghost, ButtonSize::Default),
+            (ButtonVariant::Default, ButtonSize::Icon),
+        ] {
+            button(
+                &mut scene,
+                small_rect(),
+                "",
+                variant,
+                size,
+                ButtonState::Idle,
+                false,
+                false,
+                &theme,
+            );
+        }
+        assert!(
+            !scene.primitives.is_empty(),
+            "all three variants must emit chrome"
+        );
+    }
+
+    #[test]
+    fn disabled_button_dims_fill_and_label_and_returns_no_hit_rect() {
+        let theme = WgpuTheme::default();
+        let mut enabled_scene = Scene::new(Size::new(200.0, 80.0));
+        let mut disabled_scene = Scene::new(Size::new(200.0, 80.0));
+        let rect = small_rect();
+
+        let enabled = button(
+            &mut enabled_scene,
+            rect,
+            "Go",
+            ButtonVariant::Default,
+            ButtonSize::Default,
+            ButtonState::Idle,
+            false,
+            false,
+            &theme,
+        );
+        let disabled = button(
+            &mut disabled_scene,
+            rect,
+            "Go",
+            ButtonVariant::Default,
+            ButtonSize::Default,
+            ButtonState::Idle,
+            true,
+            false,
+            &theme,
+        );
+
+        assert_ne!(
+            first_fill(&enabled_scene),
+            first_fill(&disabled_scene),
+            "a disabled button must be visually distinct from an enabled one"
+        );
+        assert!(
+            enabled.hit_rect.is_some(),
+            "an enabled button must expose a hit rect"
+        );
+        assert!(
+            disabled.hit_rect.is_none(),
+            "a disabled button must expose no hit rect, so a caller that \
+             only registers `Some` hit rects can never fire its action"
+        );
+    }
+
+    #[test]
+    fn hit_rect_meets_the_minimum_touch_target_even_for_a_small_visual_rect() {
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(200.0, 80.0));
+        // A compact icon-sized button, well under the 44px floor.
+        let rect = Rect::new(Point::new(10.0, 10.0), Size::new(20.0, 20.0));
+        let regions = button(
+            &mut scene,
+            rect,
+            "",
+            ButtonVariant::Ghost,
+            ButtonSize::Icon,
+            ButtonState::Idle,
+            false,
+            false,
+            &theme,
+        );
+
+        let hit_rect = regions.hit_rect.expect("enabled button has a hit rect");
+        assert_eq!(regions.visual_rect, rect, "the painted rect is unchanged");
+        assert!(hit_rect.size.width >= MIN_TOUCH_TARGET_PX);
+        assert!(hit_rect.size.height >= MIN_TOUCH_TARGET_PX);
+        // Expansion is centered on the visual rect.
+        let visual_center_x = rect.origin.x + rect.size.width * 0.5;
+        let hit_center_x = hit_rect.origin.x + hit_rect.size.width * 0.5;
+        assert!((visual_center_x - hit_center_x).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hit_rect_is_unchanged_when_the_visual_rect_already_meets_the_touch_target() {
+        let theme = WgpuTheme::default();
+        let mut scene = Scene::new(Size::new(200.0, 80.0));
+        let rect = Rect::new(Point::new(10.0, 10.0), Size::new(120.0, 48.0));
+        let regions = button(
+            &mut scene,
+            rect,
+            "Go",
+            ButtonVariant::Default,
+            ButtonSize::Default,
+            ButtonState::Idle,
+            false,
+            false,
+            &theme,
+        );
+        assert_eq!(regions.hit_rect, Some(rect));
+    }
+
+    /// Acceptance: a focus ring appears only when `focused` is explicitly
+    /// set — never implicitly from hover, since this module has no hover
+    /// concept at all; `focused` is the sole signal (#186).
+    #[test]
+    fn focus_ring_only_renders_when_focused_is_true() {
+        let theme = WgpuTheme::default();
+        let rect = small_rect();
+
+        let mut unfocused_scene = Scene::new(Size::new(200.0, 80.0));
+        button(
+            &mut unfocused_scene,
+            rect,
+            "Go",
+            ButtonVariant::Default,
+            ButtonSize::Default,
+            ButtonState::Idle,
+            false,
+            false,
+            &theme,
+        );
+        let mut focused_scene = Scene::new(Size::new(200.0, 80.0));
+        button(
+            &mut focused_scene,
+            rect,
+            "Go",
+            ButtonVariant::Default,
+            ButtonSize::Default,
+            ButtonState::Idle,
+            false,
+            true,
+            &theme,
+        );
+
+        fn quad_count(scene: &Scene) -> usize {
+            scene
+                .primitives
+                .iter()
+                .filter(|p| matches!(p, Primitive::Quad(_)))
+                .count()
+        }
+        assert_eq!(
+            quad_count(&focused_scene),
+            quad_count(&unfocused_scene) + 1,
+            "a focused button must emit exactly one extra Quad for the ring"
+        );
+
+        let ring = focused_scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) if q.rect != rect => Some(q),
+                _ => None,
+            })
+            .expect("focused button must emit a ring Quad outside its own rect");
+        assert!(
+            ring.rect.origin.x < rect.origin.x && ring.rect.origin.y < rect.origin.y,
+            "the ring must be outset from the button, not drawn on top of it"
+        );
+        // The ring Quad's own `rect` is its *outer* edge (a `Quad` stroke
+        // draws inward from its own `rect`, never centred on it — see
+        // `emit_focus_ring`'s doc comment) — so the ring's *inner* edge,
+        // `width` inside that outer `rect`, must land exactly
+        // `FOCUS_RING_GAP_PX` past the button's own edge, not overlap it.
+        let stroke = ring.stroke.expect("ring quad must carry a stroke");
+        let ring_inner_left = ring.rect.origin.x + stroke.width;
+        assert!(
+            (ring_inner_left - (rect.origin.x - FOCUS_RING_GAP_PX)).abs() < 1e-4,
+            "ring's inner edge must sit exactly {FOCUS_RING_GAP_PX}px past the button's own \
+             edge: got {ring_inner_left}, expected {}",
+            rect.origin.x - FOCUS_RING_GAP_PX
+        );
+        assert_eq!(ring.fill, Color::TRANSPARENT, "the ring must not fill");
+        assert!(ring.stroke.is_some(), "the ring must stroke");
     }
 }
