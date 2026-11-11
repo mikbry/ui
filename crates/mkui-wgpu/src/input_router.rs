@@ -1135,6 +1135,44 @@ mod tests {
     }
 
     #[test]
+    fn backdrop_click_on_an_unowned_background_button_still_dismisses_and_never_fires() {
+        // Review P1 exactly: a background button sits *outside* the open
+        // dialog's panel rect and is reachable by hit-testing. The original
+        // bug let the press arm this unowned entry (since `on_press` was
+        // called against the full, unscoped `hit_entries`), which left
+        // `armed.is_some()` true — skipping the backdrop-dismiss branch
+        // entirely — and fired the background button's click on release.
+        // Scoping arming to the topmost modal's `owned` set before calling
+        // `on_press` fixes both: the press can no longer arm an unowned
+        // node, so it's correctly classified as a backdrop click.
+        let mut router = InputRouter::new();
+        router.push_modal(
+            NodeId::from_raw(1, 0),
+            dialog_panel_rect(), // (200,200)-(500,400)
+            vec![NodeId::from_raw(9, 0)],
+        );
+        let entries = vec![button_at(
+            77,
+            Rect::new(Point::new(10.0, 10.0), Size::new(40.0, 20.0)),
+        )];
+        router.route(&cursor_moved(20.0, 15.0), &entries, 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert!(press.routed.is_consumed());
+        assert!(
+            router.top_modal().is_none(),
+            "an unowned background button outside the panel must not block \
+             backdrop dismissal"
+        );
+
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        assert!(
+            release.click.is_none(),
+            "the background button must never fire its action"
+        );
+    }
+
+    #[test]
     fn covered_dialogs_control_does_not_fire_while_another_dialog_is_on_top() {
         // Regression: node 5 belongs to the *bottom* dialog and sits at a
         // rect the *top* dialog's panel does not cover. Clicking it while
@@ -1280,6 +1318,58 @@ mod tests {
         );
         assert!(outcome.routed.is_consumed());
         assert_eq!(router.trapped_focus_node(), Some(NodeId::from_raw(10, 0)));
+    }
+
+    #[test]
+    fn tab_never_focuses_a_covered_lower_dialogs_button_with_overlapping_dialogs() {
+        // Review P2 exactly: node 5 belongs to the *bottom* (now covered)
+        // dialog, and its hit rect's center happens to fall inside the
+        // *top* dialog's panel rect. The original bug derived "in this
+        // dialog's focus trap" from that geometric overlap, so node 5
+        // would enter the topmost dialog's Tab cycle even though it isn't
+        // one of its own controls. Scoping to the topmost dialog's
+        // explicit `owned` set fixes this: Tab must only ever reach node
+        // 10, never node 5.
+        let mut router = InputRouter::new();
+        let bottom_rect = Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 600.0));
+        let top_rect = dialog_panel_rect(); // (200,200)-(500,400)
+        router.push_modal(
+            NodeId::from_raw(1, 0),
+            bottom_rect,
+            vec![NodeId::from_raw(5, 0)],
+        );
+        router.push_modal(
+            NodeId::from_raw(2, 0),
+            top_rect,
+            vec![NodeId::from_raw(10, 0)],
+        );
+
+        let entries = vec![
+            // Bottom dialog's own button — its center (300,310) lies
+            // inside the top dialog's panel rect.
+            button_at(
+                5,
+                Rect::new(Point::new(280.0, 300.0), Size::new(40.0, 20.0)),
+            ),
+            button_at(
+                10,
+                Rect::new(Point::new(210.0, 210.0), Size::new(40.0, 20.0)),
+            ),
+        ];
+
+        for _ in 0..3 {
+            router.route_key_with_hits(
+                PhysicalKey::Code(KeyCode::Tab),
+                ElementState::Pressed,
+                false,
+                &entries,
+            );
+            assert_eq!(
+                router.trapped_focus_node(),
+                Some(NodeId::from_raw(10, 0)),
+                "the covered dialog's button must never enter the topmost dialog's cycle"
+            );
+        }
     }
 
     #[test]
