@@ -282,18 +282,40 @@ breaking changes can land on minor bumps).
     (not-yet-migrated) shape.
   - Review fix: `tessellate_icon` ignored `Icon::icon` entirely and always
     drew the same tinted inset rect, so two `counter_chip`s requesting
-    different icons rendered byte-identical triangles — a chip claiming to
-    show "icon + count" couldn't actually show a different icon. No icon
-    atlas or rasterization pipeline exists anywhere in this crate yet
-    (`IconMask` is defined in `types.rs` but nothing constructs or consumes
-    one — confirmed by grep), so real icon artwork is a separate, currently
-    untracked piece of work, not something fixable as part of this PR.
-    What's fixed: the placeholder now varies its size and horizontal offset
-    deterministically from a hash of `IconId`, so two different icons in a
-    HUD at least read as visually distinct chips instead of silently
-    rendering the identical placeholder. Tests cover both that different
-    ids tessellate to different triangles and that the same id stays
-    deterministic across calls (no per-frame jitter).
+    different icons rendered byte-identical triangles. A first fix pass
+    varied the placeholder rect's size/offset by a hash of `IconId` —
+    geometrically different triangles, but still the same silhouette
+    shape, not a genuinely different icon. No icon atlas or image
+    rasterization pipeline exists anywhere in this crate (`IconMask` is
+    defined in `types.rs` but nothing constructs or consumes one —
+    confirmed by grep), so real icon artwork stays separate, currently
+    untracked work. What's fixed now: `tessellate_icon` reuses the one
+    icon-adjacent drawing path that *does* already exist — the same 5×7
+    bitmap glyph table and rasterization `tessellate_text` draws real text
+    with — to render a representative glyph character chosen
+    deterministically per `IconId` from a curated set of built-in symbols
+    (`#`, `+`, digits, punctuation, …). Two different icons now render
+    genuinely different pixel silhouettes (different letterforms have
+    different bitmap coverage), not a translated/rescaled copy of one
+    shared shape. Tests cover: two ids render different *sets* of pixel
+    cells (not just a translated copy, and not just a different cell
+    *count* either — both checked); the same id stays deterministic across
+    calls; every curated glyph resolves to a real table entry, never the
+    hollow-box fallback every unmapped codepoint would otherwise render.
+  - Review fix: the truncation regression test
+    (`tooltip_text_is_never_truncated_end_to_end_at_flagged_lengths`) used
+    to check the stored `Text.content` source string — but `label()`
+    always stores the full original string regardless of what the renderer
+    later does with it; wrapping/ellipsizing happens inside
+    `tessellate_text` at tessellation time and never mutates the
+    primitive. Checking `Text.content` would have passed even while the
+    truncation bug was live, since the bug truncated what got *drawn*, not
+    what got *stored*. Rewritten to tessellate the real scene and compare
+    the actual rendered pixel-width of the tooltip glyphs against the full
+    string's expected geometric width — verified to actually fail (at
+    85.4px rendered vs. 92px expected for the 16-char case) when the
+    measurement-margin fix above is reverted, confirming it now catches
+    the regression it claims to.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

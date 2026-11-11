@@ -552,13 +552,28 @@ mod tests {
 
     #[test]
     fn tooltip_text_is_never_truncated_end_to_end_at_flagged_lengths() {
-        // Same regression as above, exercised through the full component +
-        // tessellation path (not just the measurement formula) at the
-        // review's exact reported lengths, asserting the rendered text
-        // primitive still carries every character — not the ellipsized "."
-        // the bug produced.
+        // Same regression as `tooltip_width_exactly_fits_every_character_length`
+        // above, but checked against the actual *rendered* pixels, not the
+        // stored `Text.content` source string. `label()` always stores the
+        // full original string in the `Text` primitive regardless of what
+        // the renderer later does with it — wrapping/ellipsizing happens
+        // inside `tessellate_text`, at tessellation time, operating on
+        // `text.content` + `text.rect.size.width`, and never mutates the
+        // primitive itself. So checking `Text.content == tooltip` can
+        // never detect this class of bug: it would pass even while the
+        // bug was live, because the bug truncated what got *drawn*, not
+        // what got *stored*. This tessellates the real scene (the same
+        // `tessellate_scene` path every example renders with) and checks
+        // the actual rendered pixel-width of the tooltip-colored glyphs
+        // against the full, un-truncated string's expected geometric
+        // width — truncation/ellipsis would render dramatically narrower
+        // (down to one glyph's width for the "." fallback the bug
+        // produced), so a close match proves every character actually
+        // painted pixels, not just that the source string was intact.
         let theme = WgpuTheme::default();
         let style = theme.counter_chip();
+        let text_style = style.tooltip_text_style;
+        let text_color = text_style.color;
 
         for len in [2usize, 10, 16, 31] {
             let tooltip: String = "a".repeat(len);
@@ -575,14 +590,42 @@ mod tests {
             );
             assert!(regions.tooltip_rect.is_some());
 
-            let tooltip_texts: Vec<_> = texts(&s)
-                .into_iter()
-                .filter(|t| t.content == tooltip)
-                .collect();
-            assert_eq!(
-                tooltip_texts.len(),
-                1,
-                "a {len}-char tooltip must render with every character intact, not truncated"
+            let triangles = crate::tessellate_scene(&s);
+            let mut min_x = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            for triangle in &triangles {
+                if triangle.color.r != text_color.r
+                    || triangle.color.g != text_color.g
+                    || triangle.color.b != text_color.b
+                {
+                    continue;
+                }
+                for point in triangle.points {
+                    min_x = min_x.min(point.x);
+                    max_x = max_x.max(point.x);
+                }
+            }
+            assert!(
+                min_x.is_finite() && max_x.is_finite(),
+                "a {len}-char tooltip rendered no text pixels at all"
+            );
+
+            // The full, un-truncated string's expected geometric width —
+            // the same `measure_line_width` formula, computed
+            // independently here (not by calling `tooltip_text_width_px`,
+            // so this doesn't just re-check that function's own
+            // arithmetic against itself).
+            let scale = bitmap_scale(text_style.font_size_px);
+            let advance = GLYPH_ADVANCE_PX * scale;
+            let glyph_width = GLYPH_CELL_WIDTH_PX * scale;
+            let expected_full_width = (len as f32 - 1.0) * advance + glyph_width;
+            let rendered_width = max_x - min_x;
+
+            assert!(
+                rendered_width >= expected_full_width - 2.0,
+                "a {len}-char tooltip rendered only {rendered_width}px of text pixels, \
+                 expected ~{expected_full_width}px for the full un-truncated string — \
+                 this looks truncated/ellipsized, not fully rendered"
             );
         }
     }
