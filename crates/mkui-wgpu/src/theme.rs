@@ -519,7 +519,11 @@ impl Default for WgpuTheme {
             swatch_stroke: Color::rgba(0.0, 0.0, 0.0, 0.35),
             backdrop: Color::rgba(0.0, 0.0, 0.0, 0.55),
             glass_tint: Color::rgba(0.05, 0.04, 0.04, 0.42),
-            glass_solid_fill: Color::rgba(0.11, 0.09, 0.08, 0.96),
+            // Fully opaque (#251 review): this is the "reduce transparency"
+            // / low-quality accessibility fallback — background content
+            // must not remain visible through it. `glass_tint` above is the
+            // one translucent token; this one never is.
+            glass_solid_fill: Color::rgba(0.11, 0.09, 0.08, 1.0),
             shadow: ShadowStyle {
                 color: Color::rgba(0.0, 0.0, 0.0, 0.38),
                 blur_radius: 24.0,
@@ -1340,5 +1344,24 @@ mod tests {
         let before = theme.dialog().backdrop;
         theme.tokens.backdrop = Color::rgba(1.0, 0.0, 0.0, 0.5);
         assert_ne!(theme.dialog().backdrop, before);
+    }
+
+    #[test]
+    fn glass_panel_solid_fill_is_fully_opaque() {
+        // #251 review: this is the "reduce transparency" / low-quality
+        // accessibility fallback — background content must not remain
+        // visible through it, so its alpha must be exactly 1.0, unlike
+        // `glass_tint` (the blur-mode mix color), which is deliberately
+        // translucent.
+        let theme = WgpuTheme::default();
+        let style = theme.glass_panel_style();
+        assert_eq!(
+            style.solid_fill.a, 1.0,
+            "glass_solid_fill must be fully opaque"
+        );
+        assert!(
+            style.tint.a < 1.0,
+            "glass_tint is the blur-mode mix color and must stay translucent"
+        );
     }
 }

@@ -51,7 +51,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::tessellation::{clamp_corner_radii, rounded_rect_boundary, CORNER_ARC_SEGMENTS};
-use crate::types::{Backdrop, Point};
+use crate::types::{Backdrop, CornerRadii, Point, Rect, Size};
 
 /// Half-width of the discrete Gaussian kernel on each axis — must match
 /// `backdrop.wgsl`'s `TAPS` constant exactly (`2*TAPS+1` taps per axis).
@@ -331,7 +331,12 @@ impl BackdropBlur {
         // `target`, clipped to the rounded-rect polygon. An empty vertex
         // list (a degenerate zero-size rect) draws nothing — pass 1's cost
         // above is the only one a degenerate rect still pays.
-        let vertices = composite_vertices(backdrop, self.width as f32, self.height as f32);
+        let vertices = composite_vertices(
+            backdrop,
+            device_pixel_ratio,
+            self.width as f32,
+            self.height as f32,
+        );
         if vertices.is_empty() {
             return;
         }
@@ -424,20 +429,48 @@ fn create_scratch_view(
 /// and every `Scene` primitive's pixel coordinates are already top-down —
 /// the same space the texture's rows run in — so `uv = position / size`
 /// needs no y-flip, unlike `present.wgsl`'s NDC-derived UV).
-fn composite_vertices(backdrop: &Backdrop, width: f32, height: f32) -> Vec<CompositeVertex> {
+///
+/// `backdrop.rect`/`corner_radii` are authored in **logical** px (ADR 0006
+/// §"Viewport units contract"), like every other geometry value in the
+/// scene, while `width`/`height` are the target's **physical**-pixel size —
+/// so the rect and radii are scaled by `device_pixel_ratio` here, before
+/// building the boundary, exactly as `tessellate_quad`'s caller scales a
+/// `Stroke` width (this function is the one geometry path in the backdrop
+/// pipeline that previously skipped that scaling, which left the panel
+/// undersized and mispositioned at any ratio other than 1x).
+fn composite_vertices(
+    backdrop: &Backdrop,
+    device_pixel_ratio: f32,
+    width: f32,
+    height: f32,
+) -> Vec<CompositeVertex> {
     if backdrop.rect.size.width <= 0.0 || backdrop.rect.size.height <= 0.0 {
         return Vec::new();
     }
     let width = width.max(1.0);
     let height = height.max(1.0);
-    let radii = clamp_corner_radii(backdrop.rect, backdrop.corner_radii);
-    let boundary = rounded_rect_boundary(backdrop.rect, radii, CORNER_ARC_SEGMENTS);
+    let dpr = device_pixel_ratio.max(f32::EPSILON);
+    let rect = Rect::new(
+        Point::new(backdrop.rect.origin.x * dpr, backdrop.rect.origin.y * dpr),
+        Size::new(
+            backdrop.rect.size.width * dpr,
+            backdrop.rect.size.height * dpr,
+        ),
+    );
+    let corner_radii = CornerRadii {
+        top_left: backdrop.corner_radii.top_left * dpr,
+        top_right: backdrop.corner_radii.top_right * dpr,
+        bottom_right: backdrop.corner_radii.bottom_right * dpr,
+        bottom_left: backdrop.corner_radii.bottom_left * dpr,
+    };
+    let radii = clamp_corner_radii(rect, corner_radii);
+    let boundary = rounded_rect_boundary(rect, radii, CORNER_ARC_SEGMENTS);
     if boundary.len() < 3 {
         return Vec::new();
     }
     let center = Point::new(
-        backdrop.rect.origin.x + backdrop.rect.size.width * 0.5,
-        backdrop.rect.origin.y + backdrop.rect.size.height * 0.5,
+        rect.origin.x + rect.size.width * 0.5,
+        rect.origin.y + rect.size.height * 0.5,
     );
     let to_vertex = |p: Point| CompositeVertex {
         position: [(p.x / width) * 2.0 - 1.0, 1.0 - (p.y / height) * 2.0, 0.0],
@@ -482,7 +515,7 @@ mod tests {
             blur_radius: 24.0,
             tint: crate::types::Color::rgba(0.0, 0.0, 0.0, 0.4),
         };
-        assert!(composite_vertices(&backdrop, 400.0, 300.0).is_empty());
+        assert!(composite_vertices(&backdrop, 1.0, 400.0, 300.0).is_empty());
     }
 
     #[test]
@@ -496,7 +529,7 @@ mod tests {
             blur_radius: 24.0,
             tint: crate::types::Color::rgba(0.0, 0.0, 0.0, 0.4),
         };
-        let vertices = composite_vertices(&backdrop, 400.0, 300.0);
+        let vertices = composite_vertices(&backdrop, 1.0, 400.0, 300.0);
         assert!(!vertices.is_empty());
         for v in &vertices {
             assert!((-1.0..=1.0).contains(&v.position[0]));
@@ -510,6 +543,52 @@ mod tests {
             let expected_v = (1.0 - v.position[1]) * 0.5;
             assert!((v.uv[0] - expected_u).abs() < 1e-5);
             assert!((v.uv[1] - expected_v).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn composite_vertices_scale_with_device_pixel_ratio() {
+        // Regression (#251 review): `backdrop.rect` is authored in logical
+        // px but `width`/`height` are the physical target size, so a
+        // logical-px rect must occupy the *same* relative portion of the
+        // physical target at every DPI — a HiDPI (2x) window doubles both
+        // the rect's physical size and the target's physical size, so the
+        // NDC/uv coverage here must come out identical to the 1x case, not
+        // half of it. (The bug this guards: `composite_vertices` used to
+        // skip the `device_pixel_ratio` scale entirely, leaving the panel
+        // undersized and mispositioned at any ratio other than 1x, even
+        // though the panel's border — drawn through the ordinary `Quad`
+        // path, which already scales correctly — looked fine.)
+        let backdrop = Backdrop {
+            rect: crate::types::Rect::new(
+                crate::types::Point::new(20.0, 30.0),
+                crate::types::Size::new(100.0, 60.0),
+            ),
+            corner_radii: crate::types::CornerRadii::all(12.0),
+            blur_radius: 24.0,
+            tint: crate::types::Color::rgba(0.0, 0.0, 0.0, 0.4),
+        };
+        let at_1x = composite_vertices(&backdrop, 1.0, 400.0, 300.0);
+        let at_2x = composite_vertices(&backdrop, 2.0, 800.0, 600.0);
+        assert_eq!(at_1x.len(), at_2x.len());
+        assert!(!at_1x.is_empty());
+        for (a, b) in at_1x.iter().zip(at_2x.iter()) {
+            for i in 0..3 {
+                assert!(
+                    (a.position[i] - b.position[i]).abs() < 1e-4,
+                    "position[{i}] differs between 1x and 2x: {:?} vs {:?}",
+                    a.position,
+                    b.position
+                );
+            }
+            for i in 0..2 {
+                assert!(
+                    (a.uv[i] - b.uv[i]).abs() < 1e-4,
+                    "uv[{i}] differs between 1x and 2x: {:?} vs {:?}",
+                    a.uv,
+                    b.uv
+                );
+            }
         }
     }
 

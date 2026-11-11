@@ -141,9 +141,9 @@ pub use types::PlacedVectorPath;
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
-    CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, GlassMode,
-    GlassStyle, InputStyle, PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle,
-    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
+    CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, GlassMode, GlassStyle,
+    InputStyle, PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle, SliderStyle,
+    SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)
