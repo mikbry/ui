@@ -374,18 +374,40 @@ fn tessellate_text(
     }
 }
 
-/// A small, curated set of built-in bitmap glyphs (`mkui_text::bitmap`'s
-/// 5×7 table — confirmed real entries, not ones that would silently fall
-/// back to [`mkui_text::bitmap::FALLBACK_GLYPH`]) used to stand in for icon
-/// artwork. Ordered to put the more pictogram-like symbols first.
+/// A small, curated, **finite** set of built-in bitmap glyphs
+/// (`mkui_text::bitmap`'s 5×7 table — confirmed real entries, not ones
+/// that would silently fall back to
+/// [`mkui_text::bitmap::FALLBACK_GLYPH`]) used to stand in for icon
+/// artwork. Ordered to put the more pictogram-like symbols first. This is
+/// the complete set of `IconId`s this crate can render a distinct
+/// placeholder glyph for — [`icon_glyph_for_id`] does not wrap around it,
+/// so an `IconId` outside `0..ICON_GLYPHS.len()` never silently aliases
+/// one of these.
 const ICON_GLYPHS: &[char] = &[
     '#', '+', '=', '?', '!', '-', '/', '|', '(', ')', '\'', '.', ',', ':', ';', '·', '«', '»', '0',
     '1', '2', '3', '4', '5', '6', '7', '8', '9',
 ];
 
-/// Deterministic mapping from an `IconId` to one of [`ICON_GLYPHS`].
+/// Stand-in for an `IconId` outside [`ICON_GLYPHS`]'s range — a codepoint
+/// with no entry in `mkui_text::bitmap`'s table (confirmed outside the
+/// Latin-1 Supplement block #184 gave full coverage to), so it
+/// deliberately renders as [`mkui_text::bitmap::FALLBACK_GLYPH`] (the
+/// hollow box) rather than a real letterform. An unrecognized icon must
+/// look visibly unresolved, never alias a real one.
+const UNKNOWN_ICON_GLYPH: char = '☐';
+
+/// Deterministic mapping from an `IconId` to one of [`ICON_GLYPHS`], or
+/// [`UNKNOWN_ICON_GLYPH`] for any id this crate has no placeholder for.
+/// Explicit and finite rather than `% ICON_GLYPHS.len()`: a modulo wrap
+/// would let an arbitrary id (e.g. `ICON_GLYPHS.len() + 1`) silently
+/// alias a different, real `IconId`'s glyph (`icon_glyph_for_id(1) ==
+/// icon_glyph_for_id(ICON_GLYPHS.len() + 1)`), which is indistinguishable
+/// from actually resolving the requested icon.
 fn icon_glyph_for_id(id: u64) -> char {
-    ICON_GLYPHS[(id as usize) % ICON_GLYPHS.len()]
+    match usize::try_from(id) {
+        Ok(index) if index < ICON_GLYPHS.len() => ICON_GLYPHS[index],
+        _ => UNKNOWN_ICON_GLYPH,
+    }
 }
 
 /// Icon rendering, reusing the one icon-adjacent drawing path that already
@@ -600,6 +622,38 @@ mod tests {
                 "ICON_GLYPHS entry {glyph:?} has no real bitmap-table glyph \
                  and silently renders the fallback box instead"
             );
+        }
+    }
+
+    #[test]
+    fn icon_ids_beyond_the_catalog_never_alias_a_real_icon() {
+        // Regression (#191 review): `% ICON_GLYPHS.len()` wrapped around,
+        // so IconId(1) and IconId(ICON_GLYPHS.len() as u64 + 1) rendered
+        // the exact same glyph — an out-of-catalog id silently impersonated
+        // a real, different icon instead of being visibly unresolved.
+        let in_catalog = icon_glyph_for_id(1);
+        let wrapped_around = icon_glyph_for_id(ICON_GLYPHS.len() as u64 + 1);
+        assert_ne!(
+            in_catalog, wrapped_around,
+            "an id past the catalog's end must not silently alias IconId(1)'s glyph"
+        );
+        assert_eq!(wrapped_around, UNKNOWN_ICON_GLYPH);
+
+        // The glyph for an out-of-catalog id must actually render as the
+        // bitmap table's fallback box, not another real letterform under
+        // a different name.
+        let bits = mkui_text::bitmap_glyph(UNKNOWN_ICON_GLYPH);
+        assert!(
+            mkui_text::bitmap::is_fallback_glyph(&bits),
+            "UNKNOWN_ICON_GLYPH must render as the real fallback box, so an \
+             unresolved icon looks visibly unresolved"
+        );
+
+        // Every id actually inside the catalog must still resolve to its
+        // own real, distinct glyph — this fix must not turn in-range ids
+        // into fallbacks too.
+        for id in 0..ICON_GLYPHS.len() as u64 {
+            assert_eq!(icon_glyph_for_id(id), ICON_GLYPHS[id as usize]);
         }
     }
 
