@@ -205,10 +205,29 @@ impl InputRouter {
     /// click — anything other than the Escape path, which pops internally).
     /// Pops whichever modal is topmost; callers close modals in
     /// last-opened-first-closed order.
+    ///
+    /// If a press is currently armed against one of *this* dialog's own
+    /// controls, that arm is cancelled here (review round 4, #188): Escape
+    /// can dismiss a dialog mid-press (press the button, then hit Escape
+    /// before releasing), and without this the matching release could
+    /// still fire the now-dismissed button's click — `scope_to_topmost_modal`
+    /// alone isn't enough to catch this, because by release time the
+    /// *entry itself* is simply gone from `self.modal_stack`, not merely
+    /// excluded from the current topmost dialog's owned set. Cancelling
+    /// clears `armed` only, the same as every other cancel path in this
+    /// router (Escape, `CursorLeft`, focus loss) — `gesture_owned` is left
+    /// untouched, so the eventual release still reports `Consumed`.
     pub fn pop_modal(&mut self) -> Option<NodeId> {
-        let popped = self.modal_stack.pop().map(|entry| entry.node);
+        let popped = self.modal_stack.pop()?;
         self.trap_focus = None;
-        popped
+        if self
+            .pointer
+            .armed()
+            .is_some_and(|armed| popped.owned.contains(&armed))
+        {
+            self.pointer.cancel();
+        }
+        Some(popped.node)
     }
 
     pub fn top_modal(&self) -> Option<NodeId> {
@@ -1286,6 +1305,65 @@ mod tests {
         assert!(
             release.click.is_none(),
             "the covered dialog's button must not fire once another modal has opened on top"
+        );
+        assert!(
+            release.routed.is_consumed(),
+            "the release still belongs to mkui — the gesture was claimed at press"
+        );
+    }
+
+    // ---- review round 4: dismissing a dialog mid-press must cancel its
+    // own armed control, not just lose it to a covering dialog ----
+
+    #[test]
+    fn escape_dismissing_a_dialog_mid_press_cancels_its_armed_buttons_click() {
+        // Regression: press a dialog's own button (arms it, owned by the
+        // only open dialog), then dismiss that *same* dialog with Escape
+        // before releasing. `scope_to_topmost_modal` alone doesn't catch
+        // this: once the dialog is closed, there is no modal left at all,
+        // so release would fall back to hit-testing `hit_entries`
+        // *unscoped* — and if the host hasn't yet dropped the dismissed
+        // dialog's hit-test entries for this one event (a release landing
+        // in the same frame the dialog closed), the button fires its
+        // click through a dialog that no longer exists. `pop_modal`
+        // cancels the pointer's arm itself when it belongs to the dialog
+        // being closed, so this can't happen regardless of what
+        // `hit_entries` still contains.
+        let mut router = InputRouter::new();
+        router.push_modal(
+            NodeId::from_raw(1, 0),
+            dialog_panel_rect(), // (200,200)-(500,400)
+            vec![NodeId::from_raw(9, 0)],
+        );
+        let entries = vec![button_at(
+            9,
+            Rect::new(Point::new(220.0, 220.0), Size::new(80.0, 30.0)),
+        )];
+        router.route(&cursor_moved(240.0, 230.0), &entries, 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert!(press.routed.is_consumed());
+        assert_eq!(router.armed(), Some(NodeId::from_raw(9, 0)));
+
+        let escape = router.route_key(
+            PhysicalKey::Code(KeyCode::Escape),
+            ElementState::Pressed,
+            false,
+        );
+        assert!(escape.routed.is_consumed());
+        assert!(router.top_modal().is_none(), "Escape dismissed the dialog");
+        assert!(
+            router.armed().is_none(),
+            "dismissing the dialog cancels the press armed against its own button"
+        );
+
+        // The host still hands the dismissed dialog's hit entries to this
+        // one release — the regression this test guards against is that
+        // that alone must not be enough to fire the button.
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        assert!(
+            release.click.is_none(),
+            "a button dismissed mid-press must never fire on release"
         );
         assert!(
             release.routed.is_consumed(),

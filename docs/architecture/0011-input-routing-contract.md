@@ -302,3 +302,28 @@ against current modal state is the correct contract, not a violation of
 it. `gesture_owned` (decided once, at press) still governs *consumption*
 independently of this: a gesture mkui claimed stays `Consumed` on release
 whether or not re-scoping cancels the click itself.
+
+### Review round 4 — dismissing a dialog mid-press must cancel its own armed button
+
+Round 3's `scope_to_topmost_modal` re-derives ownership against whatever
+modal is topmost *now*, which fixes a press out-living a covering dialog
+or an unowned overlap. It does not fix the dialog *the press itself
+belongs to* closing before the matching release: once that dialog is
+popped, `scope_to_topmost_modal` returns `None` (no modal is open at
+all, if it was the only one) and release falls back to hit-testing
+`hit_entries` unscoped — exactly the pre-round-3 behavior, which still
+fires the button's click if the host hasn't yet dropped the dismissed
+dialog's hit-test entries for that one event (plausible for a release
+landing in the same frame/engine-tick the dialog closed on Escape).
+
+Fixed at the source rather than at release: `InputRouter::pop_modal`
+checks whether the pointer is currently armed against one of the
+*closing* dialog's own `owned` nodes, and calls `pointer.cancel()` if
+so — clearing `armed` the same way every other cancel path in this
+router does (Escape-with-no-modal, `CursorLeft`, focus loss), leaving
+`gesture_owned` untouched so the eventual release still reports
+`Consumed`. This covers every `pop_modal` call site uniformly — Escape,
+a backdrop click (already a no-op there, since that path only pops when
+`armed` was already `None`), and any future host code that pops a modal
+directly (e.g. from inside a dialog's own button handler) — rather than
+re-deriving the same cancellation at every call site individually.
