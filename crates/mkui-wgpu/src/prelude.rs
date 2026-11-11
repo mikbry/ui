@@ -26,7 +26,7 @@ pub use crate::high_level::Mkui;
 pub use crate::renderer::WgpuRenderer;
 pub use crate::theme::{
     BadgeSize, BadgeVariant, ButtonSize, ButtonState, ButtonVariant, DotSize, DotVariant,
-    PanelStyle, TextVariant, WgpuTheme,
+    PanelStyle, TextVariant, ToastVariant, WgpuTheme,
 };
 pub use crate::types::{
     Axis, Color, DotAnimation, HitRegion, PanelLayout, Point, Rect, Scene, Size, TextStyle,

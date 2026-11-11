@@ -8,6 +8,49 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-wgpu::toast_stack::ToastStack` + `components::{toast_stack, toast_history}`
+  — toast/banner stack: dismiss, minimise, unread count, history (#193, C8 of
+  #173).** `ToastStack` is a caller-owned, immediate-mode-friendly state
+  struct (same shape as `TextEditState`/`PointerState`): `push` starts a
+  toast unread and non-minimised; `mark_read`, `minimise`/`restore`, and
+  `dismiss` are independent per-item transitions; `dismiss` always forces
+  `read` before moving the toast to `history` (most-recent-first, capped at
+  `HISTORY_CAP` = 50). `unread_count()` is always derived from the active
+  list's `!read` entries rather than a maintained counter, and toasts are
+  addressed by a stable `ToastId` (never an index), so a hit region captured
+  on one frame still names the right toast after an earlier dismiss has
+  shifted every later index. `components::toast_stack` renders the active
+  toasts **newest-first** inside `region` without overlap — minimised rows
+  use a compact height (still showing one line of identifying message text,
+  not a blank pill), full rows a taller one — and stops emitting (rather
+  than overlapping or spilling) once a row would not fit; rendering
+  newest-first means an overflowing stack drops the *oldest* toasts, never
+  the one that just arrived. It pushes three `HitRegion`s per rendered
+  toast into the caller's `PanelLayout<T>` (row body → `MarkRead`, then the
+  minimise and dismiss buttons on top, which win on overlap since later
+  entries win in `PanelLayout::hit`), mirroring `chip_group`'s `to_target`
+  shape, and returns `(ToastId, Rect)` pairs rather than bare rects so a
+  caller never has to re-derive an id from array position.
+  `components::toast_history` renders the on-demand dismissed-items list;
+  `ToastStack::history_visible` makes "on demand" part of the state
+  machine, not just a render-call convention. A new
+  `ToastVariant`/`ToastStyle`/`WgpuTheme::toast_style` reuse the existing
+  `surface`/`success`/`warning`/`destructive` tokens — no new `ThemeTokens`
+  field. Long messages wrap/ellipsize through the same text-layout pipeline
+  every other `Scene::Text` emitter in this crate already uses (the row's
+  width is passed straight through) — no toast-specific truncation logic
+  needed.
+  - Scope decision: an unread-count badge has no dedicated render helper —
+    `ToastStack::unread_count()` plus the existing `components::badge` atom
+    already cover it; a wrapper would only be guessing at a host's anchor
+    point. Auto-expiry (a toast disappearing after N seconds) is out of
+    scope — not in #193's acceptance criteria, and `ToastStack` holds no
+    clock to drive it; a host that wants it supplies its own timer and
+    calls `dismiss`.
+  - Not yet exercised against a real render target: covered by CPU-only
+    `Scene`-level unit tests (geometry, overlap, hit-region round trips),
+    not a Lavapipe/offscreen GPU readback or a showcase example. Deferred to
+    the first host/showcase consumer that actually draws a toast stack.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

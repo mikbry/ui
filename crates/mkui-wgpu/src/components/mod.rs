@@ -21,9 +21,10 @@
 //!   escape hatch when a caller needs a one-off style that isn't in the theme.
 //! - **variant-driven widgets** — [`card`], [`button`], [`text_field`],
 //!   [`text_field_editable`], [`slider`], [`chip_group`], [`scrollbar`],
-//!   [`scroll_area`], [`swatch`], [`heading`], [`text`], [`info_list`]. Each takes a variant /
-//!   size / state and pulls concrete colors from the theme. This is the layer
-//!   view code calls.
+//!   [`scroll_area`], [`swatch`], [`heading`], [`text`], [`info_list`],
+//!   [`toast_stack`], [`toast_history`]. Each takes a variant / size / state
+//!   and pulls concrete colors from the theme. This is the layer view code
+//!   calls.
 //! - **atoms** — [`badge`], [`dot`]. Self-contained shadcn-aligned signals.
 //!
 //! Built-in components registered with `WgpuRendererRegistry` (see `bridge.rs`)
@@ -46,6 +47,7 @@ mod slider;
 mod swatch;
 mod text;
 mod text_field;
+mod toast;
 
 pub use badge::badge;
 pub use button::{button, button_with};
@@ -60,3 +62,4 @@ pub use slider::{slider, SliderRegions};
 pub use swatch::swatch;
 pub use text::{heading, label, text};
 pub use text_field::{text_field, text_field_editable};
+pub use toast::{toast_history, toast_stack};

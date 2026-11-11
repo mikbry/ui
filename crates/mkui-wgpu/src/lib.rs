@@ -35,8 +35,9 @@
 //!   `components/`: [`components::card`], [`components::button`],
 //!   [`components::text_field`], [`components::slider`],
 //!   [`components::chip_group`], [`components::scrollbar`],
-//!   [`components::scroll_area`],
-//!   [`components::swatch`], [`components::heading`], [`components::text`], plus the
+//!   [`components::scroll_area`], [`components::swatch`],
+//!   [`components::heading`], [`components::text`],
+//!   [`components::toast_stack`], [`components::toast_history`], plus the
 //!   [`components::panel`] / [`components::titled_panel`] primitives the
 //!   higher-level components are built from. Mirrors the component surface
 //!   of [`miklabs/ui`] (`mkui-core::components`) — `View` / `Text` /
@@ -82,6 +83,7 @@ pub mod renderer;
 pub mod scroll;
 pub mod text_edit;
 pub mod theme;
+pub mod toast_stack;
 pub mod types;
 pub mod walker;
 
@@ -106,6 +108,7 @@ pub use render_command::{build_render_commands, classify_primitive, RenderComman
 pub use renderer::WgpuRenderer;
 pub use scroll::{ScrollState, WheelDelta};
 pub use text_edit::TextEditState;
+pub use toast_stack::{Toast, ToastId, ToastStack, ToastTarget};
 pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
 
 // Native Slug adapter re-exports (#66), available only when the `slug` feature
@@ -137,7 +140,7 @@ pub use types::PlacedVectorPath;
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
     CardStyle, DotSize, DotStyle, DotVariant, InputStyle, PanelStyle, ScrollbarStyle, ShadowStyle,
-    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, WgpuTheme,
+    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)
