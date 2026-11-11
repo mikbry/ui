@@ -124,6 +124,17 @@ pub struct WgpuApp {
     /// path re-queries `state.window` directly instead).
     #[cfg(not(target_arch = "wasm32"))]
     last_surface_size: Option<(u32, u32, f64)>,
+    /// Set by [`WgpuApp::set_ui_scale`] (review follow-up on #179):
+    /// `about_to_wait` requests one redraw the next time it ticks, then
+    /// clears this. A `ui_scale` change doesn't touch the
+    /// renderer/surface config, so arming the full resize-jerk pump
+    /// (#99/#101 — 60 ticks plus the macOS `CursorMoved` bridge window)
+    /// would be using the wrong tool purely to get one redraw scheduled;
+    /// this is a dedicated, minimal flag instead. Plain data — unlike a
+    /// direct `state.window.request_redraw()` call, it's assertable from
+    /// a unit test with no live window at all.
+    #[cfg(not(target_arch = "wasm32"))]
+    redraw_requested: bool,
 }
 
 /// Lower bound [`WgpuApp::set_ui_scale`] clamps to — small enough to still
@@ -235,6 +246,8 @@ impl WgpuApp {
             ui_scale: 1.0,
             #[cfg(not(target_arch = "wasm32"))]
             last_surface_size: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            redraw_requested: false,
         }
     }
 
@@ -340,6 +353,14 @@ impl WgpuApp {
     /// it re-syncs against the most recently reported surface size, if any.
     /// Either way the runtime tree is marked dirty and the scene is eagerly
     /// rebuilt — the same "no stale layout frame" contract a resize gets.
+    ///
+    /// On the winit-owned path this also marks a redraw needed (review
+    /// follow-up on #179): the rebuild above only replaces `self.scene` —
+    /// nothing else schedules a repaint on an idle window, so without this
+    /// the previous frame would stay on screen indefinitely while
+    /// hit-testing had already moved on to the new coordinates.
+    /// [`WgpuApp::about_to_wait`] is what turns this into the actual
+    /// `request_redraw()` call on its next tick.
     pub fn set_ui_scale(&mut self, ui_scale: f32) {
         if !ui_scale.is_finite() {
             return;
@@ -350,7 +371,10 @@ impl WgpuApp {
         }
         self.ui_scale = ui_scale;
         #[cfg(not(target_arch = "wasm32"))]
-        self.resync_viewport_for_ui_scale_change();
+        {
+            self.resync_viewport_for_ui_scale_change();
+            self.redraw_requested = true;
+        }
     }
 
     /// Borrow the underlying core Mkui (and thus the runtime AppTree),
@@ -421,6 +445,7 @@ impl WgpuApp {
         let options = WalkOptions {
             viewport: self.scene.viewport,
             theme: self.theme,
+            text_system: self.text_system.as_ref(),
         };
         let output = {
             let core_ref = core.borrow();
@@ -603,6 +628,13 @@ impl WgpuApp {
                 self.effective_scale_factor_for(state.window.scale_factor()),
             );
             self.resize_scene_viewport(viewport);
+            // Scheduling the actual repaint is the caller's job (#179
+            // review follow-up): `set_ui_scale` sets `redraw_requested`
+            // after calling this method, and `about_to_wait` is what
+            // turns that into a real `request_redraw()` call. `resumed()`
+            // (this method's other caller) already requests one
+            // unconditionally right after, so neither caller needs this
+            // method itself to touch the window.
         } else if let Some((width, height, os_scale_factor)) = self.last_surface_size {
             let viewport = logical_viewport_from_physical_size(
                 winit::dpi::PhysicalSize::new(width, height),
@@ -1118,13 +1150,34 @@ impl ApplicationHandler for WgpuApp {
     /// to expire the `CursorMoved` M2 bridge a fixed number of frames after the
     /// last `Resized` — keeping that bridge live across a fast gesture without
     /// redrawing on idle pointer motion afterward.
+    ///
+    /// Also the sole consumer of `redraw_requested` (#179 review
+    /// follow-up): [`WgpuApp::set_ui_scale`] sets it on the winit-owned
+    /// path instead of arming the full resize pump (a `ui_scale` change
+    /// doesn't touch the renderer/surface config, so it needs one redraw,
+    /// not a 60-tick swapchain-transition bridge). Cleared unconditionally
+    /// every tick — a one-shot ask, not a standing need.
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.on_about_to_wait_tick();
+    }
+}
+
+impl WgpuApp {
+    /// `about_to_wait`'s actual logic, factored out so it's callable from
+    /// a unit test without a live `ActiveEventLoop` (which can't be
+    /// constructed outside a running winit event loop) — `about_to_wait`
+    /// itself never reads its `_event_loop` parameter, so delegating to
+    /// this costs nothing. See [`WgpuApp::redraw_requested`]'s doc for why
+    /// this tick also doubles as that flag's sole consumer.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_about_to_wait_tick(&mut self) {
         self.frame_counter = self.frame_counter.saturating_add(1);
-        if self.resize_redraw_pump_armed() {
+        if self.resize_redraw_pump_armed() || self.redraw_requested {
             if let Some(state) = self.state.as_ref() {
                 state.window.request_redraw();
             }
         }
+        self.redraw_requested = false;
     }
 }
 
@@ -1432,6 +1485,74 @@ mod tests {
         app.set_ui_scale(2.0);
 
         assert_eq!(app.scene().viewport, before);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_marks_a_redraw_needed() {
+        // Review follow-up (#179): `set_ui_scale` rebuilds `self.scene`
+        // but, before this flag existed, nothing scheduled a repaint — on
+        // an idle window the previous frame stayed on screen indefinitely
+        // while hit-testing had already moved on to the new coordinates.
+        // `about_to_wait` is the only consumer of this flag (it has no
+        // `self` dependency other than plain data, so it's assertable
+        // here without a live winit window — see `arm_resize_redraw_pump`'s
+        // own tests for the same pattern on the sibling resize-jerk pump).
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        assert!(
+            !app.redraw_requested,
+            "must start false — nothing has changed yet"
+        );
+
+        app.set_ui_scale(2.0);
+
+        assert!(
+            app.redraw_requested,
+            "a real ui_scale change must mark a redraw needed"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_no_op_does_not_mark_a_redraw_needed() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+
+        app.set_ui_scale(1.0); // already the default — a no-op
+
+        assert!(
+            !app.redraw_requested,
+            "re-setting the already-active ui_scale must not spuriously \
+             request a redraw"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn about_to_wait_consumes_the_redraw_requested_flag() {
+        // Calls `on_about_to_wait_tick` directly — the real `about_to_wait`
+        // (the `ApplicationHandler` trait method) needs a live
+        // `&ActiveEventLoop`, which can't be constructed outside a
+        // running winit event loop, but it never reads that parameter;
+        // `on_about_to_wait_tick` is the same logic with that
+        // winit-specific plumbing factored out. `state` is `None` in this
+        // construction, so the actual `request_redraw()` call is skipped,
+        // same as every other test in this module — only the flag's
+        // one-shot consumption and the frame counter are asserted.
+        let mut app = WgpuApp::new(Scene::new(Size::new(800.0, 600.0)));
+        app.redraw_requested = true;
+        let before_frame_counter = app.frame_counter;
+
+        app.on_about_to_wait_tick();
+
+        assert!(
+            !app.redraw_requested,
+            "the flag must be a one-shot ask, cleared after being observed"
+        );
+        assert_eq!(
+            app.frame_counter,
+            before_frame_counter + 1,
+            "about_to_wait must still advance the frame counter (#101)"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

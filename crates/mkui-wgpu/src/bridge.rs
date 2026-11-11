@@ -33,6 +33,7 @@ use std::collections::HashMap;
 
 use mkui_core::error::MkuiError;
 use mkui_runtime::{AppTree, Node};
+use mkui_text::TextSystem;
 
 use crate::theme::WgpuTheme;
 use crate::types::{Color, Scene};
@@ -118,6 +119,14 @@ pub struct WgpuRenderCtx<'a> {
     /// gets for free from the browser (issue #205). `render_text` uses
     /// this when the text node itself sets no foreground role.
     pub current_foreground: Color,
+    /// The text system `render_text` measures wrapped line counts against
+    /// (#179 review follow-up) — the same one the later render pass
+    /// tessellates glyphs with, so a `Text` node's reserved rect height
+    /// and the real wrap it eventually draws can never disagree. Exposed
+    /// to custom renderers too, for the same reason `viewport_width` /
+    /// `cursor_y` are: an extension that lays out wrapped text should be
+    /// able to measure it the same way the built-in path does.
+    pub text_system: &'a dyn TextSystem,
 }
 
 /// Registry of custom-component handlers keyed by `type_name`. Built-in
@@ -399,6 +408,7 @@ mod tests {
     use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size};
     use mkui_runtime::AppTree;
+    use mkui_text::BitmapTextSystem;
 
     #[test]
     fn with_defaults_registers_builtin_atoms() {
@@ -481,6 +491,7 @@ mod tests {
         let theme = WgpuTheme::default();
         let mut scene = Scene::new(Size::new(100.0, 100.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
+        let text_system = BitmapTextSystem::new();
         let mut ctx = WgpuRenderCtx {
             tree: &tree,
             registry: &registry,
@@ -491,6 +502,7 @@ mod tests {
             cursor_y: 0.0,
             content_x: 0.0,
             current_foreground: theme.body_style().color,
+            text_system: &text_system,
         };
 
         let outcome = registry
@@ -544,6 +556,7 @@ mod tests {
         let theme = WgpuTheme::default();
         let mut scene = Scene::new(Size::new(100.0, 100.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
+        let text_system = BitmapTextSystem::new();
         let mut ctx = WgpuRenderCtx {
             tree: &tree,
             registry: &registry,
@@ -554,6 +567,7 @@ mod tests {
             cursor_y: 0.0,
             content_x: 0.0,
             current_foreground: theme.body_style().color,
+            text_system: &text_system,
         };
 
         registry

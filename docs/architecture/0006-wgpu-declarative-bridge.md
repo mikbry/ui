@@ -297,18 +297,50 @@ regardless of content length, and `tessellate_text`'s real wrap pass
 (`max_lines = floor(rect.height / line_height)`) silently drops every
 line after the first the moment a heading or body line wraps. This
 predates #179, but `ui_scale` makes it far easier to trigger in practice
-(the same way a narrow window already could), so it's fixed alongside:
-`render_text` now estimates how many lines content will wrap into
-(`estimate_text_line_count`, the same kind of best-effort,
-no-`TextSystem`-at-layout-time estimate `APPROX_CHAR_WIDTH_PX` already
-makes for a button's width) and reserves that many lines of height,
-advancing `cursor_y` by the full reserved height rather than always one
-line. It is an estimate, not a measurement — the walker has no
-`TextSystem` reference at layout time — so it can under- or over-reserve
-slightly; `menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix`
-(`walker.rs`) asserts the real wrap pass never produces more lines than
-the estimate reserved, across the full size x `ui_scale` matrix, for
-representative (not unbounded) content.
+(the same way a narrow window already could), so it's fixed alongside.
+A first revision estimated the line count from a character-per-line
+ratio (mirroring `APPROX_CHAR_WIDTH_PX`'s approach to a button's width);
+review caught that an estimate ignores word boundaries and explicit
+newlines, so it under-reserved for ordinary settings text (e.g.
+"Accessibility configuration preferences" at a narrow effective
+viewport) and truncated it — the exact bug class it was meant to fix.
+`render_text` now instead calls the real `layout()` method on the same
+[`mkui_text::TextSystem`] the later render pass tessellates glyphs
+with — `WalkOptions::text_system` (new field; threaded from `WgpuApp::
+text_system` at the one production call site in `try_rebuild_scene_from_tree`,
+and into `WgpuRenderCtx::text_system` for custom-renderer parity) — with
+the identical `LayoutSpec` `tessellate_text` builds, so the two can never
+disagree: whatever `render_text` reserves is exactly what the real wrap
+produces, for whichever face the host's text system actually renders
+with, not just the bitmap one a character-count estimate would have
+been (silently) tuned against.
+`render_text_never_under_reserves_height_for_a_wrapped_heading` (`walker.rs`)
+is the focused regression for the review's exact repro string/size/scale;
+`menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix`
+covers the broader size x `ui_scale` matrix for representative (not
+unbounded) content.
+
+Changing `ui_scale` mid-session on the winit-owned path also needs its
+own redraw scheduled: `resync_viewport_for_ui_scale_change` only
+replaces `self.scene` — nothing else repaints an idle window on its own.
+An earlier revision missed this entirely (the rebuild happened, but
+`about_to_wait` never got told to request one), so the previous frame
+stayed on screen indefinitely while the next `MouseInput` event was
+already hit-testing against the new, rescaled layout. Arming the full
+resize-jerk pump (#99/#101) here would be the wrong tool — a `ui_scale`
+change never touches the renderer/surface config, so there is no Metal
+swapchain transition to bridge, and that pump's 60-tick budget plus the
+macOS `CursorMoved` bridge window is far more than a single viewport
+recompute needs. `WgpuApp::set_ui_scale` instead sets a dedicated
+`redraw_requested` flag — pure data, so it's assertable in a unit test
+with no live winit window at all (`winit::event_loop::ActiveEventLoop`
+can't be constructed outside a running event loop, which is also why
+`about_to_wait`'s actual logic lives in a separate, parameter-free
+`on_about_to_wait_tick` the trait method just delegates to) — and
+`about_to_wait`/`on_about_to_wait_tick` is the sole consumer: it requests
+one redraw on its next tick, alongside the existing resize-pump check,
+then clears the flag unconditionally (a one-shot ask, not a standing
+need).
 
 ### First-paint render scheduling
 

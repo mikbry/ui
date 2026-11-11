@@ -72,11 +72,18 @@ breaking changes can land on minor bumps).
   so hit-testing never drifts out of sync with the layout once
   `ui_scale != 1.0`. `InputRouter::route`'s `scale_factor` contract is
   documented to expect the same combined factor. `walker.rs`'s
-  `render_text` also now reserves rect height for an *estimated* line
-  count instead of always exactly one line — otherwise a heading/body
-  line long enough to wrap (far more likely once `ui_scale` shrinks the
-  effective viewport) would have every line past the first silently
-  dropped by `tessellate_text`'s real wrap pass.
+  `render_text` also now reserves rect height for exactly as many lines
+  as `WalkOptions::text_system`'s own `layout()` call actually produces at
+  that width (the identical spec `tessellate_text` builds later, down to
+  the bitmap-only `font_id`) — not a character-count estimate, which an
+  earlier revision used and which ignored word boundaries and explicit
+  newlines, under-reserving for ordinary wrapped settings text and
+  silently truncating it. Live `set_ui_scale` changes on the winit-owned
+  path now also schedule a redraw (a dedicated one-shot
+  `redraw_requested` flag, consumed by `about_to_wait`) — an earlier
+  revision rebuilt the scene but requested no repaint at all, so the
+  previous frame stayed on screen indefinitely on an idle window while
+  hit-testing had already moved on to the new coordinates.
   - Scope decision: scoped to the non-wasm desktop target, matching the
     issue's own text (`~390x844 phone portrait... for the WASM/mobile gate
     tracked separately`, #180/E7) and this crate's existing

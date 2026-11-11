@@ -166,6 +166,7 @@ version = "0.10.0"
 dependencies = [
  "mkui-core",
  "mkui-runtime",
+ "mkui-text",
  "mkui-wgpu",
  "serde_json",
 ]

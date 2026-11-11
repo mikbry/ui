@@ -51,8 +51,10 @@ use mkui_core::error::MkuiError;
 use mkui_runtime::{
     ActionId, AppTree, ButtonVariant, ColorRole, NodeId, NodeKind, ResolvedStyle, TextVariant,
 };
+use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
+use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
 };
@@ -104,11 +106,17 @@ pub struct NodeLayout {
 /// `viewport` is the logical-pixel size of the surface to lay out
 /// against. `theme` is consumed by value so the walker can hand a
 /// shared `&WgpuTheme` to every node + extension renderer without
-/// threading a lifetime through every internal helper.
-#[derive(Debug, Clone, Copy)]
-pub struct WalkOptions {
+/// threading a lifetime through every internal helper. `text_system` is
+/// the same text system the later render pass tessellates glyphs with
+/// (#179 review follow-up) — `render_text` measures each node's real
+/// wrapped line count against it, so the rect height it reserves and
+/// what `tessellate_text` actually draws can never disagree. No `Debug`
+/// derive: `&dyn TextSystem` isn't `Debug`.
+#[derive(Clone, Copy)]
+pub struct WalkOptions<'a> {
     pub viewport: Size,
     pub theme: WgpuTheme,
+    pub text_system: &'a dyn TextSystem,
 }
 
 /// Output of one [`walk_app_tree`] pass: the freshly built scene, the
@@ -147,7 +155,7 @@ const VIEWPORT_OUTER_MARGIN_PX: f32 = 24.0;
 pub fn walk_app_tree(
     tree: &AppTree,
     registry: &WgpuRendererRegistry,
-    options: &WalkOptions,
+    options: &WalkOptions<'_>,
 ) -> Result<WalkOutput, MkuiError> {
     let mut scene = Scene::new(options.viewport);
     let mut hit_tests: Vec<HitTestEntry> = Vec::new();
@@ -166,6 +174,7 @@ pub fn walk_app_tree(
             cursor_y: VIEWPORT_OUTER_MARGIN_PX,
             content_x: VIEWPORT_OUTER_MARGIN_PX,
             current_foreground: options.theme.body_style().color,
+            text_system: options.text_system,
         };
 
         if let Some(root) = tree.get(tree.root()) {
@@ -365,17 +374,24 @@ fn render_text(
         ..body_style
     };
 
-    // #179: reserve enough vertical space for as many lines as the content
-    // is likely to wrap into at `content_width`, not always exactly one.
-    // `tessellate_text` caps the lines it actually draws at
-    // `floor(rect.height / line_height)` — a rect that's always exactly
-    // one `line_height` tall silently drops every line after the first the
-    // moment real wrapping kicks in, which gets far more likely once a
-    // narrow `content_width` (a small window, or a large `ui_scale`
-    // shrinking the effective viewport) forces a heading or body line to
-    // wrap. See `estimate_text_line_count`'s doc for why this is an
-    // estimate, not a measurement.
-    let line_count = estimate_text_line_count(&text.content, font_size, content_width);
+    // #179 (review follow-up): reserve exactly as many lines as the real
+    // text system produces at this width — not a character-count
+    // estimate. An estimate ignores word boundaries and explicit
+    // newlines, so it can (and did) under-reserve for ordinary settings
+    // text; `tessellate_text` caps the lines it actually draws at
+    // `floor(rect.height / line_height)`, so under-reserving silently
+    // drops the rest. `wrapped_line_count` calls the identical `layout`
+    // mkui-text method with the identical spec `tessellate_text` will use
+    // later (only `max_lines` differs, and that's derived FROM this
+    // rect's height) — same input, so the two passes can never disagree.
+    let line_count = wrapped_line_count(
+        ctx.text_system,
+        &text.content,
+        font_size,
+        line_height,
+        align,
+        content_width,
+    );
     let rect_height = line_height * line_count as f32;
 
     let rect = Rect::new(
@@ -397,26 +413,37 @@ fn render_text(
     ctx.cursor_y += rect_height;
 }
 
-/// Average glyph width, as a fraction of `font_size_px`, [`estimate_text_line_count`]
-/// uses to guess how many lines text will wrap into. The walker has no
-/// [`mkui_text::TextSystem`] reference at layout time — only the later
-/// `tessellate_text` pass does — so it cannot measure real glyph advances
-/// the way a real text system would; this is the same kind of best-effort
-/// estimate `APPROX_CHAR_WIDTH_PX` already makes for a button's width,
-/// scaled by font size since text (unlike a button label) spans a much
-/// wider size range (14px captions to 36px headings).
-const APPROX_TEXT_CHAR_WIDTH_RATIO: f32 = 0.55;
-
-/// Estimate how many lines `content` wraps into at `content_width` and
-/// `font_size` (#179) — see [`APPROX_TEXT_CHAR_WIDTH_RATIO`]'s doc for why
-/// this is an estimate, not a measurement, and `render_text`'s call site
-/// for why under-estimating matters (dropped lines, not just a layout
-/// nicety).
-fn estimate_text_line_count(content: &str, font_size: f32, content_width: f32) -> u32 {
-    let avg_char_width = (font_size * APPROX_TEXT_CHAR_WIDTH_RATIO).max(1.0);
-    let chars_per_line = (content_width.max(1.0) / avg_char_width).floor().max(1.0);
-    let char_count = content.chars().count() as f32;
-    (char_count / chars_per_line).ceil().max(1.0) as u32
+/// How many lines `text_system` actually wraps `content` into at
+/// `content_width` (#179 review follow-up — replaces an earlier
+/// character-count estimate). Builds the identical [`LayoutSpec`]
+/// `tessellation::tessellate_text` builds for the same `Text` primitive
+/// (down to the bitmap-only `font_id` — see that function's own comment
+/// for why), with `max_lines: None` so this call learns the *unclamped*
+/// line count rather than reproducing a clamp. `render_text`'s call site
+/// reserves that many lines of rect height, and `tessellate_text` later
+/// derives its own `max_lines` from that height — same text system, same
+/// spec, same width, so the two can never disagree.
+fn wrapped_line_count(
+    text_system: &dyn TextSystem,
+    content: &str,
+    font_size_px: f32,
+    line_height_px: f32,
+    align: TextAlign,
+    content_width: f32,
+) -> u32 {
+    let spec = LayoutSpec {
+        font_id: FontId::BITMAP,
+        font_generation: 0,
+        font_size_px,
+        line_height_px,
+        align: map_align(align),
+        max_lines: None,
+        hinting: HintingMode::None,
+        variations: VariationSettings::empty(),
+        synthesis_flags: 0,
+    };
+    let runs = text_system.layout(content, &spec, Some(content_width.max(1.0)));
+    (runs.len() as u32).max(1)
 }
 
 fn render_button(
@@ -586,12 +613,15 @@ mod tests {
     use crate::bridge::WgpuRendererRegistry;
     use crate::types::{Primitive, Size, Text as PrimitiveText};
     use mkui_core::components::{Button, Mkui as CoreMkui, Text as CoreText, View};
+    use mkui_text::BitmapTextSystem;
 
     fn walk(core: &CoreMkui) -> WalkOutput {
         let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
         let options = WalkOptions {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
+            text_system: &text_system,
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -632,6 +662,66 @@ mod tests {
         // Text node records a single layout entry.
         assert_eq!(out.layouts.len(), 1);
         assert_eq!(out.layouts[0].node, texts_first_node(&core));
+    }
+
+    /// Focused regression for the reviewer's #179 repro: a character-count
+    /// estimate reserved 2 lines for "Accessibility configuration
+    /// preferences" as a Heading1 at 1280x720 @ ui_scale 3 (viewport
+    /// 426.67x240, the same folding `WgpuApp::set_ui_scale` does), while
+    /// the real bitmap layout needs 3 — `tessellate_text`'s
+    /// `max_lines = floor(rect.height / line_height)` clamp then silently
+    /// dropped the third line. Asserts the walker's reserved height
+    /// matches the real, *unclamped* text-system layout exactly, so no
+    /// line can ever be clamped away — independent of what the exact
+    /// line count happens to be for this string/font/width combination.
+    #[test]
+    fn render_text_never_under_reserves_height_for_a_wrapped_heading() {
+        let viewport = Size::new(1280.0 / 3.0, 720.0 / 3.0);
+        let core = CoreMkui::new().child(
+            CoreText::new("Accessibility configuration preferences").variant(TextVariant::Heading1),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = WalkOptions {
+            viewport,
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+        };
+        let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
+
+        let text = text_primitives(&out.scene)[0];
+        let line_height = text.style.line_height_px.max(1.0);
+        let reserved_lines = ((text.rect.size.height / line_height).round() as usize).max(1);
+
+        let spec = LayoutSpec {
+            font_id: FontId::BITMAP,
+            font_generation: 0,
+            font_size_px: text.style.font_size_px,
+            line_height_px: line_height,
+            align: map_align(text.style.align),
+            max_lines: None,
+            hinting: HintingMode::None,
+            variations: VariationSettings::empty(),
+            synthesis_flags: 0,
+        };
+        let unclamped_runs = text_system.layout(&text.content, &spec, Some(text.rect.size.width));
+
+        assert!(
+            unclamped_runs.len() > 1,
+            "this repro must actually wrap into more than one line, or it \
+             isn't exercising the bug it regresses — got {} line(s) at \
+             width {}",
+            unclamped_runs.len(),
+            text.rect.size.width
+        );
+        assert_eq!(
+            reserved_lines,
+            unclamped_runs.len(),
+            "render_text reserved {reserved_lines} line(s) but the real, \
+             unclamped layout needs {} — tessellate_text's max_lines clamp \
+             would silently drop the rest",
+            unclamped_runs.len()
+        );
     }
 
     fn texts_first_node(core: &CoreMkui) -> NodeId {
@@ -739,9 +829,11 @@ mod tests {
 
     fn walk_with_theme(core: &CoreMkui, theme: WgpuTheme) -> WalkOutput {
         let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
         let options = WalkOptions {
             viewport: Size::new(800.0, 600.0),
             theme,
+            text_system: &text_system,
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -863,11 +955,6 @@ mod tests {
     /// smaller, the same way a narrow physical window already could.
     #[test]
     fn menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix() {
-        use crate::tessellation::map_align;
-        use mkui_text::{
-            BitmapTextSystem, FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings,
-        };
-
         let logical_sizes = [(1280.0_f32, 800.0_f32), (1280.0, 720.0), (3440.0, 1440.0)];
         let ui_scales = [1.0_f32, 2.0, 3.0];
         let text_system = BitmapTextSystem::new();
@@ -908,6 +995,7 @@ mod tests {
                 let options = WalkOptions {
                     viewport,
                     theme: WgpuTheme::default(),
+                    text_system: &text_system,
                 };
                 let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
 
