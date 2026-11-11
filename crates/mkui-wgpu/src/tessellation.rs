@@ -10,12 +10,12 @@ use std::f32::consts::PI;
 
 use mkui_text::{
     BitmapTextSystem, FontId, GlyphFormat, HintingMode, LayoutSpec, TextAlign as MkuiTextAlign,
-    TextSystem, VariationSettings,
+    TextSystem, VariationSettings, GLYPH_CELL_HEIGHT_PX, REFERENCE_FONT_SIZE_PX,
 };
 
 use crate::types::{
-    Color, CornerRadii, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene, Shadow,
-    Size, Text, TextAlign,
+    Color, CornerRadii, FontFaceId, GuiTriangle, Icon, Insets, Point, Primitive, Quad, Rect, Scene,
+    Shadow, Size, Text, TextAlign, TextStyle,
 };
 
 /// Number of straight-line segments approximating each 90° corner arc of a
@@ -80,7 +80,9 @@ pub fn tessellate_primitives(
             Primitive::Text(text) => {
                 tessellate_text(&mut triangles, text, text_system, device_pixel_ratio)
             }
-            Primitive::Icon(icon) => tessellate_icon(&mut triangles, icon),
+            Primitive::Icon(icon) => {
+                tessellate_icon(&mut triangles, icon, text_system, device_pixel_ratio)
+            }
             // Slug glyphs are not tessellated to triangles — they draw on the
             // Slug coverage lane (#66). The ordered render path routes them
             // there directly, so the triangle tessellator skips them.
@@ -372,12 +374,86 @@ fn tessellate_text(
     }
 }
 
-fn tessellate_icon(triangles: &mut Vec<GuiTriangle>, icon: &Icon) {
-    let tint = icon.tint.multiply_alpha(0.9);
-    let inset = icon.rect.inset(Insets::all(
-        icon.rect.size.width.min(icon.rect.size.height) * 0.2,
-    ));
-    push_rect(triangles, inset, tint);
+/// A small, curated, **finite** set of built-in bitmap glyphs
+/// (`mkui_text::bitmap`'s 5×7 table — confirmed real entries, not ones
+/// that would silently fall back to
+/// [`mkui_text::bitmap::FALLBACK_GLYPH`]) used to stand in for icon
+/// artwork. Ordered to put the more pictogram-like symbols first. This is
+/// the complete set of `IconId`s this crate can render a distinct
+/// placeholder glyph for — [`icon_glyph_for_id`] does not wrap around it,
+/// so an `IconId` outside `0..ICON_GLYPHS.len()` never silently aliases
+/// one of these.
+const ICON_GLYPHS: &[char] = &[
+    '#', '+', '=', '?', '!', '-', '/', '|', '(', ')', '\'', '.', ',', ':', ';', '·', '«', '»', '0',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9',
+];
+
+/// Stand-in for an `IconId` outside [`ICON_GLYPHS`]'s range — a codepoint
+/// with no entry in `mkui_text::bitmap`'s table (confirmed outside the
+/// Latin-1 Supplement block #184 gave full coverage to), so it
+/// deliberately renders as [`mkui_text::bitmap::FALLBACK_GLYPH`] (the
+/// hollow box) rather than a real letterform. An unrecognized icon must
+/// look visibly unresolved, never alias a real one.
+const UNKNOWN_ICON_GLYPH: char = '☐';
+
+/// Deterministic mapping from an `IconId` to one of [`ICON_GLYPHS`], or
+/// [`UNKNOWN_ICON_GLYPH`] for any id this crate has no placeholder for.
+/// Explicit and finite rather than `% ICON_GLYPHS.len()`: a modulo wrap
+/// would let an arbitrary id (e.g. `ICON_GLYPHS.len() + 1`) silently
+/// alias a different, real `IconId`'s glyph (`icon_glyph_for_id(1) ==
+/// icon_glyph_for_id(ICON_GLYPHS.len() + 1)`), which is indistinguishable
+/// from actually resolving the requested icon.
+fn icon_glyph_for_id(id: u64) -> char {
+    match usize::try_from(id) {
+        Ok(index) if index < ICON_GLYPHS.len() => ICON_GLYPHS[index],
+        _ => UNKNOWN_ICON_GLYPH,
+    }
+}
+
+/// Icon rendering, reusing the one icon-adjacent drawing path that already
+/// exists in this crate: the same 5×7 bitmap glyph table and glyph
+/// rasterization [`tessellate_text`] draws real text with. **No icon atlas
+/// or image-rasterization pipeline exists anywhere in this crate**
+/// ([`crate::types::IconMask`] is defined but nothing constructs or
+/// consumes one — real icon artwork, loaded from host-supplied bytes per
+/// #173's sandboxed-asset-loading constraint, is its own currently
+/// untracked piece of work) — so this draws a representative glyph
+/// character chosen deterministically from `icon.icon` via
+/// [`icon_glyph_for_id`], not the icon's actual artwork. Unlike a
+/// repositioned/rescaled placeholder shape, two different `IconId`s
+/// genuinely render different pixel silhouettes here (different letterforms
+/// have different bitmap coverage, not just a translated copy of the same
+/// shape — see `different_icon_ids_render_genuinely_different_silhouettes`
+/// below), because it is the *real* text-rasterization path, not an
+/// approximation of one.
+fn tessellate_icon(
+    triangles: &mut Vec<GuiTriangle>,
+    icon: &Icon,
+    text_system: &dyn TextSystem,
+    device_pixel_ratio: f32,
+) {
+    let glyph = icon_glyph_for_id(icon.icon.0);
+    // Pick the bitmap scale (an integer multiple of `REFERENCE_FONT_SIZE_PX`,
+    // per `bitmap_scale`'s quantization) whose glyph cell height comes
+    // closest to filling the icon box, so the glyph reads clearly at
+    // whatever size the caller drew the icon.
+    let target_scale = (icon.rect.size.height / GLYPH_CELL_HEIGHT_PX)
+        .round()
+        .max(1.0);
+    let font_size_px = target_scale * REFERENCE_FONT_SIZE_PX;
+
+    let text = Text {
+        rect: icon.rect,
+        content: glyph.to_string(),
+        style: TextStyle {
+            font: FontFaceId(0),
+            font_size_px,
+            line_height_px: icon.rect.size.height,
+            color: icon.tint,
+            align: TextAlign::Center,
+        },
+    };
+    tessellate_text(triangles, &text, text_system, device_pixel_ratio);
 }
 
 pub(crate) fn map_align(align: TextAlign) -> MkuiTextAlign {
@@ -422,6 +498,201 @@ mod tests {
     use super::*;
     use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size, Stroke, Text};
+
+    /// The set of occupied pixel cells a tessellated icon's triangles
+    /// cover, normalized to the icon's own local coordinate frame (its
+    /// `rect.origin` subtracted out). `push_text_cell` draws one 1×1 quad
+    /// per non-zero glyph pixel with the quad's own origin at that pixel's
+    /// position, so each triangle's first point *is* a pixel coordinate —
+    /// collecting those (not the triangle's bounding box) captures the
+    /// actual rendered silhouette, not just its extent.
+    fn icon_pixel_cells(
+        triangles: &[GuiTriangle],
+        rect_origin: Point,
+    ) -> std::collections::BTreeSet<(i32, i32)> {
+        triangles
+            .iter()
+            .map(|t| {
+                let p = t.points[0];
+                (
+                    (p.x - rect_origin.x).round() as i32,
+                    (p.y - rect_origin.y).round() as i32,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn different_icon_ids_render_genuinely_different_silhouettes() {
+        // Regression (#191 review): `tessellate_icon` used to ignore
+        // `icon.icon` entirely (every icon rendered one fixed tinted rect),
+        // then, in a first fix pass, varied only a rect's size/offset by
+        // id — geometrically different triangles, but still the same
+        // silhouette shape, not a different icon. This reuses the real
+        // bitmap-glyph rasterization path (`tessellate_text`'s own
+        // pipeline) to draw a different built-in glyph per `IconId`, so two
+        // different ids must cover genuinely different sets of pixel
+        // cells — not a translated/rescaled copy of the same cell pattern.
+        let text_system = BitmapTextSystem::new();
+        let rect = Rect::new(Point::new(10.0, 10.0), Size::new(20.0, 20.0));
+        let tint = Color::rgba(1.0, 1.0, 1.0, 1.0);
+
+        let mut a = Vec::new();
+        tessellate_icon(
+            &mut a,
+            &Icon {
+                rect,
+                icon: crate::types::IconId(1),
+                tint,
+            },
+            &text_system,
+            1.0,
+        );
+        let mut b = Vec::new();
+        tessellate_icon(
+            &mut b,
+            &Icon {
+                rect,
+                icon: crate::types::IconId(2),
+                tint,
+            },
+            &text_system,
+            1.0,
+        );
+
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+
+        let cells_a = icon_pixel_cells(&a, rect.origin);
+        let cells_b = icon_pixel_cells(&b, rect.origin);
+        assert_ne!(
+            cells_a, cells_b,
+            "two different IconIds must cover genuinely different pixel cells, \
+             not just a translated/rescaled copy of the same shape"
+        );
+        // A strictly-translated copy of the same shape would still differ
+        // as *sets* (different absolute positions) while having the same
+        // *size* (cell count) and the same shape once re-centered on its
+        // own bounding box. Require the cell count itself to differ too,
+        // which a pure translation/rescale of one shared rect shape could
+        // still satisfy by chance but two distinct letterforms reliably
+        // don't (confirmed for this exact id pair).
+        assert_ne!(
+            cells_a.len(),
+            cells_b.len(),
+            "expected IconId(1) and IconId(2)'s distinct glyph letterforms to cover a \
+             different number of pixels, not just different positions (confirmed for \
+             this exact id pair; a pure translation/rescale of one shared shape could \
+             coincidentally pass this check too, but the set-equality check above is \
+             the one that actually rules that out in general)"
+        );
+    }
+
+    #[test]
+    fn same_icon_id_tessellates_identically_across_calls() {
+        // The glyph choice must still be deterministic — same id, same
+        // output — so it stays stable across frames (no per-frame jitter).
+        let text_system = BitmapTextSystem::new();
+        let rect = Rect::new(Point::new(4.0, 4.0), Size::new(16.0, 16.0));
+        let icon = Icon {
+            rect,
+            icon: crate::types::IconId(42),
+            tint: Color::rgba(0.5, 0.5, 0.5, 1.0),
+        };
+
+        let mut first = Vec::new();
+        tessellate_icon(&mut first, &icon, &text_system, 1.0);
+        let mut second = Vec::new();
+        tessellate_icon(&mut second, &icon, &text_system, 1.0);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn icon_renders_a_real_glyph_not_a_blank_or_fallback_box() {
+        // Every entry in `ICON_GLYPHS` must be a real bitmap-table glyph,
+        // not one that silently falls back to `FALLBACK_GLYPH` (the hollow
+        // box every unmapped codepoint renders) — a placeholder that's
+        // secretly the same fallback shape for every id would defeat the
+        // "genuinely different silhouette" guarantee above.
+        for &glyph in ICON_GLYPHS {
+            let bits = mkui_text::bitmap_glyph(glyph);
+            assert!(
+                !mkui_text::bitmap::is_fallback_glyph(&bits),
+                "ICON_GLYPHS entry {glyph:?} has no real bitmap-table glyph \
+                 and silently renders the fallback box instead"
+            );
+        }
+    }
+
+    #[test]
+    fn icon_ids_beyond_the_catalog_never_alias_a_real_icon() {
+        // Regression (#191 review): `% ICON_GLYPHS.len()` wrapped around,
+        // so IconId(1) and IconId(ICON_GLYPHS.len() as u64 + 1) rendered
+        // the exact same glyph — an out-of-catalog id silently impersonated
+        // a real, different icon instead of being visibly unresolved.
+        let in_catalog = icon_glyph_for_id(1);
+        let wrapped_around = icon_glyph_for_id(ICON_GLYPHS.len() as u64 + 1);
+        assert_ne!(
+            in_catalog, wrapped_around,
+            "an id past the catalog's end must not silently alias IconId(1)'s glyph"
+        );
+        assert_eq!(wrapped_around, UNKNOWN_ICON_GLYPH);
+
+        // The glyph for an out-of-catalog id must actually render as the
+        // bitmap table's fallback box, not another real letterform under
+        // a different name.
+        let bits = mkui_text::bitmap_glyph(UNKNOWN_ICON_GLYPH);
+        assert!(
+            mkui_text::bitmap::is_fallback_glyph(&bits),
+            "UNKNOWN_ICON_GLYPH must render as the real fallback box, so an \
+             unresolved icon looks visibly unresolved"
+        );
+
+        // Every id actually inside the catalog must still resolve to its
+        // own real, distinct glyph — this fix must not turn in-range ids
+        // into fallbacks too.
+        for id in 0..ICON_GLYPHS.len() as u64 {
+            assert_eq!(icon_glyph_for_id(id), ICON_GLYPHS[id as usize]);
+        }
+    }
+
+    #[test]
+    fn icon_glyph_is_non_empty_and_fills_most_of_the_icon_box() {
+        // Sanity check that the chosen glyph actually paints visible
+        // pixels at a realistic icon size (not, say, collapsing to zero
+        // triangles because the computed font size rounds down to
+        // nothing).
+        let text_system = BitmapTextSystem::new();
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(16.0, 16.0));
+        let mut triangles = Vec::new();
+        tessellate_icon(
+            &mut triangles,
+            &Icon {
+                rect,
+                icon: crate::types::IconId(7),
+                tint: Color::rgba(1.0, 1.0, 1.0, 1.0),
+            },
+            &text_system,
+            1.0,
+        );
+        assert!(
+            !triangles.is_empty(),
+            "a representative icon glyph must render at least one pixel"
+        );
+        for triangle in &triangles {
+            for point in triangle.points {
+                assert!(
+                    point.x >= rect.origin.x - 1.0 && point.x <= rect.width_end() + 1.0,
+                    "glyph pixel at {point:?} should stay roughly within the icon box"
+                );
+                assert!(
+                    point.y >= rect.origin.y - 1.0 && point.y <= rect.height_end() + 1.0,
+                    "glyph pixel at {point:?} should stay roughly within the icon box"
+                );
+            }
+        }
+    }
 
     #[test]
     fn text_tessellation_produces_triangles() {

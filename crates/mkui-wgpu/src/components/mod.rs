@@ -22,12 +22,13 @@
 //!   These take pre-resolved `PanelStyle` / `ButtonStyle` values and are the
 //!   escape hatch when a caller needs a one-off style that isn't in the theme.
 //! - **variant-driven widgets** — [`card`], [`button`], [`text_field`],
-//!   [`text_field_editable`], [`slider`], [`chip_group`], [`scrollbar`],
-//!   [`scroll_area`], [`swatch`], [`heading`], [`text`], [`info_list`],
-//!   [`toast_stack`], [`toast_history`], [`dialog`], [`titled_dialog`].
-//!   Each takes a variant / size / state and pulls concrete colors from
-//!   the theme. This is the layer view code calls.
-//! - **atoms** — [`badge`], [`dot`]. Self-contained shadcn-aligned signals.
+//!   [`text_field_editable`], [`slider`], [`progress_bar`], [`chip_group`],
+//!   [`scrollbar`], [`scroll_area`], [`swatch`], [`heading`], [`text`],
+//!   [`info_list`], [`toast_stack`], [`toast_history`], [`dialog`],
+//!   [`titled_dialog`]. Each takes a variant / size / state and pulls
+//!   concrete colors from the theme. This is the layer view code calls.
+//! - **atoms** — [`badge`], [`dot`], [`counter_chip`]. Self-contained
+//!   shadcn-aligned signals.
 //!
 //! Built-in components registered with `WgpuRendererRegistry` (see `bridge.rs`)
 //! cover the shadcn-aligned atoms; custom components register via
@@ -40,10 +41,12 @@ mod badge;
 mod button;
 mod card;
 mod chip_group;
+mod counter_chip;
 mod dialog;
 mod dot;
 mod info_list;
 mod panel;
+mod progress_bar;
 mod scroll_area;
 mod scrollbar;
 mod slider;
@@ -56,10 +59,12 @@ pub use badge::badge;
 pub use button::{button, button_with, ButtonRegions, MIN_TOUCH_TARGET_PX};
 pub use card::card;
 pub use chip_group::chip_group;
+pub use counter_chip::{counter_chip, CounterChipRegions};
 pub use dialog::{dialog, titled_dialog};
 pub use dot::dot;
 pub use info_list::info_list;
 pub use panel::{panel, titled_panel};
+pub use progress_bar::progress_bar;
 pub use scroll_area::{scroll_area, ScrollAreaRegions};
 pub use scrollbar::scrollbar;
 pub use slider::{slider, SliderRegions};

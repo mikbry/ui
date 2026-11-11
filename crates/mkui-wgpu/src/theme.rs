@@ -231,6 +231,40 @@ pub struct SliderStyle {
     pub hit_padding: f32,
 }
 
+/// Concrete, resolved progress-bar look-and-feel (#191, C6 of #173). Shares
+/// its track/fill shape with [`SliderStyle`] minus the thumb — a progress
+/// bar is non-interactive, so there is nothing to grab.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProgressBarStyle {
+    pub track_fill: Color,
+    pub track_stroke: Color,
+    pub track_stroke_width: f32,
+    pub corner_radius: f32,
+    pub filled_fill: Color,
+}
+
+/// Concrete, resolved counter-chip look-and-feel (#191, C6 of #173). A
+/// single fixed look (no variant axis) — like [`SliderStyle`] /
+/// [`ScrollbarStyle`], this atom doesn't need a cva-style variant/size pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CounterChipStyle {
+    pub chip_fill: Color,
+    pub chip_stroke: Color,
+    pub chip_stroke_width: f32,
+    pub corner_radius: f32,
+    pub padding: Insets,
+    pub icon_tint: Color,
+    pub count_style: TextStyle,
+    pub tooltip_fill: Color,
+    pub tooltip_stroke: Color,
+    pub tooltip_stroke_width: f32,
+    pub tooltip_corner_radius: f32,
+    pub tooltip_padding: Insets,
+    pub tooltip_text_style: TextStyle,
+    /// Vertical gap between the chip's top edge and the tooltip bubble.
+    pub tooltip_gap: f32,
+}
+
 /// Concrete, resolved text input look-and-feel. This is a lightweight
 /// shadcn "Input" analogue for immediate-mode UI fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -540,6 +574,52 @@ impl WgpuTheme {
             thumb_stroke: self.tokens.surface,
             thumb_diameter: 14.0,
             hit_padding: 8.0,
+        }
+    }
+
+    /// Default progress-bar look. Shares its track tone + fill tint with
+    /// [`Self::slider`] so a panel that mixes both widgets reads as one
+    /// family.
+    pub fn progress_bar(&self) -> ProgressBarStyle {
+        ProgressBarStyle {
+            track_fill: self.tokens.surface_sunken,
+            track_stroke: self.tokens.border.with_alpha(0.18),
+            track_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_tight,
+            filled_fill: self.tokens.primary.with_alpha(0.88),
+        }
+    }
+
+    /// Default counter-chip look: a secondary-toned pill for the icon+count
+    /// body, and a darker surface-toned bubble for the hover/focus tooltip.
+    pub fn counter_chip(&self) -> CounterChipStyle {
+        let count_style = TextStyle {
+            align: TextAlign::Start,
+            color: self.tokens.secondary_foreground,
+            ..self.body_style()
+        };
+        let tooltip_text_style = TextStyle {
+            align: TextAlign::Center,
+            color: self.tokens.surface_foreground,
+            font_size_px: 11.0,
+            line_height_px: 14.0,
+            ..self.body_style()
+        };
+        CounterChipStyle {
+            chip_fill: self.tokens.secondary,
+            chip_stroke: self.tokens.border.with_alpha(0.22),
+            chip_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_relaxed,
+            padding: Insets::symmetric(8.0, 4.0),
+            icon_tint: self.tokens.secondary_foreground,
+            count_style,
+            tooltip_fill: self.tokens.surface,
+            tooltip_stroke: self.tokens.border,
+            tooltip_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            tooltip_corner_radius: self.tokens.spacing.radius_compact,
+            tooltip_padding: Insets::symmetric(6.0, 3.0),
+            tooltip_text_style,
+            tooltip_gap: 6.0,
         }
     }
 
@@ -1028,6 +1108,8 @@ mod tests {
         assert_ne!(default_theme.card(), swapped.card());
         assert_ne!(default_theme.card_selected(), swapped.card_selected());
         assert_ne!(default_theme.slider(), swapped.slider());
+        assert_ne!(default_theme.progress_bar(), swapped.progress_bar());
+        assert_ne!(default_theme.counter_chip(), swapped.counter_chip());
         assert_ne!(default_theme.input(true), swapped.input(true));
         assert_ne!(default_theme.input(false), swapped.input(false));
         assert_ne!(default_theme.scrollbar(), swapped.scrollbar());

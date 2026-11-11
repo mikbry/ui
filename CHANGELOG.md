@@ -204,6 +204,118 @@ breaking changes can land on minor bumps).
     criteria cover selection + activation only; `disabled` wasn't asked for
     and can be added alongside `Button`'s existing `disabled` precedent if
     a future issue needs it.
+- **`mkui-wgpu::components::{progress_bar, counter_chip}` — determinate
+  progress bar and icon+count chip with a hover/focus tooltip (#191, C6 of
+  #173).** `progress_bar` draws a track plus a proportionally filled portion
+  (the `slider` shape minus the thumb — non-interactive, nothing to grab);
+  `fraction` clamps to `[0.0, 1.0]`, with the 0%/100% edge cases covered
+  explicitly (0% emits the track only, no degenerate zero-width fill quad;
+  100% fills flush with the track's own rect and corner radius). `counter_chip`
+  draws an icon (an `IconId` handle placed via the existing `Icon` scene
+  primitive — rasterizing it stays a renderer concern), a count label, and,
+  while the caller-supplied `hovered` or `focused` flag is `true`, a tooltip
+  bubble above the chip — clamped to `scene.viewport` so it flips below the
+  chip and clamps horizontally rather than running off-screen for a HUD
+  counter pinned to a screen edge. Both resolve through new
+  `WgpuTheme::progress_bar` / `WgpuTheme::counter_chip` methods
+  (`ProgressBarStyle` / `CounterChipStyle`), following the existing
+  variant-free atom shape `SliderStyle`/`ScrollbarStyle` already use.
+  - Scope decision: the issue's "Builds on" note asks whether the counter
+    chip is better framed as extending `chip_group`. `chip_group` is a
+    pick-one-of-many row of toggle options (one `HitRegion` per option, a
+    selected index); a counter chip is a single, non-toggling icon+count
+    readout — a different shape, not a row of options — so it ships as a
+    new atom (mirroring `badge`/`dot`) instead.
+  - Scope decision: `hovered` and `focused` are two separate caller-supplied
+    booleans, not one OR'd flag — the acceptance criterion is "hover **or**
+    focus," and a host routing keyboard/gamepad focus has no pointer
+    position of its own to fold into a single bool.
+  - Scope decision: the tooltip bubble drawn here is a minimal inline pill,
+    not the general-purpose `Tooltip` atom tracked separately by #192 (C7 of
+    #173, not yet implemented — confirmed via `miky issue view 192`). Once
+    #192 lands, `counter_chip` should delegate to it instead of drawing its
+    own bubble (noted on #192 for whoever picks it up).
+  - The tooltip bubble is sized from `mkui-text::bitmap`'s own
+    `bitmap_scale`/`measure_line_width` formula — the same font-load-free
+    math `tessellate_text`'s default `BitmapTextSystem` lays glyphs out
+    with — not a guessed character width, so the bubble matches what the
+    renderer actually draws. A headless test tessellates a real scene and
+    checks the tooltip text's rendered pixel extent against the bubble
+    rect to prove it.
+  - Review fix: the text width handed to `label()` carried a small
+    round-trip float error (computed by adding the tooltip padding onto the
+    measured width, then `inset()`-subtracting the same padding back off
+    the bubble — float addition isn't exactly invertible). `max_glyphs_for_width`
+    does a hard `floor()` right at that width's own boundary, so even a
+    sub-ULP shortfall dropped a whole trailing glyph — reproduced at 16- and
+    31-character tooltips (2 and 10 were a *second*, now-removed source of
+    error from the same inset round trip). Fixed by building the text rect
+    directly from the measured width (no inset-reconstruction) plus a fixed
+    0.5px safety margin absorbing any remaining float error in
+    `measure_line_width`/`max_glyphs_for_width`'s own round trip — far
+    smaller than one glyph's ~5-6px advance, so it never makes a narrower
+    string falsely fit. A test sweeps tooltip lengths 1..=64 asserting the
+    measured width always fits every character, plus an end-to-end test at
+    the four reported lengths checking the rendered `Text` primitive still
+    carries the full string.
+  - Review fix: the viewport clamp only constrained the bubble's *origin*,
+    so a bubble wider/taller than the viewport (a long sentence, or flipping
+    below a top-aligned chip in a short viewport) still had its far edge
+    run off-screen. Fixed by capping `bubble_width`/`bubble_height` to the
+    viewport *before* positioning (a tooltip too wide for the screen now
+    relies on `mkui-text`'s existing wrap/ellipsis path rather than drawing
+    an oversized bubble), then clamping both `bubble_x` and `bubble_y` into
+    `[0, viewport - bubble]`. Regression tests cover both reported
+    scenarios directly.
+  - Scope decision: neither atom gets a visual showcase wiring in this PR.
+    `slider`/`chip_group`/`scrollbar`/`swatch` ship the same way — unit-tested
+    scene builders with no example call site — and get wired into a demo
+    only once a panel actually needs them; `progress_bar`/`counter_chip`
+    follow that same precedent. The "renders correctly" acceptance bar is
+    covered instead by headless tests that tessellate through
+    `tessellate_scene` (the same path every example renders with) and
+    assert non-empty, finite, correctly-bounded output; visual wiring into
+    an actual host demo is deferred to #173's step-4 "full desktop-host
+    acceptance pass."
+  - Both atoms are `Quad`/`Text`/`Icon` primitives only — no `slug`-feature
+    vector-path fork — matching `slider`/`badge`/`chip_group`'s current
+    (not-yet-migrated) shape.
+  - Review fix: `tessellate_icon` ignored `Icon::icon` entirely and always
+    drew the same tinted inset rect, so two `counter_chip`s requesting
+    different icons rendered byte-identical triangles. A first fix pass
+    varied the placeholder rect's size/offset by a hash of `IconId` —
+    geometrically different triangles, but still the same silhouette
+    shape, not a genuinely different icon. No icon atlas or image
+    rasterization pipeline exists anywhere in this crate (`IconMask` is
+    defined in `types.rs` but nothing constructs or consumes one —
+    confirmed by grep), so real icon artwork stays separate, currently
+    untracked work. What's fixed now: `tessellate_icon` reuses the one
+    icon-adjacent drawing path that *does* already exist — the same 5×7
+    bitmap glyph table and rasterization `tessellate_text` draws real text
+    with — to render a representative glyph character chosen
+    deterministically per `IconId` from a curated set of built-in symbols
+    (`#`, `+`, digits, punctuation, …). Two different icons now render
+    genuinely different pixel silhouettes (different letterforms have
+    different bitmap coverage), not a translated/rescaled copy of one
+    shared shape. Tests cover: two ids render different *sets* of pixel
+    cells (not just a translated copy, and not just a different cell
+    *count* either — both checked); the same id stays deterministic across
+    calls; every curated glyph resolves to a real table entry, never the
+    hollow-box fallback every unmapped codepoint would otherwise render.
+  - Review fix: the truncation regression test
+    (`tooltip_text_is_never_truncated_end_to_end_at_flagged_lengths`) used
+    to check the stored `Text.content` source string — but `label()`
+    always stores the full original string regardless of what the renderer
+    later does with it; wrapping/ellipsizing happens inside
+    `tessellate_text` at tessellation time and never mutates the
+    primitive. Checking `Text.content` would have passed even while the
+    truncation bug was live, since the bug truncated what got *drawn*, not
+    what got *stored*. Rewritten to tessellate the real scene and compare
+    the actual rendered pixel-width of the tooltip glyphs against the full
+    string's expected geometric width — verified to actually fail (at
+    85.4px rendered vs. 92px expected for the 16-char case) when the
+    measurement-margin fix above is reverted, confirming it now catches
+    the regression it claims to.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which
