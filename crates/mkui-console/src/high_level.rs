@@ -219,6 +219,22 @@ impl Mkui {
                         current_row += 1;
                     }
                 }
+                Line::MenuListItem { label, selected } => {
+                    // Acceptance criterion #2 of #189: the current
+                    // selection must be visually distinct. A leading
+                    // marker (">"/" ") keeps the row legible even without
+                    // color (no-color terminals, piped output); the
+                    // inverse-video style is the color-terminal cue on
+                    // top of that.
+                    if *selected {
+                        let text = format!("> {label}");
+                        renderer.print_styled(4, current_row, text.black().on_white().bold())?;
+                    } else {
+                        let text = format!("  {label}");
+                        renderer.print_styled(4, current_row, text.dark_grey())?;
+                    }
+                    current_row += 1;
+                }
             }
         }
 

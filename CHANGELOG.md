@@ -171,13 +171,35 @@ breaking changes can land on minor bumps).
   `Tab`/`Escape`, so it composes with a future modal dialog's focus trap
   (#188) without fighting it — the trap can own those keys for cycling and
   dismiss while `MenuList` only moves its own selection.
-  - Scope decision: shipped as headless-only logic (state machine +
-    builder), matching the existing completeness level of `Toggle` (#190,
-    also headless-only). Cross-backend `AppTree` lowering/rendering —
-    the treatment `Button`/`Text`/`View` already have — is not part of
-    this issue's behavior-focused acceptance criteria and is deferred to
-    whenever a backend wires menu rendering, consistent with how `Toggle`
-    was left.
+
+  **`mkui_core::components::MenuList` — cross-platform lowering + a
+  rendered console demo**, added after review flagged that the headless
+  state machine alone left the "current selection is visually distinct"
+  criterion unverified (no renderer consumed `is_selected`). `MenuList`
+  lowers through the `NodeKind::Custom` extension slot (`type_name =
+  "menu_list"`, mirroring the `TestWidget` extension proof) rather than a
+  new `NodeKind` variant, so it doesn't ripple into every backend's
+  exhaustive match. `mkui-console`'s `walk_tree` decodes `"menu_list"`
+  nodes into one `Line::MenuListItem { label, selected }` row per item, and
+  `high_level::Mkui::render` gives the selected row a `> ` marker plus
+  inverse-video styling versus a plain, dimmed `  ` row for the rest —
+  visible by running `cargo run -p mkui-console --example menu_list`.
+  Covered by tests asserting the indicator lands on the selected row (and
+  only that row) and moves when `selected_index` changes.
+  - Scope decision: rendering is wired for `mkui-console` only. `mkui-web` /
+    `mkui-wgpu` would each need their own `"menu_list"` handler in their
+    own `Custom`-node registries (`WebRendererRegistry` /
+    `WgpuRendererRegistry`) — not filed as a follow-up issue, since #189's
+    acceptance criteria don't name a specific backend and console is
+    sufficient to verify the visual-distinction criterion end to end.
+  - Scope decision: the console demo renders statically (`selected_index`
+    fixed at construction) rather than wiring `ArrowUp`/`ArrowDown`/`Enter`
+    into `mkui-console`'s interactive run loop. That loop currently tracks
+    selection only across `Line::Button` rows (`ConsoleApp::select_prev`/
+    `select_next`); merging a second, independent selection cursor for
+    `MenuList` rows is live-navigation plumbing, not the rendering gap the
+    review flagged, and the headless `MenuList`'s own navigation is already
+    fully tested independent of any renderer.
   - Scope decision: no per-item `disabled` state. The issue's acceptance
     criteria cover selection + activation only; `disabled` wasn't asked for
     and can be added alongside `Button`'s existing `disabled` precedent if

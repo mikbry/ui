@@ -193,7 +193,7 @@ fn headless_menu_list_keyboard_navigation_wraps_and_confirms() {
     let selected = Rc::new(Cell::new(None));
     let selected_in = Rc::clone(&selected);
 
-    let mut menu = MenuList::builder()
+    let mut menu = HeadlessMenuList::builder()
         .item("New Game")
         .item("Continue")
         .item("Quit")

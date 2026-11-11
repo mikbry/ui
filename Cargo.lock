@@ -1033,6 +1033,7 @@ dependencies = [
  "crossterm",
  "mkui-core",
  "mkui-runtime",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

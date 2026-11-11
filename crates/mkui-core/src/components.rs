@@ -40,6 +40,7 @@ use std::rc::Rc;
 use mkui_runtime::{
     ActionId, AppTree, ButtonVariant, ClassParseError, NodeId, StyleClass, TextVariant,
 };
+use serde_json::json;
 
 /// Marker trait for every renderable component.
 ///
@@ -107,6 +108,7 @@ impl LoweringRegistry {
         reg.register::<View>();
         reg.register::<Text>();
         reg.register::<Button>();
+        reg.register::<MenuList>();
         reg
     }
 
@@ -505,6 +507,104 @@ impl LowerToTree for Button {
     }
 }
 
+// -------------------------------------------------------------------------
+// MenuList — keyboard/gamepad-selectable list (#189, C4 of #173)
+// -------------------------------------------------------------------------
+
+/// Cross-platform `MenuList` component — a title-screen/pause-style list
+/// with one current selection.
+///
+/// Unlike [`View`]/[`Text`]/[`Button`], `MenuList` lowers through the
+/// [`NodeKind::Custom`](mkui_runtime::NodeKind::Custom) extension slot
+/// (`type_name = "menu_list"`) rather than a dedicated `NodeKind` variant —
+/// `NodeKind` is not `#[non_exhaustive]`, so a new built-in variant would
+/// break every backend's exhaustive match (console, web, wgpu, C, Python,
+/// the snapshot code). `Custom` is the designated extension point for
+/// exactly this (see the `TestWidget` proof in
+/// `crates/mkui-core/tests/parity.rs`); each backend decides for itself
+/// whether/how to render a `"menu_list"` node (`mkui-console` does, as of
+/// this issue — see `mkui_console::components::walk_tree`).
+///
+/// This is the tree-lowering builder; the keyboard/gamepad navigation
+/// state machine lives in [`crate::headless::MenuList`] and is a separate
+/// type, matching how this [`Button`] and [`crate::headless::Button`] are
+/// two independent types for two independent jobs.
+pub struct MenuList {
+    items: Vec<String>,
+    selected_index: Option<usize>,
+    class: String,
+}
+
+impl MenuList {
+    pub fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            selected_index: None,
+            class: String::new(),
+        }
+    }
+
+    /// Append an item. The first item appended becomes the selection by
+    /// default, so a freshly-built menu always has a visible selection.
+    pub fn item(mut self, label: impl Into<String>) -> Self {
+        self.items.push(label.into());
+        if self.selected_index.is_none() {
+            self.selected_index = Some(0);
+        }
+        self
+    }
+
+    /// Override the selection. Out-of-range indices are ignored.
+    pub fn selected_index(mut self, index: usize) -> Self {
+        if index < self.items.len() {
+            self.selected_index = Some(index);
+        }
+        self
+    }
+
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    pub fn items(&self) -> &[String] {
+        &self.items
+    }
+
+    pub fn selected(&self) -> Option<usize> {
+        self.selected_index
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class
+    }
+}
+
+impl Default for MenuList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Component for MenuList {}
+
+impl LowerToTree for MenuList {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        _registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let items = std::mem::take(&mut self.items);
+        let class = std::mem::take(&mut self.class);
+        let props = json!({
+            "items": items,
+            "selected_index": self.selected_index,
+        });
+        tree.push_custom(parent, "menu_list", props, class)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -594,6 +694,57 @@ mod tests {
         assert!(
             msg.contains("totally-bogus-utility"),
             "panic message must name the offending token, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn menu_list_lowers_to_a_custom_node_with_items_and_selection() {
+        let app = Mkui::new().child(
+            MenuList::new()
+                .item("New Game")
+                .item("Continue")
+                .item("Quit")
+                .selected_index(1),
+        );
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { type_name, props } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        assert_eq!(type_name, "menu_list");
+        assert_eq!(
+            props["items"],
+            serde_json::json!(["New Game", "Continue", "Quit"])
+        );
+        assert_eq!(props["selected_index"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn menu_list_defaults_to_selecting_the_first_item() {
+        let app = Mkui::new().child(MenuList::new().item("A").item("B"));
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { props, .. } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        assert_eq!(props["selected_index"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn menu_list_out_of_range_selection_is_ignored() {
+        let app = Mkui::new().child(MenuList::new().item("A").item("B").selected_index(5));
+
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Custom { props, .. } = &node.kind else {
+            panic!("expected a Custom node")
+        };
+        assert_eq!(
+            props["selected_index"],
+            serde_json::json!(0),
+            "an out-of-range selected_index() call must not override the default"
         );
     }
 }
