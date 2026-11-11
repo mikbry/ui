@@ -44,6 +44,12 @@ pub enum RenderLane {
     /// Arbitrary vector path fills/strokes (#139) on the same
     /// `mkui-vector2d-wgpu` coverage pipeline as [`RenderLane::SlugGlyphs`].
     VectorPath,
+    /// Real backdrop blur (#187) on the dedicated `render::backdrop` pass —
+    /// samples the frame itself, so (unlike every other lane) the renderer
+    /// must close its open triangle render pass before drawing this command
+    /// and reopen a fresh one after. Not feature-gated: glass chrome has no
+    /// vector-pipeline dependency.
+    Backdrop,
 }
 
 /// One ordered draw command: a lane plus the contiguous `Scene::primitives`
@@ -59,6 +65,8 @@ pub enum RenderCommand {
     SlugGlyphs(Range<usize>),
     /// Vector path fills/strokes (#139) for `primitives[range]`.
     VectorPath(Range<usize>),
+    /// Backdrop blur primitives (#187) for `primitives[range]`.
+    Backdrop(Range<usize>),
 }
 
 impl RenderCommand {
@@ -69,6 +77,7 @@ impl RenderCommand {
             RenderCommand::BitmapText(_) => RenderLane::BitmapText,
             RenderCommand::SlugGlyphs(_) => RenderLane::SlugGlyphs,
             RenderCommand::VectorPath(_) => RenderLane::VectorPath,
+            RenderCommand::Backdrop(_) => RenderLane::Backdrop,
         }
     }
 
@@ -78,7 +87,8 @@ impl RenderCommand {
             RenderCommand::UiTriangles(r)
             | RenderCommand::BitmapText(r)
             | RenderCommand::SlugGlyphs(r)
-            | RenderCommand::VectorPath(r) => r.clone(),
+            | RenderCommand::VectorPath(r)
+            | RenderCommand::Backdrop(r) => r.clone(),
         }
     }
 
@@ -88,6 +98,7 @@ impl RenderCommand {
             RenderLane::BitmapText => RenderCommand::BitmapText(range),
             RenderLane::SlugGlyphs => RenderCommand::SlugGlyphs(range),
             RenderLane::VectorPath => RenderCommand::VectorPath(range),
+            RenderLane::Backdrop => RenderCommand::Backdrop(range),
         }
     }
 }
@@ -112,6 +123,10 @@ pub fn classify_primitive(primitive: &Primitive) -> RenderLane {
         // stubbed-seam bug class this issue's exhaustive-match discipline
         // guards against).
         Primitive::Shadow(_) | Primitive::Quad(_) | Primitive::Icon(_) => RenderLane::UiTriangles,
+        // Real backdrop blur (#187) always gets its own lane — unlike
+        // Slug/VectorPath this is not feature-gated, since it has no
+        // vector-pipeline dependency, just a dedicated GPU pass.
+        Primitive::Backdrop(_) => RenderLane::Backdrop,
     }
 }
 
@@ -256,6 +271,43 @@ mod tests {
     fn classify_routes_text_to_bitmap_and_rest_to_ui() {
         assert_eq!(classify_primitive(&text()), RenderLane::BitmapText);
         assert_eq!(classify_primitive(&quad()), RenderLane::UiTriangles);
+    }
+
+    fn backdrop() -> Primitive {
+        Primitive::Backdrop(crate::types::Backdrop {
+            rect: Rect::new(Point::new(0.0, 0.0), Size::new(40.0, 40.0)),
+            corner_radii: CornerRadii::all(8.0),
+            blur_radius: 24.0,
+            tint: Color::rgba(0.0, 0.0, 0.0, 0.4),
+        })
+    }
+
+    #[test]
+    fn classify_routes_backdrop_to_its_own_lane() {
+        assert_eq!(classify_primitive(&backdrop()), RenderLane::Backdrop);
+    }
+
+    #[test]
+    fn backdrop_primitive_routes_to_its_own_lane_preserving_paint_order() {
+        // UI, Backdrop, UI — same no-global-regroup invariant as the Slug
+        // glyph / vector path lanes above, and not feature-gated.
+        let prims = vec![quad(), backdrop(), quad()];
+        let cmds = build_render_commands(&prims, classify_primitive);
+        assert_eq!(
+            cmds,
+            vec![
+                RenderCommand::UiTriangles(0..1),
+                RenderCommand::Backdrop(1..2),
+                RenderCommand::UiTriangles(2..3),
+            ]
+        );
+    }
+
+    #[test]
+    fn backdrop_lane_and_primitives_accessors_agree_with_variant() {
+        let cmd = RenderCommand::Backdrop(4..9);
+        assert_eq!(cmd.lane(), RenderLane::Backdrop);
+        assert_eq!(cmd.primitives(), 4..9);
     }
 
     #[cfg(feature = "slug")]

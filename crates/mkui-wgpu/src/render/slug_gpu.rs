@@ -452,7 +452,9 @@ fn vector_path_and_slug_glyph_compose_in_scene_order_through_render_commands() {
                         prepared_in_order.push(prepared);
                     }
                 }
-                RenderCommand::UiTriangles(_) | RenderCommand::BitmapText(_) => {
+                RenderCommand::UiTriangles(_)
+                | RenderCommand::BitmapText(_)
+                | RenderCommand::Backdrop(_) => {
                     panic!("test scene carries only Slug-pipeline primitives");
                 }
             }

@@ -479,6 +479,9 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
                         "test scene has no VectorPath primitives; VectorPath command unexpected"
                     );
                 }
+                RenderCommand::Backdrop(_) => {
+                    panic!("test scene has no Backdrop primitives; Backdrop command unexpected");
+                }
             }
         }
     }

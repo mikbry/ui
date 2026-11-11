@@ -34,6 +34,41 @@ pub struct ShadowStyle {
     pub spread: f32,
 }
 
+/// Glass panel/sheet chrome (#187): a translucent, backdrop-blurred panel
+/// with a solid-color fallback for "reduce transparency" and low-quality
+/// mode. Carries both the blur-mode tint and the fallback's opaque fill —
+/// [`components::glass_panel`](crate::components::glass_panel) picks which
+/// one actually paints based on the [`GlassMode`] the caller passes in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GlassStyle {
+    /// Translucent color mixed over the blurred backdrop in
+    /// [`GlassMode::Blur`].
+    pub tint: Color,
+    /// Opaque fill painted instead, with no blur pass at all, in
+    /// [`GlassMode::Solid`].
+    pub solid_fill: Color,
+    pub stroke: Stroke,
+    pub shadow: ShadowStyle,
+    pub corner_radius: f32,
+    pub padding: Insets,
+    /// Blur strength in logical px, forwarded to `Primitive::Backdrop`.
+    /// Unused in [`GlassMode::Solid`] (no `Backdrop` is emitted at all).
+    pub blur_radius: f32,
+}
+
+/// Which chrome [`components::glass_panel`](crate::components::glass_panel)
+/// paints. The caller decides — from the host's "reduce transparency"
+/// accessibility setting, a low-quality/low-GPU-tier mode, or just always
+/// wanting the solid look — `glass_panel` itself has no notion of settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlassMode {
+    /// Real backdrop blur (`Primitive::Backdrop` + a translucent tint).
+    Blur,
+    /// Opaque fallback: identical shape to [`PanelStyle`]'s plain `panel()`,
+    /// so it costs exactly what a non-glass panel costs — no blur pass runs.
+    Solid,
+}
+
 /// Root theme for the wgpu UI backend. A thin wrapper around [`ThemeTokens`]
 /// — `tokens` is the *only* stored state. `panel_compact` / `panel_style` /
 /// `title_style` / `body_style` / `button_style` / … are all methods that
@@ -114,6 +149,14 @@ pub struct ThemeTokens {
     /// it warrants a dedicated, independently-tunable darkness.
     pub backdrop: Color,
     pub shadow: ShadowStyle,
+    /// Translucent tint mixed over the real backdrop blur behind a glass
+    /// panel (#187) — darker and lower-alpha than `surface`, since the blur
+    /// itself already carries most of the backdrop's own color.
+    pub glass_tint: Color,
+    /// Opaque fallback fill for a glass panel's "reduce transparency" /
+    /// low-quality-mode solid chrome (#187) — close to `surface` but a
+    /// touch brighter, so a glass panel doesn't read as a plain `panel()`.
+    pub glass_solid_fill: Color,
     /// Named geometry scale (corner radii, hairline stroke width, panel
     /// padding) — the "spacing" half of issue #205's color-and-spacing
     /// token set.
@@ -138,6 +181,9 @@ pub struct SpacingTokens {
     pub padding_panel: f32,
     pub radius_panel_roomy: f32,
     pub padding_panel_roomy: f32,
+    /// Default backdrop-blur strength (logical px) for
+    /// [`WgpuTheme::glass_panel_style`] (#187).
+    pub blur_radius_glass: f32,
 }
 
 /// Two-state marker for interactive widgets. `Active` means "currently
@@ -438,6 +484,7 @@ impl Default for WgpuTheme {
             padding_panel: 14.0,
             radius_panel_roomy: 16.0,
             padding_panel_roomy: 16.0,
+            blur_radius_glass: 24.0,
         };
         let tokens = ThemeTokens {
             primary: Color::rgba(0.94, 0.79, 0.48, 0.92),
@@ -471,6 +518,8 @@ impl Default for WgpuTheme {
             scrollbar_track: Color::rgba(0.04, 0.03, 0.02, 0.55),
             swatch_stroke: Color::rgba(0.0, 0.0, 0.0, 0.35),
             backdrop: Color::rgba(0.0, 0.0, 0.0, 0.55),
+            glass_tint: Color::rgba(0.05, 0.04, 0.04, 0.42),
+            glass_solid_fill: Color::rgba(0.11, 0.09, 0.08, 0.96),
             shadow: ShadowStyle {
                 color: Color::rgba(0.0, 0.0, 0.0, 0.38),
                 blur_radius: 24.0,
@@ -537,6 +586,24 @@ impl WgpuTheme {
             shadow: self.tokens.shadow,
             corner_radius: self.tokens.spacing.radius_panel_roomy,
             padding: Insets::all(self.tokens.spacing.padding_panel_roomy),
+        }
+    }
+
+    /// Glass panel/sheet chrome (#187) — same geometry as [`Self::panel_style`]
+    /// (roomy radius/padding), with the tint + opaque-fallback tokens a
+    /// [`GlassMode`] choice between.
+    pub fn glass_panel_style(&self) -> GlassStyle {
+        GlassStyle {
+            tint: self.tokens.glass_tint,
+            solid_fill: self.tokens.glass_solid_fill,
+            stroke: Stroke {
+                color: self.tokens.border,
+                width: self.tokens.spacing.stroke_width_hairline,
+            },
+            shadow: self.tokens.shadow,
+            corner_radius: self.tokens.spacing.radius_panel_roomy,
+            padding: Insets::all(self.tokens.spacing.padding_panel_roomy),
+            blur_radius: self.tokens.spacing.blur_radius_glass,
         }
     }
 
@@ -1045,6 +1112,7 @@ mod tests {
             padding_panel: 9.0,
             radius_panel_roomy: 11.0,
             padding_panel_roomy: 13.0,
+            blur_radius_glass: 17.0,
         };
         let tokens = ThemeTokens {
             primary: Color::rgba(0.10, 0.50, 0.90, 1.0),
@@ -1078,6 +1146,8 @@ mod tests {
             scrollbar_track: Color::rgba(0.75, 0.75, 0.80, 1.0),
             swatch_stroke: Color::rgba(0.30, 0.30, 0.35, 1.0),
             backdrop: Color::rgba(0.05, 0.05, 0.10, 0.70),
+            glass_tint: Color::rgba(0.40, 0.45, 0.60, 0.30),
+            glass_solid_fill: Color::rgba(0.88, 0.90, 0.95, 1.0),
             shadow: ShadowStyle {
                 color: Color::rgba(0.20, 0.20, 0.30, 0.50),
                 blur_radius: 6.0,
@@ -1103,6 +1173,10 @@ mod tests {
 
         assert_ne!(default_theme.panel_style(), swapped.panel_style());
         assert_ne!(default_theme.panel_compact(), swapped.panel_compact());
+        assert_ne!(
+            default_theme.glass_panel_style(),
+            swapped.glass_panel_style()
+        );
         assert_ne!(default_theme.title_style(), swapped.title_style());
         assert_ne!(default_theme.body_style(), swapped.body_style());
         assert_ne!(default_theme.card(), swapped.card());

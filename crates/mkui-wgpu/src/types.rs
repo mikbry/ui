@@ -97,6 +97,34 @@ pub struct Quad {
     pub stroke: Option<Stroke>,
 }
 
+/// A real backdrop-blur sample (#187): tells the renderer to blur whatever
+/// has already been painted into the frame behind `rect` (not a static
+/// texture — the live content up to this point in `Scene::primitives`
+/// order) and composite `tint` over the blurred result, clipped to
+/// `corner_radii`.
+///
+/// This is its own [`Primitive`] rather than a `Quad` field because it needs
+/// a dedicated render pass (sample the in-progress frame, blur, composite)
+/// that the vertex-color triangle pipeline cannot do — see
+/// `render::backdrop`. A caller that wants the accessibility "reduce
+/// transparency" or a low-quality-mode solid fallback simply never emits
+/// this primitive (see `components::glass_panel`'s `GlassMode::Solid` arm),
+/// so the fallback path costs exactly what a plain `Quad` costs — no blur
+/// pass runs, by construction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Backdrop {
+    pub rect: Rect,
+    pub corner_radii: CornerRadii,
+    /// Blur strength in logical px (roughly the Gaussian blur's sigma at
+    /// 1x). Scales with the frame's device-pixel ratio at draw time, like
+    /// every other geometry value in the scene (ADR 0006 §"Viewport units
+    /// contract").
+    pub blur_radius: f32,
+    /// Translucent color mixed over the blurred sample — `tint.a` is the mix
+    /// weight (`0.0` = pure blurred backdrop, `1.0` = pure `tint`).
+    pub tint: Color,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stroke {
     pub color: Color,
@@ -123,6 +151,10 @@ pub enum Primitive {
     Quad(Quad),
     Text(Text),
     Icon(Icon),
+    /// A real backdrop-blur sample (#187). Not feature-gated (unlike
+    /// `SlugGlyph`/`VectorPath` below) — glass chrome has no vector-pipeline
+    /// dependency, just a dedicated GPU pass. See [`Backdrop`].
+    Backdrop(Backdrop),
     /// A Slug vector glyph (#66), drawn through the `mkui-vector2d-wgpu`
     /// coverage pipeline rather than tessellated to triangles. Present only
     /// under the `slug` feature — the variant *is* the scene-level seam #67's
@@ -623,6 +655,10 @@ impl Scene {
 
     pub fn quad(&mut self, quad: Quad) {
         self.push(Primitive::Quad(quad));
+    }
+
+    pub fn backdrop(&mut self, backdrop: Backdrop) {
+        self.push(Primitive::Backdrop(backdrop));
     }
 
     pub fn text(&mut self, text: Text) {

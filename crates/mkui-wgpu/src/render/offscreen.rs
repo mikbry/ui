@@ -7,7 +7,11 @@
 //! reusable, **surfaceless** renderer that owns:
 //!
 //! - a surfaceless adapter / device / queue,
-//! - an RGBA render target with `RENDER_ATTACHMENT | COPY_SRC`,
+//! - an RGBA render target with `RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING`
+//!   (the last so a pass can sample the target it just drew into — #187's
+//!   backdrop-blur GPU tests drive `BackdropBlur` directly against this
+//!   harness's own view, exactly as `embedded`'s tests drive `EmbeddedRenderer`
+//!   against it as "the host's" target),
 //! - a readback buffer padded to `wgpu::COPY_BYTES_PER_ROW_ALIGNMENT`
 //!   (256-byte) row alignment,
 //! - submission, polling, buffer mapping, and row-unpadding helpers.
@@ -183,7 +187,9 @@ impl OffscreenRenderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: TARGET_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

@@ -126,7 +126,7 @@ pub use slug_text::place_slug_run;
 
 // Low-level types
 pub use types::{
-    rect_contains, AtlasRect, Axis, Color, Constraints, CornerRadii, DotAnimation,
+    rect_contains, AtlasRect, Axis, Backdrop, Color, Constraints, CornerRadii, DotAnimation,
     DotAnimationInstance, Element, FontFaceId, GlyphKey, GlyphPlacement, GuiTriangle, HitRegion,
     Icon, IconId, IconMask, Insets, PanelLayout, Point, Primitive, Quad, RasterizedGlyph, Rect,
     Scene, Shadow, Size, StackCursor, StackStyle, Stroke, Text, TextAlign, TextBuffer, TextStyle,
@@ -141,9 +141,9 @@ pub use types::PlacedVectorPath;
 // Theme + cva-style variant system
 pub use theme::{
     BadgeSize, BadgeStyle, BadgeVariant, ButtonSize, ButtonState, ButtonStyle, ButtonVariant,
-    CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, InputStyle,
-    PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle, SliderStyle, SwatchStyle,
-    TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
+    CardStyle, CounterChipStyle, DialogStyle, DotSize, DotStyle, DotVariant, GlassMode,
+    GlassStyle, InputStyle, PanelStyle, ProgressBarStyle, ScrollbarStyle, ShadowStyle,
+    SliderStyle, SwatchStyle, TextVariant, ThemeTokens, ToastStyle, ToastVariant, WgpuTheme,
 };
 
 // Components (shadcn / miklabs-ui aligned)

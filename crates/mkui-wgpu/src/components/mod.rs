@@ -18,7 +18,8 @@
 //! compose: pass the result of one into another (e.g. [`panel`] returns the
 //! inner rect for child placement). Related functions are grouped per file:
 //!
-//! - **primitives** — [`panel`] / [`titled_panel`], [`label`], [`button_with`].
+//! - **primitives** — [`panel`] / [`titled_panel`] / [`glass_panel`], [`label`],
+//!   [`button_with`].
 //!   These take pre-resolved `PanelStyle` / `ButtonStyle` values and are the
 //!   escape hatch when a caller needs a one-off style that isn't in the theme.
 //! - **variant-driven widgets** — [`card`], [`button`], [`text_field`],
@@ -63,7 +64,7 @@ pub use counter_chip::{counter_chip, CounterChipRegions};
 pub use dialog::{dialog, titled_dialog};
 pub use dot::dot;
 pub use info_list::info_list;
-pub use panel::{panel, titled_panel};
+pub use panel::{glass_panel, panel, titled_panel};
 pub use progress_bar::progress_bar;
 pub use scroll_area::{scroll_area, ScrollAreaRegions};
 pub use scrollbar::scrollbar;
