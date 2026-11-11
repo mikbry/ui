@@ -251,6 +251,12 @@ closed inside `InputRouter` rather than pushed onto callers:
   criteria mention "Tab/gamepad focus", but no gamepad input exists
   anywhere in this workspace yet (no `gilrs` or equivalent dependency,
   no gamepad `WindowEvent` equivalent) — there is nothing for this
-  contract to route today. Tab is the load-bearing keyboard-only
-  mechanism; gamepad navigation is deferred to a follow-up issue once a
-  gamepad input source exists to drive it.
+  contract to route today. `crate::scroll` (#194) establishes the pattern
+  this will eventually follow: a plain, device-agnostic input value (a
+  `[-1.0, 1.0]` stick axis, here a focus-move direction) with no
+  device-polling dependency of its own, driven by whatever a host's
+  controller integration hands in. #203 (parent tracker #173) is the
+  existing cross-cutting tracker for gamepad + focus navigation across
+  every P0 screen — menus, HUD, dialogs, settings, collections — and
+  already lists this issue as a dependency; Tab is the load-bearing
+  keyboard-only mechanism until #203 lands.
