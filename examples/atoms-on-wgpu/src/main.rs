@@ -138,6 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use mkui_runtime::NodeKind;
+    use mkui_text::BitmapTextSystem;
     use mkui_wgpu::{
         tessellate_scene, walk_app_tree, Size, WalkOptions, WgpuRendererRegistry, WgpuTheme,
     };
@@ -172,9 +173,11 @@ mod tests {
         // was the MSAA resolve path (now disabled), not the walker.
         let core = CoreMkui::with_tree(build_tree());
         let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
         let options = WalkOptions {
             viewport: Size::new(1280.0, 720.0),
             theme: WgpuTheme::default(),
+            text_system: &text_system,
         };
         let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
         assert!(

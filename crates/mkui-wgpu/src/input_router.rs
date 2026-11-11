@@ -170,6 +170,14 @@ impl InputRouter {
     /// `hit_entries`. `scale_factor` converts a `MouseInput`'s latched
     /// physical cursor position to the logical coordinates `hit_entries`
     /// are expressed in (same contract as [`crate::pointer::PointerState`]).
+    ///
+    /// If the host applies a UI-scale setting on top of its own window's
+    /// OS scale factor (#179 — see `WgpuApp::ui_scale` for the winit-owned
+    /// equivalent), pass the **combined** `os_scale_factor * ui_scale`
+    /// here, not the bare OS value: `hit_entries`' rects are laid out
+    /// against a viewport already divided by that same combined factor, so
+    /// passing anything else drifts hit-testing out of sync with what's on
+    /// screen the moment `ui_scale != 1.0`.
     pub fn route(
         &mut self,
         event: &WindowEvent,
