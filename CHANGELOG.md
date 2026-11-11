@@ -235,11 +235,26 @@ breaking changes can land on minor bumps).
     #173, not yet implemented — confirmed via `miky issue view 192`). Once
     #192 lands, `counter_chip` should delegate to it instead of drawing its
     own bubble (noted on #192 for whoever picks it up).
+  - The tooltip bubble is sized from `mkui-text::bitmap`'s own
+    `bitmap_scale`/`measure_line_width` formula — the same font-load-free
+    math `tessellate_text`'s default `BitmapTextSystem` lays glyphs out
+    with — not a guessed character width, so the bubble matches what the
+    renderer actually draws. A headless test tessellates a real scene and
+    checks the tooltip text's rendered pixel extent against the bubble
+    rect to prove it.
   - Scope decision: neither atom gets a visual showcase wiring in this PR.
     `slider`/`chip_group`/`scrollbar`/`swatch` ship the same way — unit-tested
     scene builders with no example call site — and get wired into a demo
     only once a panel actually needs them; `progress_bar`/`counter_chip`
-    follow that same precedent rather than inventing one-off example wiring.
+    follow that same precedent. The "renders correctly" acceptance bar is
+    covered instead by headless tests that tessellate through
+    `tessellate_scene` (the same path every example renders with) and
+    assert non-empty, finite, correctly-bounded output; visual wiring into
+    an actual host demo is deferred to #173's step-4 "full desktop-host
+    acceptance pass."
+  - Both atoms are `Quad`/`Text`/`Icon` primitives only — no `slug`-feature
+    vector-path fork — matching `slider`/`badge`/`chip_group`'s current
+    (not-yet-migrated) shape.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

@@ -27,6 +27,8 @@
 //! screen's top edge), and its x-position clamps so it never runs off the
 //! left/right edge.
 
+use mkui_text::{bitmap_scale, measure_line_width, GLYPH_ADVANCE_PX, GLYPH_CELL_WIDTH_PX};
+
 use crate::theme::CounterChipStyle;
 use crate::types::{CornerRadii, Icon, IconId, Point, Quad, Rect, Scene, Size, Stroke, TextStyle};
 
@@ -46,17 +48,26 @@ pub struct CounterChipRegions {
     pub tooltip_rect: Option<Rect>,
 }
 
-/// Approximate advance width per char, used only to size the tooltip
-/// bubble. The same known approximation
-/// `components::text_field::approx_char_advance_px` uses, for the same
-/// reason: `mkui-text`'s real measurement API (`TextEngine`/`PreparedText`,
-/// #182) needs a loaded `TextSystem`/font to shape against, and this
-/// crate's components layer takes no such handle — only a `WgpuTheme` and
-/// plain geometry — so it has nothing to call that API with. Not real glyph
-/// measurement; visually fine for short tooltip strings on a
-/// roughly-monospace-ish font.
-fn approx_char_advance_px(text_style: &TextStyle) -> f32 {
-    text_style.font_size_px * 0.5
+/// Width of `tooltip` at `text_style`'s font size, in pixels. Not an
+/// approximation: `mkui-text::bitmap` ships the same pure, font-load-free
+/// formula (`bitmap_scale` + `measure_line_width` over the fixed-advance
+/// `GLYPH_ADVANCE_PX`/`GLYPH_CELL_WIDTH_PX` constants) that
+/// [`crate::tessellation::tessellate_text`] actually lays glyphs out with
+/// via `BitmapTextSystem` — the text system every example and the headless
+/// `tessellate_scene` default to. So the bubble this sizes matches the
+/// pixels the renderer will actually draw, not a guessed character width
+/// (see `tooltip_text_triangles_stay_within_the_bubble_rect` below, which
+/// tessellates a real scene and checks the rendered text's pixel extent
+/// against this width). A host wired to a different `TextSystem` (a real
+/// font via #182's `CompositeTextSystem`) would need its own measurement;
+/// this crate's components layer has no handle to one, so it measures
+/// against its own default instead.
+fn tooltip_text_width_px(tooltip: &str, text_style: &TextStyle) -> f32 {
+    let scale = bitmap_scale(text_style.font_size_px);
+    let advance = GLYPH_ADVANCE_PX * scale;
+    let glyph_width = GLYPH_CELL_WIDTH_PX * scale;
+    let glyphs: Vec<char> = tooltip.chars().collect();
+    measure_line_width(&glyphs, advance, glyph_width)
 }
 
 /// Icon + count chip. Draws the pill chrome, the icon (an [`IconId`] handle
@@ -118,8 +129,7 @@ pub fn counter_chip(
     label(scene, count_rect, count.to_string(), style.count_style);
 
     let tooltip_rect = ((hovered || focused) && !tooltip.is_empty()).then(|| {
-        let text_width =
-            tooltip.chars().count() as f32 * approx_char_advance_px(&style.tooltip_text_style);
+        let text_width = tooltip_text_width_px(tooltip, &style.tooltip_text_style);
         let bubble_width = text_width + style.tooltip_padding.left + style.tooltip_padding.right;
         let bubble_height = style.tooltip_text_style.line_height_px
             + style.tooltip_padding.top
@@ -396,5 +406,63 @@ mod tests {
         assert!(regions.icon_rect.origin.y >= chip.origin.y);
         assert!(regions.icon_rect.height_end() <= chip.height_end());
         assert!(regions.icon_rect.origin.x >= chip.origin.x);
+    }
+
+    #[test]
+    fn tooltip_text_triangles_stay_within_the_bubble_rect() {
+        // End-to-end proof that the bubble is sized from the renderer's own
+        // glyph metrics, not a guessed character width: tessellate a real
+        // scene through the same `tessellate_scene` / `BitmapTextSystem`
+        // path every example uses, and check the tooltip text's actual
+        // rendered pixel extent lands inside the bubble this atom drew.
+        let theme = WgpuTheme::default();
+        let style = theme.counter_chip();
+        let mut s = scene();
+        let chip = chip_rect();
+        let tooltip_text = "a longer tooltip body";
+
+        let regions = counter_chip(
+            &mut s,
+            chip,
+            IconId(1),
+            7,
+            tooltip_text,
+            true,
+            false,
+            &style,
+        );
+        let bubble = regions.tooltip_rect.expect("tooltip should be drawn");
+
+        let triangles = crate::tessellate_scene(&s);
+        let text_color = style.tooltip_text_style.color;
+        let mut min_x = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        for triangle in &triangles {
+            if triangle.color.r != text_color.r
+                || triangle.color.g != text_color.g
+                || triangle.color.b != text_color.b
+            {
+                continue;
+            }
+            for point in triangle.points {
+                min_x = min_x.min(point.x);
+                max_x = max_x.max(point.x);
+            }
+        }
+
+        assert!(
+            min_x.is_finite() && max_x.is_finite(),
+            "expected at least one tooltip-text triangle"
+        );
+        assert!(
+            min_x >= bubble.origin.x - 0.5,
+            "tooltip text starts at {min_x}, left of the bubble's left edge {}",
+            bubble.origin.x
+        );
+        assert!(
+            max_x <= bubble.width_end() + 0.5,
+            "tooltip text ends at {max_x}, right of the bubble's right edge {}",
+            bubble.width_end()
+        );
     }
 }

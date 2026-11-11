@@ -134,4 +134,33 @@ mod tests {
             "a fraction above 1.0 clamps to 100% (full width), not overflow"
         );
     }
+
+    #[test]
+    fn renders_to_non_empty_finite_triangles_at_0_50_and_100_percent() {
+        // The acceptance criterion is "renders 0-100% correctly" — this
+        // proves the full pipeline (not just the `Scene` primitives) by
+        // tessellating through the same `tessellate_scene` path every
+        // example renders with, at both edges and the midpoint.
+        let theme = WgpuTheme::default();
+        let style = theme.progress_bar();
+        let track = Rect::new(Point::new(10.0, 10.0), Size::new(200.0, 8.0));
+
+        for fraction in [0.0, 0.5, 1.0] {
+            let mut s = scene();
+            progress_bar(&mut s, track, fraction, &style);
+            let triangles = crate::tessellate_scene(&s);
+            assert!(
+                !triangles.is_empty(),
+                "fraction {fraction} must tessellate to at least the track's triangles"
+            );
+            for triangle in &triangles {
+                for point in triangle.points {
+                    assert!(
+                        point.x.is_finite() && point.y.is_finite(),
+                        "fraction {fraction} produced a non-finite triangle vertex"
+                    );
+                }
+            }
+        }
+    }
 }
