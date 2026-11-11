@@ -703,6 +703,7 @@ mod tests {
         scene: &'a mut Scene,
         theme: &'a WgpuTheme,
         hits: &'a mut Vec<HitTestEntry>,
+        text_system: &'a dyn TextSystem,
     ) -> WgpuRenderCtx<'a> {
         WgpuRenderCtx {
             tree,
@@ -714,6 +715,7 @@ mod tests {
             cursor_y: 10.0,
             content_x: 0.0,
             current_foreground: theme.body_style().color,
+            text_system,
         }
     }
 
@@ -737,8 +739,16 @@ mod tests {
         let mut scene = Scene::new(Size::new(400.0, 300.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
         let props = serde_json::json!({ "label": "v1", "x": 5.0, "y": 10.0, "height": 22.0 });
+        let text_system = BitmapTextSystem::new();
 
-        let mut ctx = render_ctx(&tree, &registry, &mut scene, &theme, &mut hits);
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
         registry
             .render_custom_node("badge", &node, &props, &mut ctx)
             .expect("badge dispatch ok");
@@ -760,8 +770,16 @@ mod tests {
         let props = serde_json::json!({
             "label": "3", "x": 5.0, "y": 10.0, "height": 22.0, "overlay": true,
         });
+        let text_system = BitmapTextSystem::new();
 
-        let mut ctx = render_ctx(&tree, &registry, &mut scene, &theme, &mut hits);
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
         registry
             .render_custom_node("badge", &node, &props, &mut ctx)
             .expect("badge dispatch ok");
@@ -782,7 +800,15 @@ mod tests {
 
         let mut scene_flow = Scene::new(Size::new(400.0, 300.0));
         let mut hits_flow: Vec<HitTestEntry> = Vec::new();
-        let mut ctx_flow = render_ctx(&tree, &registry, &mut scene_flow, &theme, &mut hits_flow);
+        let text_system = BitmapTextSystem::new();
+        let mut ctx_flow = render_ctx(
+            &tree,
+            &registry,
+            &mut scene_flow,
+            &theme,
+            &mut hits_flow,
+            &text_system,
+        );
         registry
             .render_custom_node("badge", &node, &props_base, &mut ctx_flow)
             .unwrap();
@@ -797,6 +823,7 @@ mod tests {
             &mut scene_overlay,
             &theme,
             &mut hits_overlay,
+            &text_system,
         );
         registry
             .render_custom_node("badge", &node, &props_overlay, &mut ctx_overlay)
@@ -820,8 +847,16 @@ mod tests {
         let mut scene = Scene::new(Size::new(400.0, 300.0));
         let mut hits: Vec<HitTestEntry> = Vec::new();
         let props = serde_json::json!({ "content": "Save", "anchor_x": 10.0, "anchor_y": 10.0 });
+        let text_system = BitmapTextSystem::new();
 
-        let mut ctx = render_ctx(&tree, &registry, &mut scene, &theme, &mut hits);
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
         registry
             .render_custom_node("tooltip", &node, &props, &mut ctx)
             .expect("tooltip dispatch ok");
@@ -848,8 +883,16 @@ mod tests {
             "anchor_width": 40.0,
             "anchor_height": 20.0,
         });
+        let text_system = BitmapTextSystem::new();
 
-        let mut ctx = render_ctx(&tree, &registry, &mut scene, &theme, &mut hits);
+        let mut ctx = render_ctx(
+            &tree,
+            &registry,
+            &mut scene,
+            &theme,
+            &mut hits,
+            &text_system,
+        );
         let cursor_before = ctx.cursor_y;
         registry
             .render_custom_node("tooltip", &node, &props, &mut ctx)

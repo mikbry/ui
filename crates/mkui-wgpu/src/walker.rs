@@ -197,7 +197,7 @@ fn walk_children(
     content_width: f32,
     layouts: &mut Vec<NodeLayout>,
 ) -> Result<(), MkuiError> {
-    let mut first = true;
+    let mut first_flow_child = true;
     for child_id in children {
         let Some(node) = tree.get(*child_id) else {
             continue;
@@ -205,13 +205,46 @@ fn walk_children(
         if node.resolved.hidden {
             continue;
         }
-        if !first {
+        if is_flow_excluded(node) {
+            // An overlay node (#192) floats over the layout: no gap goes
+            // in before it, and it does not consume the "first flow
+            // child" slot either, so the next flow-participating sibling
+            // is placed exactly as if this node were not in the tree at
+            // all — not merely as if this node had zero height.
+            walk_node(tree, node, ctx, content_width, layouts)?;
+            continue;
+        }
+        if !first_flow_child {
             ctx.cursor_y += gap_px(&node.resolved);
         }
-        first = false;
+        first_flow_child = false;
         walk_node(tree, node, ctx, content_width, layouts)?;
     }
     Ok(())
+}
+
+/// Whether `node` is excluded from the walker's vertical-flow spacing
+/// entirely (#192 acceptance criterion #2) — the inter-sibling gap
+/// [`walk_children`] would otherwise insert before it, and the
+/// "first flow child" bookkeeping that gap depends on — not merely from
+/// its own `cursor_y` advance (which the renderer itself already skips;
+/// see `BadgeRenderer::render`'s `overlay` handling in `bridge.rs`).
+///
+/// `Tooltip` floats unconditionally — there is no non-overlay tooltip.
+/// `Badge` floats only when its `overlay` prop is `true`; the default
+/// (`false`, or the prop absent) keeps pre-#192 flow behavior.
+fn is_flow_excluded(node: &mkui_runtime::Node) -> bool {
+    let NodeKind::Custom { type_name, props } = &node.kind else {
+        return false;
+    };
+    match type_name.as_str() {
+        "tooltip" => true,
+        "badge" => props
+            .get("overlay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn walk_node(
@@ -1360,83 +1393,86 @@ mod tests {
         assert_eq!(swapped_text, swapped.tokens.surface_foreground);
     }
 
-    /// #192 acceptance criterion #2, exercised through the real `AppTree`
-    /// consumer path (not just `bridge.rs`'s isolated-ctx tests): the
-    /// walker inserts a fixed gap before *every* non-first sibling
-    /// regardless of node type (`gap_px`'s `DEFAULT_GAP_PX` fallback, a
-    /// pre-existing behavior #192 does not change — there is currently no
-    /// class token that sets a literal zero gap). Comparing a tree with
-    /// the badge against one without it would conflate that fixed gap
-    /// with the badge's own height, so this isolates exactly what
-    /// `overlay` controls: the same tree, walked twice with only the
-    /// `overlay` prop flipped. The anchor (painted before the badge) must
-    /// be identical either way, and the sibling (painted after) must
-    /// shift by exactly the badge's own height between the two runs.
-    #[test]
-    fn overlay_badge_does_not_add_its_own_height_to_the_next_siblings_offset() {
-        fn tree_with_badge(overlay: bool) -> AppTree {
-            let mut tree = AppTree::new();
-            let root = tree.root();
-            tree.push_text(root, "Anchor", TextVariant::Body, "")
-                .expect("anchor text");
-            // No explicit `x`/`y`: defaults to the walker's current
-            // `(content_x, cursor_y)` — the badge sits right where the
-            // anchor just finished drawing, the realistic "pin a badge on
-            // the icon that was just emitted" shape. `height: 40.0`
-            // deliberately exceeds the walker's default gap (8px) so a
-            // flow-mode badge's own height dominates the `.max()` in
-            // `BadgeRenderer::render`, making the overlay/flow difference
-            // unambiguous.
-            tree.push_custom(
-                root,
-                "badge",
-                serde_json::json!({
-                    "label": "3",
-                    "height": 40.0,
-                    "overlay": overlay,
-                }),
-                "",
-            )
-            .expect("badge");
-            tree.push_text(root, "Sibling", TextVariant::Body, "")
-                .expect("sibling text");
-            tree
-        }
+    fn y_of(texts: &[&Text], content: &str) -> f32 {
+        texts
+            .iter()
+            .find(|t| t.content == content)
+            .unwrap_or_else(|| panic!("no text primitive with content {content:?}"))
+            .rect
+            .origin
+            .y
+    }
 
+    /// #192 acceptance criterion #2, exercised through the real `AppTree`
+    /// consumer path (not just `bridge.rs`'s isolated-ctx tests). An
+    /// overlay badge must be fully transparent to the walker's vertical
+    /// flow: not only does `BadgeRenderer::render` skip its own
+    /// `cursor_y` advance, [`is_flow_excluded`] also tells
+    /// [`walk_children`] to skip the fixed inter-sibling gap it would
+    /// otherwise insert *before* the badge — and to not count the badge
+    /// toward "first flow child" either, so the sibling after it isn't
+    /// gapped twice. With both fixes, a sibling placed after an overlay
+    /// badge lands at the *exact same* position as if the badge were
+    /// never in the tree at all.
+    #[test]
+    fn overlay_badge_does_not_disturb_the_next_siblings_position_at_all() {
         let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
         let options = WalkOptions {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
+            text_system: &text_system,
         };
 
-        let flow_tree = tree_with_badge(false);
-        let flow_out = walk_app_tree(&flow_tree, &registry, &options).expect("walk flow");
-        let overlay_tree = tree_with_badge(true);
-        let overlay_out = walk_app_tree(&overlay_tree, &registry, &options).expect("walk overlay");
+        let mut tree_without_badge = AppTree::new();
+        let root = tree_without_badge.root();
+        tree_without_badge
+            .push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        tree_without_badge
+            .push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let baseline_out =
+            walk_app_tree(&tree_without_badge, &registry, &options).expect("walk baseline");
 
-        let flow_texts = text_primitives(&flow_out.scene);
+        let mut tree_with_overlay_badge = AppTree::new();
+        let root = tree_with_overlay_badge.root();
+        tree_with_overlay_badge
+            .push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        // No explicit `x`/`y`: defaults to the walker's current
+        // `(content_x, cursor_y)` — the badge sits right where the
+        // anchor just finished drawing, the realistic "pin a badge on
+        // the icon that was just emitted" shape. A tall `height` would
+        // dominate `BadgeRenderer`'s own (already-skipped) cursor
+        // advance if that half of the fix ever regressed.
+        tree_with_overlay_badge
+            .push_custom(
+                root,
+                "badge",
+                serde_json::json!({ "label": "3", "height": 40.0, "overlay": true }),
+                "",
+            )
+            .expect("badge");
+        tree_with_overlay_badge
+            .push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let overlay_out =
+            walk_app_tree(&tree_with_overlay_badge, &registry, &options).expect("walk overlay");
+
+        let baseline_texts = text_primitives(&baseline_out.scene);
         let overlay_texts = text_primitives(&overlay_out.scene);
-        let y_of = |texts: &[&Text], content: &str| -> f32 {
-            texts
-                .iter()
-                .find(|t| t.content == content)
-                .unwrap_or_else(|| panic!("no text primitive with content {content:?}"))
-                .rect
-                .origin
-                .y
-        };
 
         assert_eq!(
-            y_of(&flow_texts, "Anchor"),
+            y_of(&baseline_texts, "Anchor"),
             y_of(&overlay_texts, "Anchor"),
-            "the anchor paints before the badge either way and must be unaffected by `overlay`"
+            "the anchor paints before the badge either way and must be unaffected"
         );
         assert_eq!(
-            y_of(&overlay_texts, "Sibling") + 40.0,
-            y_of(&flow_texts, "Sibling"),
-            "overlay must remove exactly the badge's own height from the \
-             sibling's offset, leaving every other layout contribution \
-             (padding, the walker's fixed inter-sibling gap) unchanged"
+            y_of(&baseline_texts, "Sibling"),
+            y_of(&overlay_texts, "Sibling"),
+            "an overlay badge must not shift the next sibling by so much as a pixel, \
+             not even by the walker's usual fixed inter-sibling gap"
         );
 
         let badge_quad_pos = overlay_out
@@ -1458,6 +1494,110 @@ mod tests {
         assert!(
             overlay_out.hit_tests.is_empty(),
             "plain Text nodes and a Badge atom register no hit entries"
+        );
+    }
+
+    /// The pre-#192 default (`overlay` absent or `false`) is unchanged:
+    /// the badge still advances `cursor_y` past its own rect and still
+    /// gets the walker's usual gap before it, same as any other
+    /// declarative row.
+    #[test]
+    fn non_overlay_badge_still_participates_in_normal_flow() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+        };
+
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        tree.push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        tree.push_custom(
+            root,
+            "badge",
+            serde_json::json!({ "label": "3", "height": 40.0 }),
+            "",
+        )
+        .expect("badge");
+        tree.push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let out = walk_app_tree(&tree, &registry, &options).expect("walk");
+
+        let mut tree_no_badge = AppTree::new();
+        let root = tree_no_badge.root();
+        tree_no_badge
+            .push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        tree_no_badge
+            .push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let baseline = walk_app_tree(&tree_no_badge, &registry, &options).expect("walk baseline");
+
+        let texts = text_primitives(&out.scene);
+        let baseline_texts = text_primitives(&baseline.scene);
+        assert!(
+            y_of(&texts, "Sibling") > y_of(&baseline_texts, "Sibling"),
+            "a non-overlay badge must still push the following sibling down"
+        );
+    }
+
+    /// A `Tooltip` node is always excluded from flow spacing — there is
+    /// no non-overlay tooltip (#192). The sibling after one must land
+    /// exactly where it would if the tooltip weren't in the tree, the
+    /// same contract [`overlay_badge_does_not_disturb_the_next_siblings_position_at_all`]
+    /// proves for an overlay badge.
+    #[test]
+    fn tooltip_node_never_disturbs_the_next_siblings_position() {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+        };
+
+        let mut baseline_tree = AppTree::new();
+        let root = baseline_tree.root();
+        baseline_tree
+            .push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        baseline_tree
+            .push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let baseline_out = walk_app_tree(&baseline_tree, &registry, &options).expect("walk");
+
+        let mut tree_with_tooltip = AppTree::new();
+        let root = tree_with_tooltip.root();
+        tree_with_tooltip
+            .push_text(root, "Anchor", TextVariant::Body, "")
+            .expect("anchor text");
+        tree_with_tooltip
+            .push_custom(
+                root,
+                "tooltip",
+                serde_json::json!({
+                    "visible": true,
+                    "content": "Save",
+                    "anchor_width": 40.0,
+                    "anchor_height": 20.0,
+                }),
+                "",
+            )
+            .expect("tooltip");
+        tree_with_tooltip
+            .push_text(root, "Sibling", TextVariant::Body, "")
+            .expect("sibling text");
+        let tooltip_out = walk_app_tree(&tree_with_tooltip, &registry, &options).expect("walk");
+
+        let baseline_texts = text_primitives(&baseline_out.scene);
+        let tooltip_texts = text_primitives(&tooltip_out.scene);
+        assert_eq!(
+            y_of(&baseline_texts, "Sibling"),
+            y_of(&tooltip_texts, "Sibling"),
+            "a tooltip (always a flow float) must not shift the next sibling at all"
         );
     }
 }

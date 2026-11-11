@@ -315,7 +315,12 @@ impl InputRouter {
     /// press-to-arm gesture ([`InputRouter::armed`]) and of keyboard focus
     /// ([`InputRouter::focused_text_node`]). A tooltip anchor (#192) reads
     /// this — and its own focus state — to decide whether it should be
-    /// visible; see [`crate::tooltip::TooltipState`].
+    /// visible; see [`crate::tooltip::TooltipState`]. Returns `None` once
+    /// a `CursorLeft` event has been routed through [`InputRouter::route`]
+    /// (`PointerState::on_cursor_left`'s `cursor_present` flag), even
+    /// though gesture-ownership math elsewhere keeps using the stale
+    /// latched position (review P2#1) — the two concerns are deliberately
+    /// decoupled.
     ///
     /// A read-only query: it never mutates the router, so embedding hosts
     /// can call it from anywhere in their frame (not only from `route`)
@@ -368,11 +373,12 @@ impl InputRouter {
 
     fn route_cursor_left(&mut self) -> RouteOutcome {
         let consumed = self.gesture_owned;
-        // Clears `armed` so a later release can't fire the click, but
-        // `gesture_owned` is left untouched — the mouse button may still
-        // be physically down, and the eventual release is still mkui's to
-        // consume (review P2#1).
-        self.pointer.cancel();
+        // Clears `armed` so a later release can't fire the click, and
+        // marks the cursor absent so a hover query (#192) stops
+        // reporting a stale hover — but `gesture_owned` is left
+        // untouched — the mouse button may still be physically down, and
+        // the eventual release is still mkui's to consume (review P2#1).
+        self.pointer.on_cursor_left();
         RouteOutcome::from_consumed(consumed)
     }
 
@@ -717,6 +723,34 @@ mod tests {
             Some(NodeId::from_raw(1, 0))
         );
         assert!(router.armed().is_none(), "hover alone must not arm a press");
+    }
+
+    #[test]
+    fn hovered_node_clears_on_cursor_left() {
+        // Without routing `CursorLeft` into `PointerState::on_cursor_left`
+        // (rather than plain `cancel`), a tooltip anchored on this button
+        // would keep showing after the mouse has actually left the
+        // window, because the stale latched cursor position still hit-
+        // tests onto it.
+        let mut router = InputRouter::new();
+        let entries = vec![hud_button(1)];
+        router.route(&cursor_moved(50.0, 20.0), &entries, 1.0);
+        assert_eq!(
+            router.hovered_node(&entries, 1.0),
+            Some(NodeId::from_raw(1, 0))
+        );
+
+        router.route(
+            &WindowEvent::CursorLeft {
+                device_id: DeviceId::dummy(),
+            },
+            &entries,
+            1.0,
+        );
+        assert!(
+            router.hovered_node(&entries, 1.0).is_none(),
+            "hover must clear once the cursor leaves the window"
+        );
     }
 
     // ---- "Clicking a HUD control never reaches the host's gameplay input" ----
