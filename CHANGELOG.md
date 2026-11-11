@@ -316,6 +316,42 @@ breaking changes can land on minor bumps).
     85.4px rendered vs. 92px expected for the 16-char case) when the
     measurement-margin fix above is reverted, confirming it now catches
     the regression it claims to.
+- **Toggle, slider value label, and segmented select (#190, C5 of #173).**
+  Three new widgets for the `wgpu` host-embedding component set, each split
+  the same way as the existing `text_field`/`TextEditState` pair: logic in
+  `mkui_core::headless` (identical across every backend), rendering in
+  `mkui-wgpu::components`.
+  - `mkui_core::headless::{Toggle, Slider, SegmentedSelect}` — `Toggle`
+    already shipped with #190's keyboard contract (`" "`/`Enter`) but had no
+    tests, now added. `Slider` is new: min/max/step/value state, `increment`/
+    `decrement`/`page_increment`/`page_decrement`/`jump_to_min`/`jump_to_max`,
+    and a `dragging` flag a renderer can read to decide whether to show a
+    live value label. `SegmentedSelect` is new: a clamped (non-wrapping)
+    `select_next`/`select_previous`/`select_first`/`select_last` over a
+    fixed option count. All three implement `KeyboardInteractable` — the
+    same hook a future gamepad-button mapping (#203) will call into; no
+    gamepad code is added here, since no gamepad input exists anywhere in
+    the workspace yet.
+  - `mkui_wgpu::components::toggle` — pill track + sliding thumb, two-state
+    on/off switch, new `WgpuTheme::toggle()`/`ToggleStyle`.
+  - `mkui_wgpu::components::slider_with_label` — extends the existing
+    `slider` (left unchanged; `UiBuilder::number_row` keeps calling it
+    directly) with an optional caller-formatted value label centered above
+    the thumb, shown while dragging.
+  - `mkui_wgpu::components::segmented_select` — one continuous pill track
+    with a single sliding highlight behind the selected segment (the
+    shadcn/iOS "Segmented Control" shape), new `WgpuTheme::segmented_select()`
+    /`SegmentedStyle`. Kept as a sibling of `chip_group` rather than built on
+    top of it: `chip_group`'s per-chip gap and button chrome are tuned for
+    `picker_row`'s label-above layout and don't draw into exactly the rect
+    they're given.
+  - Scope decision: general keyboard-focus navigation across widgets (which
+    widget currently owns the keyboard) is explicitly out of scope — it's
+    tracked separately as #203 ("gamepad and focus navigation") and nothing
+    in the existing `mkui-wgpu` input router builds it yet for any widget,
+    including the pre-existing `button`/`chip_group`. These three widgets
+    ship the state/render split that a focus-navigation layer will drive;
+    they don't invent that layer.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

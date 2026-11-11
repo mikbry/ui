@@ -172,3 +172,64 @@ impl Default for ToggleBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::Key;
+
+    #[test]
+    fn space_and_enter_both_toggle() {
+        let mut toggle = Toggle::builder().build();
+        assert!(!toggle.is_checked());
+        toggle.handle_key_down(Key::Space.as_str().unwrap());
+        assert!(toggle.is_checked());
+        toggle.handle_key_down(Key::Enter.as_str().unwrap());
+        assert!(!toggle.is_checked());
+    }
+
+    #[test]
+    fn other_keys_do_not_toggle() {
+        let mut toggle = Toggle::builder().build();
+        toggle.handle_key_down("Tab");
+        assert!(!toggle.is_checked());
+    }
+
+    #[test]
+    fn disabled_toggle_ignores_keys_and_direct_mutation() {
+        let mut toggle = Toggle::builder().disabled(true).build();
+        toggle.handle_key_down(" ");
+        assert!(!toggle.is_checked());
+        toggle.set_checked(true);
+        assert!(!toggle.is_checked());
+        toggle.toggle();
+        assert!(!toggle.is_checked());
+    }
+
+    #[test]
+    fn on_change_fires_only_when_the_value_actually_changes() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        let calls = Rc::new(Cell::new(0));
+        let calls_in = Rc::clone(&calls);
+        let mut toggle = Toggle::builder()
+            .on_change(move |_| calls_in.set(calls_in.get() + 1))
+            .build();
+        toggle.set_checked(false); // already false — no-op.
+        assert_eq!(calls.get(), 0);
+        toggle.set_checked(true);
+        assert_eq!(calls.get(), 1);
+        toggle.set_checked(true); // already true — no-op.
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn focus_and_blur_track_focused_state() {
+        let mut toggle = Toggle::builder().build();
+        assert!(!toggle.is_focused());
+        toggle.focus();
+        assert!(toggle.is_focused());
+        toggle.blur();
+        assert!(!toggle.is_focused());
+    }
+}
