@@ -103,8 +103,19 @@ impl Slider {
     /// measured from `min` — snapping from a fixed origin on every call
     /// (rather than drifting the running value by `+= step`) keeps repeated
     /// increments exact (e.g. ten 0.1 steps land on exactly 1.0).
+    ///
+    /// `min` and `max` are returned untouched whenever `value` clamps to
+    /// either of them, *before* the step-grid rounding below runs — when
+    /// `step` doesn't evenly divide `max - min` (e.g. `min=0`, `max=10`,
+    /// `step=3`), the nearest grid point short of `max` (`9`) is itself a
+    /// valid, in-range value, so the final `.clamp()` can't catch it; the
+    /// range's own endpoints would otherwise be unreachable via `End` /
+    /// `jump_to_max` or a full-width drag (`set_fraction(1.0)`).
     fn snap(&self, value: f32) -> f32 {
         let clamped = value.clamp(self.state.min, self.state.max);
+        if clamped == self.state.min || clamped == self.state.max {
+            return clamped;
+        }
         if self.state.step <= 0.0 {
             return clamped;
         }
@@ -117,7 +128,14 @@ impl Slider {
             return;
         }
         let snapped = self.snap(value);
-        if (self.state.value - snapped).abs() > f32::EPSILON {
+        // Exact comparison, not an epsilon threshold: `snapped` is always
+        // the deterministic output of `snap` for the current `state`, so
+        // two different step counts are "the same" only when they produce
+        // bit-identical floats. An absolute `f32::EPSILON` threshold instead
+        // discarded real changes on a tiny range/step (e.g. `max=0.000001`,
+        // `step=0.0000001`) whose representable deltas are themselves
+        // smaller than `f32::EPSILON`, leaving `value` stuck forever.
+        if self.state.value != snapped {
             self.state.value = snapped;
             if let Some(on_change) = &self.on_change {
                 on_change(snapped);
@@ -436,5 +454,70 @@ mod tests {
             .build();
         slider.set_fraction(0.5);
         assert!((slider.fraction() - 0.5).abs() < 0.01);
+    }
+
+    /// Regression: when `step` doesn't evenly divide `max - min` (10 / 3),
+    /// the nearest step-grid point below `max` (`9`) is itself in range, so
+    /// a plain `.clamp()` after rounding can't recover the endpoint —
+    /// `max` must be preserved explicitly.
+    #[test]
+    fn max_is_reachable_when_step_does_not_evenly_divide_the_range() {
+        let mut jumped = Slider::builder().min(0.0).max(10.0).step(3.0).build();
+        jumped.jump_to_max();
+        assert_eq!(
+            jumped.value(),
+            10.0,
+            "End/jump_to_max must land exactly on max even when step doesn't evenly divide the range"
+        );
+
+        let mut dragged = Slider::builder().min(0.0).max(10.0).step(3.0).build();
+        dragged.set_fraction(1.0);
+        assert_eq!(
+            dragged.value(),
+            10.0,
+            "dragging fully to the end must also land exactly on max"
+        );
+    }
+
+    /// Regression: `min` gets the same treatment as `max` for symmetry,
+    /// even though the un-evenly-dividing case can't actually overshoot it.
+    #[test]
+    fn min_is_reachable_when_step_does_not_evenly_divide_the_range() {
+        let mut slider = Slider::builder()
+            .min(1.0)
+            .max(10.0)
+            .step(3.0)
+            .value(5.0)
+            .build();
+        slider.jump_to_min();
+        assert_eq!(slider.value(), 1.0);
+    }
+
+    /// Regression: an absolute `f32::EPSILON` threshold in `set_value`
+    /// silently discarded a representable change on a tiny range/step,
+    /// leaving `value` stuck at `0.0` forever.
+    #[test]
+    fn tiny_steps_on_a_tiny_range_still_register_as_changes() {
+        let mut slider = Slider::builder()
+            .min(0.0)
+            .max(0.000_001)
+            .step(0.000_000_1)
+            .value(0.0)
+            .build();
+        slider.increment();
+        assert_ne!(
+            slider.value(),
+            0.0,
+            "a representable step must register as a change"
+        );
+
+        for _ in 0..20 {
+            slider.increment();
+        }
+        assert!(
+            (slider.value() - 0.000_001).abs() < 1e-9,
+            "repeated representable increments must still reach max, got {}",
+            slider.value()
+        );
     }
 }
