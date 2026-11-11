@@ -187,3 +187,40 @@ fn headless_toggle_only_fires_on_change() {
     assert!(!toggle.is_checked());
     assert_eq!(changes.get(), 2);
 }
+
+#[test]
+fn headless_menu_list_keyboard_navigation_wraps_and_confirms() {
+    let selected = Rc::new(Cell::new(None));
+    let selected_in = Rc::clone(&selected);
+
+    let mut menu = MenuList::builder()
+        .item("New Game")
+        .item("Continue")
+        .item("Quit")
+        .on_select(move |index| selected_in.set(Some(index)))
+        .build();
+
+    // A freshly-built menu already has a visually distinct selection
+    // (acceptance criterion #2) without requiring a first keypress.
+    assert_eq!(menu.selected_index(), Some(0));
+
+    menu.handle_key_down("ArrowUp");
+    assert_eq!(
+        menu.selected_index(),
+        Some(2),
+        "up from the first item must wrap to the last"
+    );
+
+    menu.handle_key_down("ArrowDown");
+    menu.handle_key_down("ArrowDown");
+    assert_eq!(menu.selected_index(), Some(1));
+
+    menu.handle_key_down("Enter");
+    assert_eq!(selected.get(), Some(1), "Enter must confirm the selection");
+
+    // Tab/Escape stay out of the menu's hands — a surrounding modal's
+    // focus trap (#188) owns those without the menu fighting it.
+    menu.handle_key_down("Tab");
+    menu.handle_key_down("Escape");
+    assert_eq!(menu.selected_index(), Some(1));
+}

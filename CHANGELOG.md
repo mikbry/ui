@@ -157,6 +157,31 @@ breaking changes can land on minor bumps).
     and adding `disabled`/`focused` there would ripple through the C/Python
     FFI surface and every binding's parity tests, well past this issue's
     scope.
+- **`mkui_core::headless::MenuList` — keyboard/gamepad-selectable menu list
+  (#189, C4 of #173).** A headless component for title-screen/pause-style
+  menus: `move_up`/`move_down` navigate with wraparound, `confirm` fires
+  `on_select` with the activated index, and `is_selected(index)` tells a
+  renderer which row to style distinctly. Wired through
+  `KeyboardInteractable::handle_key_down` on `"ArrowUp"`/`"ArrowDown"`/
+  `"Enter"`/`" "` — the same shared `Key` vocabulary every other headless
+  component in this crate uses, so a host that maps gamepad D-pad/stick and
+  confirm-button input into that vocabulary (per the backend-agnostic input
+  contract in `mkui_core::input`) gets gamepad navigation for free, with no
+  gamepad-specific code in `MenuList` itself. `MenuList` never reacts to
+  `Tab`/`Escape`, so it composes with a future modal dialog's focus trap
+  (#188) without fighting it — the trap can own those keys for cycling and
+  dismiss while `MenuList` only moves its own selection.
+  - Scope decision: shipped as headless-only logic (state machine +
+    builder), matching the existing completeness level of `Toggle` (#190,
+    also headless-only). Cross-backend `AppTree` lowering/rendering —
+    the treatment `Button`/`Text`/`View` already have — is not part of
+    this issue's behavior-focused acceptance criteria and is deferred to
+    whenever a backend wires menu rendering, consistent with how `Toggle`
+    was left.
+  - Scope decision: no per-item `disabled` state. The issue's acceptance
+    criteria cover selection + activation only; `disabled` wasn't asked for
+    and can be added alongside `Button`'s existing `disabled` precedent if
+    a future issue needs it.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which
