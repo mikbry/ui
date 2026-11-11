@@ -537,43 +537,69 @@ fn render_button(
     ctx.cursor_y += BUTTON_HEIGHT_PX + BUTTON_GAP_PX;
 }
 
+/// Sub-pixel (below rendering precision) inset applied to each padding
+/// strip's edge that touches `rect`, so the strip stops strictly before
+/// `rect`'s own boundary instead of landing exactly on it. Needed because
+/// `rect_contains`/`rect_contains_rounded` ([`crate::types`]) are both
+/// inclusive on every edge (`>=`/`<=`): without this inset, a query point
+/// sitting exactly on the shared line matches *both* `rect`'s hit entry
+/// and the (uncornered) strip, and since [`pointer::hit_test`] falls
+/// through to the next entry on a miss, `rect`'s correct corner-exclusion
+/// rejection at that line doesn't propagate to an overall miss — the
+/// strip still claims the point.
+const PADDING_STRIP_INSET_PX: f32 = 0.01;
+
 /// Decompose the ring between `rect` (the painted silhouette) and
 /// `hit_rect` (`rect` widened to the touch-target floor) into up to four
 /// non-overlapping plain rectangles: a full-width strip above/below `rect`
-/// and, flanking only `rect`'s own height, a strip to its left/right. This
-/// tiles the widened area without ever covering a pixel of `rect` itself,
-/// so pairing it with an unchanged, unexpanded hit entry for `rect` (see
-/// `render_button`) exactly reproduces the pre-#186 rounded-corner
-/// exclusion for every point inside `rect`, while every point strictly
-/// outside `rect` but inside `hit_rect` still hits (#186). Returns `None`
-/// for a strip with no area — in particular, every entry is `None` when
-/// `hit_rect == rect`.
+/// and, flanking only `rect`'s own height, a strip to its left/right. Each
+/// strip's edge touching `rect` is inset by [`PADDING_STRIP_INSET_PX`] so
+/// it never shares a boundary line with `rect` (see that constant's docs
+/// for why). This tiles the widened area without ever covering a pixel of
+/// `rect` itself, so pairing it with an unchanged, unexpanded hit entry
+/// for `rect` (see `render_button`) exactly reproduces the pre-#186
+/// rounded-corner exclusion for every point inside `rect`, while every
+/// point strictly outside `rect` but inside `hit_rect` still hits (#186).
+/// Returns `None` for a strip with no area once the inset is applied — in
+/// particular, every entry is `None` when `hit_rect == rect`.
 fn touch_target_padding_strips(rect: Rect, hit_rect: Rect) -> [Option<Rect>; 4] {
-    let top = (rect.origin.y > hit_rect.origin.y).then(|| {
+    let top = (rect.origin.y - hit_rect.origin.y > PADDING_STRIP_INSET_PX).then(|| {
         Rect::new(
             Point::new(hit_rect.origin.x, hit_rect.origin.y),
-            Size::new(hit_rect.size.width, rect.origin.y - hit_rect.origin.y),
-        )
-    });
-    let bottom = (hit_rect.height_end() > rect.height_end()).then(|| {
-        Rect::new(
-            Point::new(hit_rect.origin.x, rect.height_end()),
             Size::new(
                 hit_rect.size.width,
-                hit_rect.height_end() - rect.height_end(),
+                rect.origin.y - hit_rect.origin.y - PADDING_STRIP_INSET_PX,
             ),
         )
     });
-    let left = (rect.origin.x > hit_rect.origin.x).then(|| {
+    let bottom = (hit_rect.height_end() - rect.height_end() > PADDING_STRIP_INSET_PX).then(|| {
         Rect::new(
-            Point::new(hit_rect.origin.x, rect.origin.y),
-            Size::new(rect.origin.x - hit_rect.origin.x, rect.size.height),
+            Point::new(
+                hit_rect.origin.x,
+                rect.height_end() + PADDING_STRIP_INSET_PX,
+            ),
+            Size::new(
+                hit_rect.size.width,
+                hit_rect.height_end() - rect.height_end() - PADDING_STRIP_INSET_PX,
+            ),
         )
     });
-    let right = (hit_rect.width_end() > rect.width_end()).then(|| {
+    let left = (rect.origin.x - hit_rect.origin.x > PADDING_STRIP_INSET_PX).then(|| {
         Rect::new(
-            Point::new(rect.width_end(), rect.origin.y),
-            Size::new(hit_rect.width_end() - rect.width_end(), rect.size.height),
+            Point::new(hit_rect.origin.x, rect.origin.y),
+            Size::new(
+                rect.origin.x - hit_rect.origin.x - PADDING_STRIP_INSET_PX,
+                rect.size.height,
+            ),
+        )
+    });
+    let right = (hit_rect.width_end() - rect.width_end() > PADDING_STRIP_INSET_PX).then(|| {
+        Rect::new(
+            Point::new(rect.width_end() + PADDING_STRIP_INSET_PX, rect.origin.y),
+            Size::new(
+                hit_rect.width_end() - rect.width_end() - PADDING_STRIP_INSET_PX,
+                rect.size.height,
+            ),
         )
     });
     [top, bottom, left, right]
@@ -928,6 +954,40 @@ mod tests {
         // Well above even the widened touch target: must still miss.
         let far_above = Point::new(rect.origin.x + rect.size.width * 0.5, rect.origin.y - 20.0);
         assert!(pointer::hit_test(&out.hit_tests, far_above).is_none());
+
+        // Regression (review round 2): a point exactly ON the painted
+        // rect's own boundary, in the near-corner sliver, used to hit the
+        // padding strip instead of correctly falling through to rect's
+        // own (rejecting) corner-exclusion test — because the strip's
+        // near edge landed exactly on that shared line and both
+        // `rect_contains` checks are inclusive. All four corners, right
+        // on the boundary, must still miss.
+        let top_edge_near_left_corner = Point::new(rect.origin.x + 1.0, rect.origin.y);
+        let top_edge_near_right_corner = Point::new(rect.width_end() - 1.0, rect.origin.y);
+        let bottom_edge_near_left_corner = Point::new(rect.origin.x + 1.0, rect.height_end());
+        let bottom_edge_near_right_corner = Point::new(rect.width_end() - 1.0, rect.height_end());
+        for point in [
+            top_edge_near_left_corner,
+            top_edge_near_right_corner,
+            bottom_edge_near_left_corner,
+            bottom_edge_near_right_corner,
+        ] {
+            assert!(
+                pointer::hit_test(&out.hit_tests, point).is_none(),
+                "a click on rect's own boundary, in the near-corner sliver, \
+                 must still miss: {point:?}"
+            );
+        }
+
+        // Just past the inset, still inside the widened padding strip:
+        // must still hit (the inset must not eat the whole strip).
+        let padding_just_past_inset = Point::new(
+            rect.origin.x + rect.size.width * 0.5,
+            rect.origin.y - PADDING_STRIP_INSET_PX - 0.5,
+        );
+        let hit = pointer::hit_test(&out.hit_tests, padding_just_past_inset)
+            .expect("a click just past the inset must still land in the padding strip");
+        assert_eq!(hit.node, out.layouts[0].node);
     }
 
     #[test]
