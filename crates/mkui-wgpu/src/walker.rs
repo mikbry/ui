@@ -54,6 +54,7 @@ use mkui_runtime::{
 use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
+use crate::components::MIN_TOUCH_TARGET_PX;
 use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
@@ -493,11 +494,27 @@ fn render_button(
         style: label_style,
     });
 
+    // The hit-test entry (#186) is widened to the platform's minimum
+    // touch-target size, independent of the painted `rect` — the layout
+    // size stays untouched; the visible button doesn't need to grow for
+    // its tap area to meet a touch-friendly floor. `BUTTON_HEIGHT_PX`
+    // (36.0) is 8px short of `MIN_TOUCH_TARGET_PX`, which happens to equal
+    // `BUTTON_GAP_PX`, so the 4px-per-side expansion exactly fills the row
+    // gap rather than overlapping into a neighbouring button's own hit
+    // area. The expanded region carries no corner rounding of its own —
+    // only the rendered silhouette (at `rect`) needs the rounded-corner
+    // exclusion test; the invisible touch-target extension is a plain
+    // rectangle.
+    let hit_rect = rect.expand_to_min_size(Size::new(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX));
     ctx.hits.push(HitTestEntry {
-        rect,
+        rect: hit_rect,
         node: node.id,
         action: button.on_press,
-        corner_radii,
+        corner_radii: if hit_rect == rect {
+            corner_radii
+        } else {
+            CornerRadii::all(0.0)
+        },
     });
     layouts.push(NodeLayout {
         node: node.id,
@@ -760,6 +777,32 @@ mod tests {
         assert!(
             out.hit_tests[0].action.is_some(),
             "action must propagate to hit entry"
+        );
+    }
+
+    /// Acceptance (#186): `BUTTON_HEIGHT_PX` (36px) is under the 44px touch
+    /// target floor, so the registered hit entry must be the painted layout
+    /// rect widened to the floor — not the layout rect itself.
+    #[test]
+    fn button_hit_entry_meets_the_minimum_touch_target() {
+        let core = CoreMkui::new().child(
+            Button::new("Ok")
+                .variant(ButtonVariant::Primary)
+                .on_press(|| {}),
+        );
+        let out = walk(&core);
+
+        assert_eq!(out.layouts[0].rect.size.height, BUTTON_HEIGHT_PX);
+        assert!(out.hit_tests[0].rect.size.height >= MIN_TOUCH_TARGET_PX);
+        assert!(out.hit_tests[0].rect.size.width >= MIN_TOUCH_TARGET_PX);
+
+        let layout_rect = out.layouts[0].rect;
+        let hit_rect = out.hit_tests[0].rect;
+        let layout_center_y = layout_rect.origin.y + layout_rect.size.height * 0.5;
+        let hit_center_y = hit_rect.origin.y + hit_rect.size.height * 0.5;
+        assert!(
+            (layout_center_y - hit_center_y).abs() < 1e-4,
+            "the widened hit rect must stay centered on the painted button"
         );
     }
 

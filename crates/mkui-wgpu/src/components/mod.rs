@@ -9,7 +9,9 @@
 //! shadcn uses for its `ButtonVariant` / `ButtonSize`. State
 //! (`ButtonState::Idle` / `Active`) is orthogonal to variant and supplied
 //! per-frame, because the underlying renderer is immediate-mode and does not
-//! retain a component tree between frames.
+//! retain a component tree between frames. `button`/`button_with`'s
+//! `disabled` / `focused` flags (#186) follow the same per-frame,
+//! caller-supplied contract.
 //!
 //! Each component is a free function that mutates a `&mut Scene`, consuming a
 //! [`WgpuTheme`](crate::theme::WgpuTheme) for style resolution. Components
@@ -50,7 +52,7 @@ mod text_field;
 mod toast;
 
 pub use badge::badge;
-pub use button::{button, button_with};
+pub use button::{button, button_with, ButtonRegions, MIN_TOUCH_TARGET_PX};
 pub use card::card;
 pub use chip_group::chip_group;
 pub use dot::dot;

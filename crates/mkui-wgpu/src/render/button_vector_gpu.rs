@@ -172,7 +172,15 @@ fn button_vector_vs_triangulated() {
     // Vector actual: the real production `button_with` call (this binary is
     // compiled with `slug` on, so its chrome fork emits `Primitive::VectorPath`).
     let mut vec_scene = Scene::new(Size::new(W as f32, H as f32));
-    button_with(&mut vec_scene, rect, "", ButtonState::Idle, &style);
+    button_with(
+        &mut vec_scene,
+        rect,
+        "",
+        ButtonState::Idle,
+        false,
+        false,
+        &style,
+    );
     let vec_pixels = render_vector(&renderer, &adapter, &vec_scene);
 
     // Sanity: both modes actually paint the button's interior.

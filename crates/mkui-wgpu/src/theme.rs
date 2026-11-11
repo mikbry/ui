@@ -202,6 +202,11 @@ pub struct ButtonStyle {
     pub corner_radius: f32,
     pub stroke_width: f32,
     pub label_style: TextStyle,
+    /// Color of the outer ring drawn when the button has keyboard/gamepad
+    /// focus (#186). Same token across every variant — shadcn's `ring` is a
+    /// single accent color regardless of button look, so a focused Outline
+    /// button and a focused Default button draw the same ring.
+    pub focus_ring_color: Color,
 }
 
 /// Concrete, resolved slider look-and-feel.
@@ -609,6 +614,7 @@ impl WgpuTheme {
                 corner_radius,
                 stroke_width,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
             ButtonVariant::Destructive => ButtonStyle {
                 idle_fill: self.tokens.destructive.multiply_alpha(0.6),
@@ -620,6 +626,7 @@ impl WgpuTheme {
                 corner_radius,
                 stroke_width,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
             ButtonVariant::Outline => ButtonStyle {
                 idle_fill: self.tokens.muted,
@@ -631,6 +638,7 @@ impl WgpuTheme {
                 corner_radius: corner_radius.max(self.tokens.spacing.radius_relaxed),
                 stroke_width,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
             ButtonVariant::Secondary => ButtonStyle {
                 idle_fill: self.tokens.button_secondary_idle_fill,
@@ -642,6 +650,7 @@ impl WgpuTheme {
                 corner_radius: corner_radius.max(self.tokens.spacing.radius_compact),
                 stroke_width,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
             ButtonVariant::Ghost => ButtonStyle {
                 idle_fill: self.tokens.button_ghost_idle_fill,
@@ -656,6 +665,7 @@ impl WgpuTheme {
                 corner_radius,
                 stroke_width,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
             ButtonVariant::Link => ButtonStyle {
                 idle_fill: Color::TRANSPARENT,
@@ -667,6 +677,7 @@ impl WgpuTheme {
                 corner_radius: 0.0,
                 stroke_width: 0.0,
                 label_style,
+                focus_ring_color: self.tokens.primary_ring,
             },
         }
     }
