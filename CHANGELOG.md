@@ -125,10 +125,19 @@ breaking changes can land on minor bumps).
   surface is the disabled/focus/touch-target behavior layered on top.
   `mkui-wgpu::walker::render_button` (the `AppTree`/`NodeKind::Button` path
   real embedding hosts draw through, per #176's input-routing contract) also
-  now registers its `HitTestEntry` widened to `MIN_TOUCH_TARGET_PX` — its
+  now widens its `HitTestEntry` coverage to `MIN_TOUCH_TARGET_PX` — its
   36px `BUTTON_HEIGHT_PX` row height is otherwise 8px short of the floor.
-  Only the hit-test rect changes there; the painted/layout rect, `ButtonProps`,
-  and the FFI-facing tree shape are untouched.
+  It registers the exact, unchanged silhouette entry (same `rect`/
+  `corner_radii` as always, so a click in the chamfered-off rounded corner
+  still misses exactly as before) plus zero or more plain-rectangle padding
+  strips tiling the gap out to the touch-target floor, via a new
+  `touch_target_padding_strips` helper — a single rounded rect sized to the
+  wider target can't represent this without re-admitting clicks into that
+  same corner sliver (a regression caught in review before merge: an
+  earlier revision widened the rect and zeroed its `corner_radii`
+  wholesale, which did exactly that). Only the hit-test rects change;
+  the painted/layout rect, `ButtonProps`, and the FFI-facing tree shape
+  are untouched.
   - Scope decision: shipped disabled dimming, the focus-ring render path,
     and the touch-target hit-rect for `mkui-wgpu`'s low-level
     `components::button`, per the issue's own framing ("Builds on
