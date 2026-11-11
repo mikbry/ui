@@ -194,31 +194,50 @@ surfaced two gaps the original contract (modal stack + Escape precedence
 only) didn't cover — a backdrop click and the keyboard focus trap — both
 closed inside `InputRouter` rather than pushed onto callers:
 
-- **`push_modal` now carries the dialog's panel rect.** The original
-  `modal_stack: Vec<NodeId>` had no geometry — enough for Escape, which
-  doesn't care *where* the dialog is, but not enough to tell a backdrop
-  click from a click on the dialog's own interior. `ModalEntry { node,
-  panel_rect }` fixes that; `push_modal`'s signature changed to require
-  it rather than adding a second geometry-setting call, since every real
-  dialog has a panel rect the moment it opens.
+- **`push_modal` now carries the dialog's panel rect and its explicit
+  `owned` node set.** The original `modal_stack: Vec<NodeId>` had no
+  geometry — enough for Escape, which doesn't care *where* the dialog is,
+  but not enough to tell a backdrop click from a click on the dialog's
+  own interior, or to know which controls are actually this dialog's.
+  `ModalEntry { node, panel_rect, owned }` fixes both; `push_modal`'s
+  signature changed to require them rather than adding separate setter
+  calls, since every real dialog has a panel rect and a (possibly empty)
+  control set the moment it opens.
+- **Pointer arming and the Tab focus trap scope themselves to the
+  topmost modal's `owned` set — identity, not geometry.** A first cut
+  derived "belongs to this dialog" from whether a `HitTestEntry`'s rect
+  (its center, for Tab) fell inside `panel_rect`. Review caught that this
+  is wrong: a host-supplied hit-test list carries no guarantee that every
+  entry geometrically inside the panel is actually this dialog's, nor
+  that every entry outside it isn't. A lower stacked dialog's
+  (now-covered) button, or a host control the caller forgot to omit once
+  a modal opened, can sit at any rect — including one that happens to
+  overlap the topmost dialog's panel — and geometric containment would
+  silently let it fire its action or join the focus trap. `route`'s
+  pointer-press handling now hit-tests only the subset of `hit_entries`
+  whose `NodeId` is in the topmost modal's `owned` list before arming;
+  `decide_tab_press` filters the same way. A miss against that scoped
+  set still falls back to `panel_rect` for the backdrop/interior
+  distinction — that part *is* inherently geometric (a backdrop click is
+  "outside the dialog's painted footprint", which is a rect question),
+  it's membership in the dialog that moved to identity.
 - **While any modal is open, every primary-button press is `Consumed`,
-  by exactly one of three outcomes**: it hit an interactive entry inside
-  the dialog (ordinary click), it missed every entry but landed inside
-  the panel rect (blank dialog chrome swallows it, nothing closes), or it
-  missed every entry and landed outside the panel rect (backdrop click —
-  pop the topmost modal). The alternative — only treating a miss as
-  "backdrop" and otherwise falling through to `Ignored` — would let a
-  modal game leak clicks on its own padding/labels to whatever is behind
-  it, which is the exact bug "nothing behind an open modal should react"
-  exists to prevent.
-- **The Tab focus trap has no persistent widget registry — it derives
-  the focusable set from `hit_entries` every press**, the same way
-  pointer hit-testing already works against the current frame's list
-  rather than a retained tree (consistent with the walker's eager-rebuild
-  model, ADR 0006). A `HitTestEntry` counts as "in the dialog" if its
-  rect's *center* falls inside the panel rect — a center check rather
-  than full containment, so a control whose hit rect is lightly padded
-  past the panel edge still counts.
+  by exactly one of three outcomes**: it hit an *owned* interactive
+  entry (ordinary click), it missed every owned entry but landed inside
+  the panel rect (blank dialog chrome swallows it, nothing closes), or
+  it missed every owned entry and landed outside the panel rect
+  (backdrop click — pop the topmost modal). The alternative — only
+  treating a miss as "backdrop" and otherwise falling through to
+  `Ignored` — would let a modal leak clicks on its own padding/labels to
+  whatever is behind it, which is the exact bug "nothing behind an open
+  modal should react" exists to prevent.
+- **The Tab focus trap has no persistent widget registry beyond the
+  `owned` list — it derives the focus order from `hit_entries` every
+  press**, the same way pointer hit-testing already works against the
+  current frame's list rather than a retained tree (consistent with the
+  walker's eager-rebuild model, ADR 0006). An owned `NodeId` not present
+  in the current frame's `hit_entries` is simply absent from that
+  frame's cycle, rather than an error.
 - **Tab/Shift+Tab reuse the press/repeat lock-in lesson above.** Shift
   state is latched from `WindowEvent::ModifiersChanged` (winit delivers
   it as a separate event, not inline on `KeyEvent`); the trap only
