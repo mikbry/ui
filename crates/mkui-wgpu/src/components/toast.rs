@@ -39,9 +39,13 @@ const BUTTON_GAP: f32 = 6.0;
 /// toast stack reads: the thing that just happened is on top.
 ///
 /// Stops emitting — rather than spilling past `region` or overlapping —
-/// once the next row would not fit. Since rendering goes newest-first,
-/// running out of room drops the *oldest* active toasts, never the one that
-/// just got pushed; a row that isn't drawn gets no hit region either.
+/// once the next row would not fit `region`'s height. Since rendering goes
+/// newest-first, running out of vertical room drops the *oldest* active
+/// toasts, never the one that just got pushed; a row that isn't drawn gets
+/// no hit region either. Likewise renders nothing at all when `region` is
+/// too narrow to fit a row's padding and both buttons — a message's
+/// available width can't be allowed to collapse to zero, which the text
+/// layout engine reads as "unbounded" rather than "none".
 /// Returns `(ToastId, Rect)` per rendered toast, newest-first — the id,
 /// not just the index, because index order isn't a stable way to find a
 /// toast again once overflow (or a future reorder) makes it not match
@@ -81,11 +85,22 @@ pub fn toast_stack<T>(
             break;
         }
 
+        let style = theme.toast_style(toast.variant);
+        let buttons_width = BUTTON_SIZE * 2.0 + BUTTON_GAP;
+        // Below this width, the message's available width would collapse to
+        // zero (which the text layout engine reads as "unbounded", not
+        // "none") and the minimise button's hit region would extend past
+        // the row's own left edge. `region.size.width` is the same for
+        // every row, so once one row can't fit its controls, none can —
+        // render nothing rather than an overflowing or out-of-bounds row.
+        if region.size.width <= style.padding.left + style.padding.right + buttons_width {
+            break;
+        }
+
         let rect = Rect::new(
             Point::new(region.origin.x, y),
             Size::new(region.size.width, height),
         );
-        let style = theme.toast_style(toast.variant);
 
         scene.shadow(Shadow {
             rect,
@@ -104,10 +119,9 @@ pub fn toast_stack<T>(
             }),
         });
 
-        let buttons_width = BUTTON_SIZE * 2.0 + BUTTON_GAP;
         let label_height = style.label_style.line_height_px;
         let message_width =
-            (rect.size.width - style.padding.left - style.padding.right - buttons_width).max(0.0);
+            rect.size.width - style.padding.left - style.padding.right - buttons_width;
         scene.text(Text {
             rect: Rect::new(
                 Point::new(
@@ -296,6 +310,47 @@ mod tests {
                 .any(|r| r.target == ToastTarget::Dismiss(newer)),
             "the rendered (newest) toast must have a dismiss hit region"
         );
+    }
+
+    #[test]
+    fn narrow_region_renders_nothing_rather_than_an_overflowing_or_out_of_bounds_row() {
+        let mut scene = Scene::new(Size::new(100.0, 200.0));
+        let mut layout: PanelLayout<ToastTarget> = PanelLayout::default();
+        let theme = WgpuTheme::default();
+        let mut stack = ToastStack::new();
+        stack.push(
+            ToastVariant::Info,
+            "a message far longer than this toast is wide",
+        );
+
+        // At 66px, the message's available width (padding.left + padding.right
+        // + both buttons = exactly 66px at the default theme) would collapse
+        // to exactly zero, which the text layout engine reads as "unbounded".
+        let region = Rect::new(Point::new(0.0, 0.0), Size::new(66.0, 200.0));
+        let rects = toast_stack(&mut scene, &mut layout, region, &stack, &theme, |t| t);
+        assert!(
+            rects.is_empty(),
+            "a region too narrow to fit padding + both buttons must render no rows"
+        );
+        assert!(layout.hit_regions.is_empty());
+        assert!(
+            scene
+                .primitives
+                .iter()
+                .all(|p| !matches!(p, Primitive::Text(_))),
+            "no message text should be emitted when it would have zero or negative width"
+        );
+
+        // Comfortably above the threshold: the row (and its message) renders
+        // and stays within the region's bounds.
+        let region = Rect::new(Point::new(0.0, 0.0), Size::new(200.0, 200.0));
+        let mut layout: PanelLayout<ToastTarget> = PanelLayout::default();
+        let rects = toast_stack(&mut scene, &mut layout, region, &stack, &theme, |t| t);
+        assert_eq!(rects.len(), 1);
+        for region_hit in &layout.hit_regions {
+            assert!(region_hit.rect.origin.x >= region.origin.x);
+            assert!(region_hit.rect.width_end() <= region.width_end());
+        }
     }
 
     #[test]
