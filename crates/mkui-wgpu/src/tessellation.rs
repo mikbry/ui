@@ -23,7 +23,7 @@ use crate::types::{
 /// triangle fan per corner". Enough to read as rounded at typical UI radii
 /// (4-16px buttons/cards/badges) without inflating triangle counts for every
 /// quad on screen; the zero-radius fast path below pays none of this cost.
-const CORNER_ARC_SEGMENTS: usize = 8;
+pub(crate) const CORNER_ARC_SEGMENTS: usize = 8;
 
 /// Round `value_px` to the nearest physical pixel at `device_pixel_ratio`,
 /// then convert back to logical pixels. A local copy of the same snap used
@@ -83,6 +83,15 @@ pub fn tessellate_primitives(
             Primitive::Icon(icon) => {
                 tessellate_icon(&mut triangles, icon, text_system, device_pixel_ratio)
             }
+            // Backdrop blur (#187) is not tessellated to triangles either —
+            // it draws on its own dedicated GPU pass (`render::backdrop`),
+            // which samples the frame itself rather than a vertex color.
+            // The windowed renderer's ordered command path routes it there
+            // directly; `EmbeddedRenderer::render_into` (Phase 1, #175) has
+            // no such lane yet, so it silently skips `Backdrop` exactly as
+            // it already does for `SlugGlyph`/`VectorPath` below — see that
+            // module's doc comment.
+            Primitive::Backdrop(_) => {}
             // Slug glyphs are not tessellated to triangles — they draw on the
             // Slug coverage lane (#66). The ordered render path routes them
             // there directly, so the triangle tessellator skips them.
@@ -141,7 +150,7 @@ fn tessellate_quad(triangles: &mut Vec<GuiTriangle>, quad: Quad) {
 /// arcs can never overlap — the per-corner generalization of the uniform
 /// clamp `components::card`'s vector-path `rounded_rect_contour` applies to
 /// its single `radius`.
-fn clamp_corner_radii(rect: Rect, radii: CornerRadii) -> CornerRadii {
+pub(crate) fn clamp_corner_radii(rect: Rect, radii: CornerRadii) -> CornerRadii {
     let max_r = (rect.size.width.max(0.0).min(rect.size.height.max(0.0)) * 0.5).max(0.0);
     CornerRadii {
         top_left: radii.top_left.clamp(0.0, max_r),
@@ -167,7 +176,7 @@ fn corner_radii_are_zero(radii: CornerRadii) -> bool {
 /// straight-edge case needs no special-casing in the walk itself — only the
 /// zero-triangle-count fast path in [`tessellate_quad`] above needs it, for
 /// performance.
-fn rounded_rect_boundary(rect: Rect, radii: CornerRadii, segments: usize) -> Vec<Point> {
+pub(crate) fn rounded_rect_boundary(rect: Rect, radii: CornerRadii, segments: usize) -> Vec<Point> {
     let x0 = rect.origin.x;
     let y0 = rect.origin.y;
     let x1 = rect.width_end();
@@ -706,6 +715,23 @@ mod tests {
         let triangles = tessellate_scene(&scene);
         assert!(!triangles.is_empty());
         assert!(triangles.iter().all(|triangle| triangle.color.a > 0.0));
+    }
+
+    #[test]
+    fn backdrop_primitive_yields_no_triangles() {
+        // #187: `Backdrop` draws on its own GPU pass (`render::backdrop`),
+        // never through this triangle tessellator — the fallback path that
+        // emits no `Backdrop` at all is how the "no blur cost" acceptance
+        // criterion holds, but this proves the primitive itself is also a
+        // no-op here even when it IS present in the scene.
+        let mut scene = Scene::new(Size::new(240.0, 80.0));
+        scene.backdrop(crate::types::Backdrop {
+            rect: Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 60.0)),
+            corner_radii: CornerRadii::all(12.0),
+            blur_radius: 24.0,
+            tint: Color::rgba(0.0, 0.0, 0.0, 0.4),
+        });
+        assert!(tessellate_scene(&scene).is_empty());
     }
 
     #[test]

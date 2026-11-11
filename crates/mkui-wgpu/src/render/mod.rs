@@ -62,7 +62,10 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use backdrop::BackdropBlur;
+
 use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
+use crate::types::Backdrop;
 use crate::{tessellate_primitives, GuiTriangle, Scene};
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
@@ -82,11 +85,18 @@ use mkui_vector2d_wgpu::{
 /// order so UI/bitmap triangles and Slug glyphs composite in scene paint order
 /// (#66). On the `Triangles` lane both `UiTriangles` and `BitmapText` commands
 /// share the UI pipeline; the `Slug` lane exists only under the feature.
+///
+/// `Backdrop` (#187) is the one variant that is not itself a prepared GPU
+/// resource — it carries the primitive data only, because the GPU work it
+/// needs (sampling the frame so far) can only happen once the UI pass
+/// around it has been closed, at *draw* time, not at build time like every
+/// other variant here. See [`Renderer::render`]'s execution loop.
 enum LaneDraw {
     Triangles {
         buffer: wgpu::Buffer,
         vertex_count: u32,
     },
+    Backdrop(Backdrop),
     #[cfg(feature = "slug")]
     Slug(PreparedSlug),
 }
@@ -97,6 +107,11 @@ enum LaneDraw {
 /// [`embedded::EmbeddedRenderer`], which owns neither and records its pass
 /// into the host's own command encoder and texture view instead.
 pub mod embedded;
+
+/// Real backdrop blur (#187): the dedicated two-pass GPU pipeline behind
+/// `Primitive::Backdrop`. See [`backdrop::BackdropBlur`] for the design and
+/// its own GPU acceptance tests (gated the same way as the ones below).
+mod backdrop;
 
 /// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
 /// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
@@ -246,6 +261,9 @@ pub struct Renderer {
     /// end-of-pass. `None` on the 1× fallback, where the UI pass writes the
     /// intermediate view directly.
     msaa_color_view: Option<wgpu::TextureView>,
+    /// Real backdrop blur GPU resources (#187), built against the linear
+    /// intermediate's format. Resized alongside [`Self::intermediate_view`].
+    backdrop_blur: BackdropBlur,
     /// Native Slug glyph adapter (#66), present only when the `slug` feature is
     /// enabled. Built once against the swapchain format; invoked inside the UI
     /// render pass so Slug glyphs composite in scene paint order. Off-feature
@@ -361,6 +379,7 @@ impl Renderer {
         );
         let intermediate_view = create_intermediate_view(&device, width, height);
         let msaa_color_view = create_msaa_color_view(&device, width, height, sample_count);
+        let backdrop_blur = BackdropBlur::new(&device, INTERMEDIATE_FORMAT, width, height);
 
         let (present_pipeline, present_bind_group_layout) = build_present_pipeline(&device, format);
         let present_sampler = create_present_sampler(&device);
@@ -391,6 +410,7 @@ impl Renderer {
             present_flags_buffer,
             present_bind_group,
             msaa_color_view,
+            backdrop_blur,
             #[cfg(feature = "slug")]
             slug_adapter,
             #[cfg(feature = "slug")]
@@ -436,6 +456,7 @@ impl Renderer {
         self.intermediate_view = create_intermediate_view(&self.device, width, height);
         self.msaa_color_view =
             create_msaa_color_view(&self.device, width, height, self.sample_count);
+        self.backdrop_blur.resize(&self.device, width, height);
         // The present bind group references the intermediate view by handle, so
         // it must be rebuilt whenever that view is recreated.
         self.present_bind_group = create_present_bind_group(
@@ -614,6 +635,19 @@ impl Renderer {
                         }
                     }
                 }
+                RenderCommand::Backdrop(_) => {
+                    // Flush any open triangle run so the backdrop blur
+                    // samples exactly the primitives that preceded it — same
+                    // invariant as the Slug/VectorPath arms above.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    for primitive in &primitives[range] {
+                        if let crate::types::Primitive::Backdrop(backdrop) = primitive {
+                            lane_draws.push(LaneDraw::Backdrop(*backdrop));
+                        }
+                    }
+                }
             }
         }
         if let Some(open) = pending_triangles.take() {
@@ -627,54 +661,61 @@ impl Renderer {
             // pass writes the intermediate view directly. The sRGB encode is the
             // separate present pass below — never here — so there is no
             // double-encode (the Sprint 6 v0.9.1 bug, closed by construction).
-            let color_attachment = match self.msaa_color_view.as_ref() {
-                Some(msaa) => wgpu::RenderPassColorAttachment {
-                    view: msaa,
-                    depth_slice: None,
-                    resolve_target: Some(&self.intermediate_view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                },
-                None => wgpu::RenderPassColorAttachment {
-                    view: &self.intermediate_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
-                        store: wgpu::StoreOp::Store,
-                    },
-                },
+            //
+            // A `Backdrop` draw (#187) is the one lane that cannot share this
+            // pass: it needs to *sample* `self.intermediate_view`, which a
+            // still-open pass targeting that same view is simultaneously
+            // writing to. So the triangle/Slug run is split into contiguous
+            // "pass segments" at every `Backdrop` boundary — each gets its
+            // own tightly block-scoped `RenderPass` (so it's fully dropped,
+            // not merely emptied, before the next segment's encoder work),
+            // never a single pass spanning a `Backdrop`. Only the very first
+            // segment's pass clears; every later one (including the segment
+            // right after a `Backdrop`) loads, so a `Backdrop`'s own
+            // `LoadOp::Load` passes and the triangle pass before/after it all
+            // see the frame as one continuously-composited surface, exactly
+            // as if they were one pass.
+            let ui_pass_target = UiPassTarget {
+                intermediate_view: &self.intermediate_view,
+                msaa_color_view: self.msaa_color_view.as_ref(),
+                clear,
             };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("mkui-wgpu UI Pass"),
-                color_attachments: &[Some(color_attachment)],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            // Draw each command in scene order within the single pass, so a
-            // later command composites over an earlier one (alpha blending is
-            // load/store compatible across lanes). UI/bitmap runs use the UI
-            // pipeline; Slug runs draw through the adapter (#66).
-            for draw in &lane_draws {
-                match draw {
-                    LaneDraw::Triangles {
-                        buffer,
-                        vertex_count,
-                    } => {
-                        pass.set_pipeline(&self.ui_pipeline);
-                        pass.set_vertex_buffer(0, buffer.slice(..));
-                        pass.draw(0..*vertex_count, 0..1);
-                    }
-                    #[cfg(feature = "slug")]
-                    LaneDraw::Slug(prepared) => {
-                        self.slug_adapter.draw(&mut pass, prepared);
-                    }
+            let mut segment_start = 0usize;
+            let mut cleared = false;
+            for (i, draw) in lane_draws.iter().enumerate() {
+                if !matches!(draw, LaneDraw::Backdrop(_)) {
+                    continue;
                 }
+                draw_pass_segment(
+                    &mut encoder,
+                    &ui_pass_target,
+                    &mut cleared,
+                    &self.ui_pipeline,
+                    #[cfg(feature = "slug")]
+                    &self.slug_adapter,
+                    &lane_draws[segment_start..i],
+                );
+                let LaneDraw::Backdrop(backdrop) = draw else {
+                    unreachable!("matches! above guarantees this arm")
+                };
+                self.backdrop_blur.composite(
+                    &self.device,
+                    &mut encoder,
+                    &self.intermediate_view,
+                    backdrop,
+                    device_pixel_ratio,
+                );
+                segment_start = i + 1;
             }
+            draw_pass_segment(
+                &mut encoder,
+                &ui_pass_target,
+                &mut cleared,
+                &self.ui_pipeline,
+                #[cfg(feature = "slug")]
+                &self.slug_adapter,
+                &lane_draws[segment_start..],
+            );
         }
 
         // Present pass: encode the linear intermediate to the surface. A single
@@ -713,6 +754,90 @@ impl Renderer {
         }
         Ok(RenderOutcome::Drawn)
     }
+}
+
+/// Draw one contiguous run of `draws` (never containing a `LaneDraw::Backdrop`
+/// — callers split the full `lane_draws` list at every `Backdrop` boundary
+/// before calling this, see [`Renderer::render`]) inside its own tightly
+/// block-scoped render pass against `intermediate_view`. `*cleared` tracks
+/// whether *any* earlier segment this frame has already cleared the target;
+/// every segment after the first one loads instead, so a `Backdrop`'s own
+/// `LoadOp::Load` passes and the triangle segments before/after it all
+/// composite onto one continuously-built frame, exactly as if they were a
+/// single pass. Always opens a pass, even for an empty `draws` slice — the
+/// first segment of a frame whose very first primitive is a `Backdrop` still
+/// needs *something* to apply the initial clear before that `Backdrop`
+/// samples the target.
+/// The intermediate's view + optional MSAA attachment + the frame's clear
+/// color, bundled so [`draw_pass_segment`] stays under clippy's argument-count
+/// lint.
+struct UiPassTarget<'a> {
+    intermediate_view: &'a wgpu::TextureView,
+    msaa_color_view: Option<&'a wgpu::TextureView>,
+    clear: wgpu::Color,
+}
+
+fn draw_pass_segment(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &UiPassTarget<'_>,
+    cleared: &mut bool,
+    ui_pipeline: &wgpu::RenderPipeline,
+    #[cfg(feature = "slug")] slug_adapter: &SlugAdapter,
+    draws: &[LaneDraw],
+) {
+    let load = if *cleared {
+        wgpu::LoadOp::Load
+    } else {
+        wgpu::LoadOp::Clear(target.clear)
+    };
+    let color_attachment = match target.msaa_color_view {
+        Some(msaa) => wgpu::RenderPassColorAttachment {
+            view: msaa,
+            depth_slice: None,
+            resolve_target: Some(target.intermediate_view),
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        },
+        None => wgpu::RenderPassColorAttachment {
+            view: target.intermediate_view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        },
+    };
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mkui-wgpu UI Pass"),
+        color_attachments: &[Some(color_attachment)],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    for draw in draws {
+        match draw {
+            LaneDraw::Triangles {
+                buffer,
+                vertex_count,
+            } => {
+                pass.set_pipeline(ui_pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*vertex_count, 0..1);
+            }
+            #[cfg(feature = "slug")]
+            LaneDraw::Slug(prepared) => {
+                slug_adapter.draw(&mut pass, prepared);
+            }
+            LaneDraw::Backdrop(_) => {
+                unreachable!("callers split `lane_draws` at every Backdrop boundary")
+            }
+        }
+    }
+    *cleared = true;
 }
 
 /// Collect the [`PlacedSlugGlyph`]s carried by a primitive slice, in order.
@@ -918,7 +1043,7 @@ fn pick_sample_count(color_flags: wgpu::TextureFormatFeatureFlags, preferred: u3
 /// `"fs_ui_triangles_encode_srgb"` for [`embedded::EmbeddedRenderer`] drawing
 /// directly into a host target format with no automatic sRGB encode on
 /// write. See `ui_triangles.wgsl` for both entry points.
-fn build_ui_pipeline(
+pub(crate) fn build_ui_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
     sample_count: u32,
@@ -1158,7 +1283,7 @@ fn create_present_bind_group(
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 3],
     color: [f32; 4],
 }
@@ -1182,7 +1307,7 @@ impl Vertex {
 /// always the linear intermediate ([`INTERMEDIATE_FORMAT`]), never the sRGB
 /// surface — so there is no longer a target-format branch. See
 /// [`Color::to_linear_rgba`](crate::types::Color::to_linear_rgba).
-fn gui_vertices(triangles: &[GuiTriangle], width: f32, height: f32) -> Vec<Vertex> {
+pub(crate) fn gui_vertices(triangles: &[GuiTriangle], width: f32, height: f32) -> Vec<Vertex> {
     let width = width.max(1.0);
     let height = height.max(1.0);
     triangles

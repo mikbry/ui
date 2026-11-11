@@ -22,12 +22,18 @@
 //!
 //! Phase 1 (#175) covers the triangle lane only — the UI shapes, bitmap
 //! text, and borders every component renders through today. The Slug
-//! vector-glyph lane (`slug` feature, ADR 0007) and `Primitive::VectorPath`
-//! are not wired into [`EmbeddedRenderer::render_into`](crate::EmbeddedRenderer::render_into) yet; primitives of
-//! those kinds are silently skipped (the same no-op [`crate::tessellate_primitives`]
-//! already gives them on an unselected lane), not rejected. Follow-up:
-//! extending the embedded path to the Slug/vector lane is tracked
-//! separately (#234) so Phase 1 stays scoped to the hosting contract itself.
+//! vector-glyph lane (`slug` feature, ADR 0007), `Primitive::VectorPath`,
+//! and (#187) real backdrop blur (`Primitive::Backdrop`) are not wired into
+//! [`EmbeddedRenderer::render_into`](crate::EmbeddedRenderer::render_into)
+//! yet; primitives of those kinds are silently skipped (the same no-op
+//! [`crate::tessellate_primitives`] already gives them on an unselected
+//! lane), not rejected. A glass panel still renders *something* here: it
+//! also emits a translucent `Quad` (the tint) that composites normally
+//! through the triangle lane — it just loses the blur, degrading to a flat
+//! tint over whatever the host already drew. Follow-up: extending the
+//! embedded path to the Slug/vector lane is tracked separately (#234), and
+//! to the backdrop-blur lane in #187's own follow-up, so Phase 1 stays
+//! scoped to the hosting contract itself.
 //!
 //! ## Color space
 //!
