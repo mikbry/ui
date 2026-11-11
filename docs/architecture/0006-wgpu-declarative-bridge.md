@@ -234,6 +234,82 @@ The fix was a single load-bearing change at the projection call site — the
 renderer already received the logical viewport via `scene.viewport`; it just
 stopped reading the wrong field.
 
+### UI-scale setting (#179)
+
+A user-facing "make the UI bigger" accessibility setting, distinct from
+`scale_factor` (which keeps the UI the same *apparent* size while adapting
+to pixel density). It is implemented as a second divisor folded into the
+same conversion §"Viewport units contract" already does:
+`viewport = physical / (scale_factor * ui_scale)`.
+
+This is a deliberate choice over scaling each widget's size constants
+(`walker.rs`'s `BUTTON_HEIGHT_PX`, `theme.rs`'s font sizes, every
+`mkui_wgpu::components::*` builder's own numbers, every custom
+`WgpuRenderable`'s primitives, …) individually: shrinking the logical
+viewport for a fixed physical surface size increases the effective
+device-pixel ratio every primitive is projected against (`gui_vertices`,
+`tessellate_primitives`), which magnifies **everything** uniformly —
+text, quads, borders, custom-renderer output — with zero widget-level code
+reading `ui_scale` at all. The per-constant alternative would need to visit
+every one of those call sites and would still miss any future one.
+
+`WgpuApp::ui_scale` / `WgpuApp::set_ui_scale` own the setting; clamped to
+`[MIN_UI_SCALE, MAX_UI_SCALE]` (0.5–3.0) and a non-finite input is ignored
+rather than clamped (clamping NaN is undefined). `WgpuApp::
+effective_scale_factor_for` combines the OS `scale_factor` with `ui_scale`
+into one divisor; every physical→logical conversion in `app.rs` —
+including the `MouseInput` cursor-position conversion — multiplies by that
+same combined value (three of the call sites inline the multiply rather
+than calling the method itself, forced by borrowing `self.state` mutably
+in the same block), so hit-testing never drifts out of sync with the
+layout the walker produced against the same combined factor. `resumed()`
+also calls through this path right after creating the window, so a
+`ui_scale` set before `run()` (e.g. restoring a saved setting) is honored
+from the very first frame rather than only from the next `Resized` event.
+
+`WgpuApp::set_surface_size` is the sibling fix this surfaced: the
+host-embedding path (`WgpuApp::with_app_tree` + `WgpuApp::update_frame`,
+#177) had no public way at all to report a resize — only the winit-owned
+`Resized`/`ScaleFactorChanged` handlers could update the viewport. A host
+driving its own loop now calls `set_surface_size(physical_width,
+physical_height, scale_factor)` on every resize (and `set_ui_scale`
+whenever the setting changes). Unlike the winit-owned handlers, neither
+rebuilds eagerly on this path — both go through `queue_viewport_resize`,
+which only updates `Scene::viewport` and marks the tree dirty. Rebuilding
+eagerly here (as an earlier revision did, calling
+`resize_scene_viewport` directly) would clear the dirty bit before the
+host's next `update_frame()` call could ever see it, so a host that only
+re-tessellates/re-uploads on that method's `true` return — the #177
+contract — would never learn the resize was applied. The next
+`update_frame()` call is what actually walks and returns `true`; no stale
+layout frame survives, but the signal telling the host so comes from the
+method the host is already polling, not from a side effect of calling
+`set_surface_size`/`set_ui_scale` themselves.
+[`crate::input_router::InputRouter::route`]'s `scale_factor` parameter
+carries the same contract for hosts using that standalone router instead of
+`WgpuApp`: pass the combined `os_scale_factor * ui_scale`, since it has no
+`ui_scale` state of its own to fold in.
+
+A smaller viewport also means `content_width` shrinks, which makes a
+`Text` node far more likely to actually wrap — `render_text` used to
+always reserve exactly one `line_height` of rect height per node
+regardless of content length, and `tessellate_text`'s real wrap pass
+(`max_lines = floor(rect.height / line_height)`) silently drops every
+line after the first the moment a heading or body line wraps. This
+predates #179, but `ui_scale` makes it far easier to trigger in practice
+(the same way a narrow window already could), so it's fixed alongside:
+`render_text` now estimates how many lines content will wrap into
+(`estimate_text_line_count`, the same kind of best-effort,
+no-`TextSystem`-at-layout-time estimate `APPROX_CHAR_WIDTH_PX` already
+makes for a button's width) and reserves that many lines of height,
+advancing `cursor_y` by the full reserved height rather than always one
+line. It is an estimate, not a measurement — the walker has no
+`TextSystem` reference at layout time — so it can under- or over-reserve
+slightly; `menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix`
+(`walker.rs`) asserts the real wrap pass never produces more lines than
+the estimate reserved, across the full size x `ui_scale` matrix, for
+representative (not unbounded) content.
+
 ### First-paint render scheduling
 
 `resumed()` creates the window and schedules exactly one redraw. wgpu's

@@ -51,6 +51,52 @@ breaking changes can land on minor bumps).
     `Scene`-level unit tests (geometry, overlap, hit-region round trips),
     not a Lavapipe/offscreen GPU readback or a showcase example. Deferred to
     the first host/showcase consumer that actually draws a toast stack.
+- **`mkui-wgpu::WgpuApp` — resolution, HiDPI, live resize, and a UI-scale
+  setting (#179, E6 of #173, ADR 0006 §"UI-scale setting").** `WgpuApp::
+  ui_scale` / `set_ui_scale` add a user-facing size multiplier, clamped to
+  0.5–3.0, folded into the same `physical / scale_factor` conversion the
+  viewport already used for OS HiDPI — `viewport = physical / (scale_factor
+  * ui_scale)` — so doubling it magnifies every primitive the walker (or
+  any custom `WgpuRenderable`) emits uniformly, with no per-widget code
+  change. `WgpuApp::set_surface_size(physical_width, physical_height,
+  scale_factor)` is a new entry point (non-wasm; see the scope decision
+  below) for the host-embedding path (`with_app_tree` + `update_frame`,
+  #177): that path previously had no way at all to report a resize, so its
+  viewport stayed pinned at construction-time defaults for the app's
+  lifetime. It queues the viewport change and marks the tree dirty rather
+  than rebuilding eagerly, so the resize is only observed through
+  `update_frame`'s own `true` return — the contract that method's docs
+  already commit hosts to reacting on. Both the winit-owned resize handlers
+  and the `MouseInput` cursor-position conversion now multiply by the same
+  combined `scale_factor * ui_scale` (`WgpuApp::effective_scale_factor_for`),
+  so hit-testing never drifts out of sync with the layout once
+  `ui_scale != 1.0`. `InputRouter::route`'s `scale_factor` contract is
+  documented to expect the same combined factor. `walker.rs`'s
+  `render_text` also now reserves rect height for an *estimated* line
+  count instead of always exactly one line — otherwise a heading/body
+  line long enough to wrap (far more likely once `ui_scale` shrinks the
+  effective viewport) would have every line past the first silently
+  dropped by `tessellate_text`'s real wrap pass.
+  - Scope decision: scoped to the non-wasm desktop target, matching the
+    issue's own text (`~390x844 phone portrait... for the WASM/mobile gate
+    tracked separately`, #180/E7) and this crate's existing
+    `#[cfg(not(target_arch = "wasm32"))]` convention for the embedding-host
+    API surface (`update_frame`, `rebuild_scene_from_tree`). Fullscreen
+    toggling (mentioned in the issue's Goal but not its acceptance
+    criteria) needs no new code — it already arrives as an ordinary
+    `WindowEvent::Resized`.
+  - Scope decision: on the winit-owned path (`Mkui::run`, which consumes
+    the app into the event loop), there is currently no way for in-tree
+    application code (e.g. a settings screen's button handler) to reach
+    `WgpuApp::set_ui_scale` at all — `RuntimeSignal` only carries
+    `RequestRedraw`, and `Mkui::run` takes `self` by value. This is a
+    pre-existing gap shared with `WgpuApp::set_theme` (same reachability
+    problem, no `RuntimeSignal` variant for a theme change either), not
+    something #179 introduces. The host-embedding path this issue is
+    actually scoped under (#173) is unaffected: a host owns its `WgpuApp`
+    directly and can call `set_ui_scale` at any time. Wiring a
+    settings-change signal through the action/runtime-signal path for the
+    winit-owned path is a separate, orthogonal issue.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

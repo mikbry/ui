@@ -365,9 +365,22 @@ fn render_text(
         ..body_style
     };
 
+    // #179: reserve enough vertical space for as many lines as the content
+    // is likely to wrap into at `content_width`, not always exactly one.
+    // `tessellate_text` caps the lines it actually draws at
+    // `floor(rect.height / line_height)` — a rect that's always exactly
+    // one `line_height` tall silently drops every line after the first the
+    // moment real wrapping kicks in, which gets far more likely once a
+    // narrow `content_width` (a small window, or a large `ui_scale`
+    // shrinking the effective viewport) forces a heading or body line to
+    // wrap. See `estimate_text_line_count`'s doc for why this is an
+    // estimate, not a measurement.
+    let line_count = estimate_text_line_count(&text.content, font_size, content_width);
+    let rect_height = line_height * line_count as f32;
+
     let rect = Rect::new(
         Point::new(ctx.content_x, ctx.cursor_y),
-        Size::new(content_width.max(0.0), line_height),
+        Size::new(content_width.max(0.0), rect_height),
     );
 
     ctx.scene.text(Text {
@@ -381,7 +394,29 @@ fn render_text(
         rect,
     });
 
-    ctx.cursor_y += line_height;
+    ctx.cursor_y += rect_height;
+}
+
+/// Average glyph width, as a fraction of `font_size_px`, [`estimate_text_line_count`]
+/// uses to guess how many lines text will wrap into. The walker has no
+/// [`mkui_text::TextSystem`] reference at layout time — only the later
+/// `tessellate_text` pass does — so it cannot measure real glyph advances
+/// the way a real text system would; this is the same kind of best-effort
+/// estimate `APPROX_CHAR_WIDTH_PX` already makes for a button's width,
+/// scaled by font size since text (unlike a button label) spans a much
+/// wider size range (14px captions to 36px headings).
+const APPROX_TEXT_CHAR_WIDTH_RATIO: f32 = 0.55;
+
+/// Estimate how many lines `content` wraps into at `content_width` and
+/// `font_size` (#179) — see [`APPROX_TEXT_CHAR_WIDTH_RATIO`]'s doc for why
+/// this is an estimate, not a measurement, and `render_text`'s call site
+/// for why under-estimating matters (dropped lines, not just a layout
+/// nicety).
+fn estimate_text_line_count(content: &str, font_size: f32, content_width: f32) -> u32 {
+    let avg_char_width = (font_size * APPROX_TEXT_CHAR_WIDTH_RATIO).max(1.0);
+    let chars_per_line = (content_width.max(1.0) / avg_char_width).floor().max(1.0);
+    let char_count = content.chars().count() as f32;
+    (char_count / chars_per_line).ceil().max(1.0) as u32
 }
 
 fn render_button(
@@ -801,6 +836,163 @@ mod tests {
         assert_eq!(
             text.style.color,
             color_role_foreground(ColorRole::MutedForeground, &theme),
+        );
+    }
+
+    /// #179 acceptance criterion #1: "menus, HUD and settings stay readable
+    /// and unclipped at every listed size, at 1x/2x/3x scale factors."
+    ///
+    /// `WgpuApp` folds `ui_scale` into the viewport it hands this walker
+    /// (`viewport = physical / (scale_factor * ui_scale)`, ADR 0006
+    /// §"UI-scale setting") — so, from the walker's point of view, "every
+    /// listed size at 1x/2x/3x" is exactly "every listed size divided by
+    /// 1/2/3". This walks a small realistic menu (a heading + two short
+    /// buttons — representative content, not an unbounded stress string)
+    /// at that full size x scale matrix and asserts every laid-out rect
+    /// stays inside the viewport, and every text run's wrapped width stays
+    /// inside its own rect. The ~390x844 phone-portrait size is excluded —
+    /// the issue ties it to the WASM/mobile gate tracked separately (#180).
+    ///
+    /// This intentionally does not cover arbitrarily long content: a
+    /// button's width (`BUTTON_PADDING_X_PX` + label width) is not clamped
+    /// to `content_width`, and there is no scroll area yet (#194, an
+    /// existing, orthogonal gap predating this issue) — long enough content
+    /// at a small enough effective viewport can still overflow. That is a
+    /// pre-existing limitation of the fixed-size walker, not something
+    /// `ui_scale` introduces; `ui_scale` just makes the effective viewport
+    /// smaller, the same way a narrow physical window already could.
+    #[test]
+    fn menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix() {
+        use crate::tessellation::map_align;
+        use mkui_text::{
+            BitmapTextSystem, FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings,
+        };
+
+        let logical_sizes = [(1280.0_f32, 800.0_f32), (1280.0, 720.0), (3440.0, 1440.0)];
+        let ui_scales = [1.0_f32, 2.0, 3.0];
+        let text_system = BitmapTextSystem::new();
+        // Tracks the most lines any text in the matrix actually wrapped
+        // into, so the test can confirm it exercised wrapping at all
+        // (see the `assert!` after the loops) rather than passing because
+        // "Display & resolution settings" happened to always fit on one
+        // line — which would make every assertion below pass trivially.
+        let mut max_runs_seen = 0usize;
+
+        for (width, height) in logical_sizes {
+            for ui_scale in ui_scales {
+                let viewport = Size::new(width / ui_scale, height / ui_scale);
+                let core = CoreMkui::new().child(
+                    View::new()
+                        // A realistic settings heading, long enough to
+                        // actually need wrapping at the narrowest
+                        // size/ui_scale combo in this matrix — "Settings"
+                        // alone never would have exercised the wrap path
+                        // at all, so it couldn't have caught the #182
+                        // wrap-vs-#179-layout mismatch this test guards.
+                        .child(
+                            CoreText::new("Display & resolution settings")
+                                .variant(TextVariant::Heading1),
+                        )
+                        .child(
+                            Button::new("Save")
+                                .variant(ButtonVariant::Primary)
+                                .on_press(|| {}),
+                        )
+                        .child(
+                            Button::new("Cancel")
+                                .variant(ButtonVariant::Outline)
+                                .on_press(|| {}),
+                        ),
+                );
+                let registry = WgpuRendererRegistry::with_defaults();
+                let options = WalkOptions {
+                    viewport,
+                    theme: WgpuTheme::default(),
+                };
+                let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
+
+                for layout in &out.layouts {
+                    assert!(
+                        layout.rect.origin.x + layout.rect.size.width <= viewport.width + 0.5,
+                        "node {:?} rect {:?} overflows viewport width {} \
+                         at {width}x{height} @ ui_scale {ui_scale}",
+                        layout.node,
+                        layout.rect,
+                        viewport.width
+                    );
+                    // Vertical containment, not just horizontal: the last
+                    // sibling's bottom edge is the walker's own running
+                    // `cursor_y`, so this also catches an estimate that
+                    // reserves too little height for a wrapped heading
+                    // (the overflow would show up as the *next* sibling
+                    // sitting off the bottom of the viewport, not as the
+                    // heading's own rect).
+                    assert!(
+                        layout.rect.origin.y + layout.rect.size.height <= viewport.height + 0.5,
+                        "node {:?} rect {:?} overflows viewport height {} \
+                         at {width}x{height} @ ui_scale {ui_scale}",
+                        layout.node,
+                        layout.rect,
+                        viewport.height
+                    );
+                }
+
+                for text in text_primitives(&out.scene) {
+                    let spec = LayoutSpec {
+                        font_id: FontId::BITMAP,
+                        font_generation: 0,
+                        font_size_px: text.style.font_size_px,
+                        line_height_px: text.style.line_height_px,
+                        align: map_align(text.style.align),
+                        // `None` here mirrors the real wrap pass, not the
+                        // renderer's clamp — `max_lines` is asserted
+                        // separately below, against the renderer's own
+                        // formula, so this test fails if the walker's
+                        // line-count *estimate* (`render_text`'s call to
+                        // `estimate_text_line_count`) ever falls short of
+                        // what the text system actually produces.
+                        max_lines: None,
+                        hinting: HintingMode::None,
+                        variations: VariationSettings::empty(),
+                        synthesis_flags: 0,
+                    };
+                    let runs = text_system.layout(&text.content, &spec, Some(text.rect.size.width));
+                    max_runs_seen = max_runs_seen.max(runs.len());
+                    let line_height = text.style.line_height_px.max(1.0);
+                    let rendered_max_lines =
+                        ((text.rect.size.height / line_height).floor() as usize).max(1);
+                    assert!(
+                        runs.len() <= rendered_max_lines,
+                        "text {:?} wraps into {} lines but render_text's rect \
+                         (height {}) only reserved {} — tessellate_text will \
+                         silently drop the rest at {width}x{height} @ ui_scale {ui_scale}",
+                        text.content,
+                        runs.len(),
+                        text.rect.size.height,
+                        rendered_max_lines
+                    );
+                    for run in &runs {
+                        for glyph in &run.glyphs {
+                            let right_edge = run.origin_x_px + glyph.x_px + glyph.x_advance_px;
+                            assert!(
+                                right_edge <= text.rect.size.width + 0.5,
+                                "text {:?} wraps past its own rect width {} \
+                                 (glyph right edge {right_edge}) at {width}x{height} @ ui_scale {ui_scale}",
+                                text.content,
+                                text.rect.size.width
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            max_runs_seen > 1,
+            "the matrix never produced a wrapped (multi-line) text run — \
+             this test would pass even if render_text's line-count \
+             reservation were reverted to always exactly one line, so it \
+             isn't actually exercising the wrap path it claims to guard"
         );
     }
 

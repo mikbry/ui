@@ -108,7 +108,39 @@ pub struct WgpuApp {
     /// `frame_counter - last_resize_frame < RESIZE_ACTIVE_WINDOW_FRAMES`.
     #[cfg(not(target_arch = "wasm32"))]
     last_resize_frame: Option<u32>,
+    /// User-facing UI-scale (text/size) multiplier (#179), applied on top of
+    /// the OS HiDPI `scale_factor` wherever a physical size is converted to
+    /// the logical-pixel viewport the walker lays out against — see
+    /// [`WgpuApp::set_ui_scale`] and ADR 0006 §"UI-scale setting". Not
+    /// `cfg`-gated: it carries no winit dependency, so a future wasm/mobile
+    /// host (#180) can read/write it even before that target gets its own
+    /// resize plumbing.
+    ui_scale: f32,
+    /// Most recent `(physical_width, physical_height, os_scale_factor)` an
+    /// embedding host pushed via [`WgpuApp::set_surface_size`] (#179).
+    /// `None` until the first call. Lets [`WgpuApp::set_ui_scale`] recompute
+    /// the viewport on a UI-scale change alone, without the host having to
+    /// re-report its surface size. Irrelevant on the winit-owned path (that
+    /// path re-queries `state.window` directly instead).
+    #[cfg(not(target_arch = "wasm32"))]
+    last_surface_size: Option<(u32, u32, f64)>,
 }
+
+/// Lower bound [`WgpuApp::set_ui_scale`] clamps to — small enough to still
+/// read as "smaller" without shrinking controls below a usable hit target.
+const MIN_UI_SCALE: f32 = 0.5;
+
+/// Upper bound [`WgpuApp::set_ui_scale`] clamps to. Mirrors the 1x/2x/3x
+/// HiDPI range the resolution acceptance criterion (#179) names, as a
+/// reasonable ceiling for the same reason: `walker.rs`'s fixed-size atoms
+/// (e.g. `BUTTON_HEIGHT_PX`) aren't clamped to `content_width`, so pushing
+/// the effective viewport arbitrarily small by stacking a large `ui_scale`
+/// onto a narrow window eventually overflows it for long enough content —
+/// see `menu_content_stays_within_the_viewport_across_the_179_acceptance_matrix`
+/// in `walker.rs` for where that boundary actually sits for realistic
+/// content (not an unbounded one), and #194 (an existing, orthogonal gap)
+/// for the scroll-area fix content long enough to need it is waiting on.
+const MAX_UI_SCALE: f32 = 3.0;
 
 /// Cap on first-paint `Skipped`→retry reschedules before giving up, so a
 /// genuinely occluded or never-ready surface doesn't spin redraws forever
@@ -200,6 +232,9 @@ impl WgpuApp {
             frame_counter: 0,
             #[cfg(not(target_arch = "wasm32"))]
             last_resize_frame: None,
+            ui_scale: 1.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_surface_size: None,
         }
     }
 
@@ -278,6 +313,44 @@ impl WgpuApp {
         if let Some(core) = self.core.as_ref() {
             core.borrow_mut().tree_mut().mark_dirty();
         }
+    }
+
+    /// Current UI-scale (text/size) multiplier (#179). `1.0` is the
+    /// default/no-op scale. See [`WgpuApp::set_ui_scale`].
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// Set the user-facing UI-scale multiplier, folded into the same
+    /// logical-pixel viewport the OS HiDPI `scale_factor` divides into (ADR
+    /// 0006 §"UI-scale setting"): doubling it halves `Scene::viewport` for a
+    /// fixed physical surface size, which uniformly magnifies every
+    /// primitive the walker (or a custom [`crate::bridge::WgpuRenderable`])
+    /// emits — text, buttons, panels, everything — without any widget-level
+    /// code reading this value itself.
+    ///
+    /// `ui_scale` is clamped to [`MIN_UI_SCALE`, `MAX_UI_SCALE`]; a
+    /// non-finite input (NaN, ±inf) is ignored rather than clamped, since
+    /// clamping NaN is itself undefined. A value identical to the current
+    /// one (post-clamp) is a no-op — mirrors [`WgpuApp::set_theme`]'s
+    /// no-redundant-work contract.
+    ///
+    /// On the winit-owned path this re-syncs against the live window size;
+    /// on the host-embedding path (no window — see [`WgpuApp::set_surface_size`])
+    /// it re-syncs against the most recently reported surface size, if any.
+    /// Either way the runtime tree is marked dirty and the scene is eagerly
+    /// rebuilt — the same "no stale layout frame" contract a resize gets.
+    pub fn set_ui_scale(&mut self, ui_scale: f32) {
+        if !ui_scale.is_finite() {
+            return;
+        }
+        let ui_scale = ui_scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
+        if (self.ui_scale - ui_scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.ui_scale = ui_scale;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.resync_viewport_for_ui_scale_change();
     }
 
     /// Borrow the underlying core Mkui (and thus the runtime AppTree),
@@ -391,6 +464,152 @@ impl WgpuApp {
             return false;
         }
         self.try_rebuild_scene_from_tree()
+    }
+
+    /// Push a surface-size update from a host that owns its own
+    /// window/surface and drives mkui through [`WgpuApp::update_frame`]
+    /// rather than letting this app own a winit window (#179, the
+    /// host-embedding path that [`WgpuApp::update_frame`] already
+    /// documents — #177). Before this method existed, that path had no
+    /// way at all to tell `WgpuApp` its surface had resized: the viewport
+    /// stayed at whatever `with_app_tree`'s construction-time default was
+    /// for the life of the app.
+    ///
+    /// `physical_width` / `physical_height` are the host's render target
+    /// size in physical pixels; `scale_factor` is the OS HiDPI scale the
+    /// host's own window reports (`1.0` if the host doesn't track one).
+    /// Recomputes the logical scene viewport — honouring the current
+    /// [`WgpuApp::ui_scale`] the same way the winit-owned path's
+    /// `Resized`/`ScaleFactorChanged` handlers do — and queues the rebuild
+    /// (`WgpuApp::queue_viewport_resize`: updates `Scene::viewport` and
+    /// marks the tree dirty, but does **not** walk it here) so the very
+    /// next [`WgpuApp::update_frame`] call is the one that actually
+    /// rebuilds and returns `true`. Rebuilding eagerly inside this method
+    /// instead — as the winit-owned resize handlers correctly do — would
+    /// clear the dirty bit before the host's next `update_frame()` call
+    /// ever sees it, so a host that (per that method's own contract) only
+    /// re-tessellates/re-uploads on a `true` return would never learn the
+    /// resize was applied: no stale layout frame survives, but the host
+    /// would never be told to stop drawing the previous one either.
+    ///
+    /// No-op when: the app owns a winit window (`WgpuApp::with_app_tree` run
+    /// through [`WgpuApp`]'s own `ApplicationHandler`/`run` loop) — that
+    /// path's own `Resized`/`ScaleFactorChanged` handlers already own
+    /// viewport sync and must stay the single writer; or the reported size
+    /// is zero (a minimized/occluded host surface) — mirrors the existing
+    /// `sync_renderer_to_current_window_size` zero-size guard.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_surface_size(
+        &mut self,
+        physical_width: u32,
+        physical_height: u32,
+        scale_factor: f32,
+    ) {
+        if self.state.is_some() {
+            return;
+        }
+        if physical_width == 0 || physical_height == 0 {
+            return;
+        }
+        let os_scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+            scale_factor as f64
+        } else {
+            1.0
+        };
+        self.last_surface_size = Some((physical_width, physical_height, os_scale_factor));
+        let viewport = logical_viewport_from_physical_size(
+            winit::dpi::PhysicalSize::new(physical_width, physical_height),
+            self.effective_scale_factor_for(os_scale_factor),
+        );
+        self.queue_viewport_resize(viewport);
+    }
+
+    /// Update `Scene::viewport` in place and mark the tree dirty, without
+    /// walking it (#179). The host-embedding counterpart to
+    /// `WgpuApp::resize_scene_viewport`'s eager rebuild: a host polling
+    /// [`WgpuApp::update_frame`]'s return value must be the one to trigger
+    /// the actual walk, or it never observes the `true` that tells it to
+    /// re-upload. See [`WgpuApp::set_surface_size`]'s doc for why eager
+    /// rebuild is wrong on this path.
+    ///
+    /// A no-op on the raw-scene escape hatch (`self.core` is `None`) beyond
+    /// the viewport update itself — mirrors `resize_scene_viewport`'s
+    /// raw-scene branch; there is no tree to mark dirty.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn queue_viewport_resize(&mut self, new_viewport: Size) {
+        self.scene.viewport = new_viewport;
+        if let Some(core) = self.core.as_ref() {
+            core.borrow_mut().tree_mut().mark_dirty();
+        }
+    }
+
+    /// Fold [`WgpuApp::ui_scale`] into an OS-reported `scale_factor` so every
+    /// physical→logical conversion in this module (viewport AND cursor
+    /// position) divides by the same combined factor (#179, ADR 0006
+    /// §"UI-scale setting"). A mismatch between the two — e.g. the viewport
+    /// honouring `ui_scale` while hit-testing didn't — would silently
+    /// misalign clicks the moment `ui_scale != 1.0`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn effective_scale_factor_for(&self, os_scale_factor: f64) -> f64 {
+        os_scale_factor * self.ui_scale as f64
+    }
+
+    /// The combined factor a latched `MouseInput` cursor position must
+    /// divide by to land in the same logical-pixel space `hit_tests` was
+    /// produced against (#179). Reads the live window's OS `scale_factor`
+    /// when one exists (`1.0` on the scene-only/no-window path), then
+    /// folds in [`WgpuApp::ui_scale`] via [`WgpuApp::effective_scale_factor_for`]
+    /// — the same helper the viewport computation uses, so the two can
+    /// never silently disagree.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn cursor_scale_factor(&self) -> f64 {
+        let os_scale_factor = self
+            .state
+            .as_ref()
+            .map(|s| s.window.scale_factor())
+            .unwrap_or(1.0);
+        self.effective_scale_factor_for(os_scale_factor)
+    }
+
+    /// Re-sync the viewport after [`WgpuApp::set_ui_scale`] changes the
+    /// scale alone (no accompanying resize event), or right after
+    /// `resumed()` creates the window (to pick up a `ui_scale` the caller
+    /// set before `run()` — see ADR 0006 §"UI-scale setting"). Re-derives
+    /// the physical size from whichever path is active: the live window on
+    /// the winit-owned path (eager rebuild — that path isn't gated by
+    /// `update_frame`'s return value), or the most recent
+    /// [`WgpuApp::set_surface_size`] report on the host-embedding path
+    /// (queued, not eager — see that method's doc for why). A no-op if
+    /// neither has a size yet (construction-time default viewport stands
+    /// until the first resize).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resync_viewport_for_ui_scale_change(&mut self) {
+        if let Some(state) = self.state.as_ref() {
+            let size = state.window.inner_size();
+            if size.width == 0 || size.height == 0 {
+                return;
+            }
+            // Deliberately does NOT call `arm_resize_redraw_pump()`: that
+            // pump exists to bridge an actual Metal swapchain transition
+            // during a real `Renderer::resize` (#99/#101) — this branch
+            // never touches the renderer/surface config, only the logical
+            // viewport, so there is no transition to bridge. Arming it
+            // here (an earlier revision of #179 did) forced ~60 redraws
+            // and opened the macOS `CursorMoved` bridge window on every
+            // `resumed()` call, since this method also runs once at
+            // startup to pick up a `ui_scale` set before `run()`.
+            let viewport = logical_viewport_from_physical_size(
+                size,
+                self.effective_scale_factor_for(state.window.scale_factor()),
+            );
+            self.resize_scene_viewport(viewport);
+        } else if let Some((width, height, os_scale_factor)) = self.last_surface_size {
+            let viewport = logical_viewport_from_physical_size(
+                winit::dpi::PhysicalSize::new(width, height),
+                self.effective_scale_factor_for(os_scale_factor),
+            );
+            self.queue_viewport_resize(viewport);
+        }
     }
 
     /// Update the held scene for a new viewport on `WindowEvent::Resized`,
@@ -557,6 +776,7 @@ impl WgpuApp {
     /// we build vertices.
     #[cfg(not(target_arch = "wasm32"))]
     fn sync_renderer_to_current_window_size(&mut self) {
+        let ui_scale = self.ui_scale;
         let new_viewport = {
             let Some(state) = self.state.as_mut() else {
                 return;
@@ -569,7 +789,7 @@ impl WgpuApp {
                 return;
             }
             state.renderer.resize(size.width, size.height);
-            logical_viewport_from_physical_size(size, state.window.scale_factor())
+            logical_viewport_from_physical_size(size, state.window.scale_factor() * ui_scale as f64)
         };
         self.resize_scene_viewport(new_viewport);
         self.arm_resize_redraw_pump();
@@ -640,6 +860,13 @@ impl std::fmt::Debug for WgpuApp {
 /// `physical / scale_factor` conversion in one testable place. Fractional
 /// scale factors (e.g. 1.5×) are preserved as f32 — we do not round to
 /// integer logical pixels (Codex Q8).
+///
+/// `scale_factor` is whatever divisor the caller wants folded into the
+/// viewport — every call site in this module now passes the OS
+/// `scale_factor` already combined with [`WgpuApp::ui_scale`] (#179, via
+/// the private `WgpuApp::effective_scale_factor_for` helper) rather than
+/// the raw OS value, so this function itself stays agnostic to where the
+/// factor came from.
 #[cfg(not(target_arch = "wasm32"))]
 fn logical_viewport_from_physical_size(
     size: winit::dpi::PhysicalSize<u32>,
@@ -684,7 +911,17 @@ impl ApplicationHandler for WgpuApp {
             Ok(renderer) => {
                 self.state = Some(WgpuAppState { window, renderer });
                 if self.core.is_some() {
-                    self.rebuild_scene_from_tree();
+                    // Re-derive the viewport from the window's real
+                    // inner_size()/scale_factor() rather than trusting
+                    // whatever `self.scene.viewport` held before the window
+                    // existed — the OS may not have honoured
+                    // `window_attributes()`'s requested size exactly, and a
+                    // caller may have set `ui_scale` before calling `run()`
+                    // (#179). Without this, the first frame lays out at a
+                    // stale/unscaled viewport while `MouseInput` already
+                    // hit-tests against the correct one, misaligning clicks
+                    // until the next `Resized` event happens to arrive.
+                    self.resync_viewport_for_ui_scale_change();
                 }
                 if let Some(state) = self.state.as_ref() {
                     state.window.request_redraw();
@@ -713,12 +950,16 @@ impl ApplicationHandler for WgpuApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let ui_scale = self.ui_scale;
                 let new_viewport = {
                     let Some(state) = self.state.as_mut() else {
                         return;
                     };
                     state.renderer.resize(size.width, size.height);
-                    logical_viewport_from_physical_size(size, state.window.scale_factor())
+                    logical_viewport_from_physical_size(
+                        size,
+                        state.window.scale_factor() * ui_scale as f64,
+                    )
                 };
                 self.resize_scene_viewport(new_viewport);
                 self.arm_resize_redraw_pump();
@@ -730,13 +971,14 @@ impl ApplicationHandler for WgpuApp {
                 // (Codex Q3). We deliberately do not touch `inner_size_writer`
                 // — forcing a window size is a UX decision out of scope here
                 // (Codex Q9 anti-pattern).
+                let ui_scale = self.ui_scale;
                 let new_viewport = {
                     let Some(state) = self.state.as_mut() else {
                         return;
                     };
                     let size = state.window.inner_size();
                     state.renderer.resize(size.width, size.height);
-                    logical_viewport_from_physical_size(size, scale_factor)
+                    logical_viewport_from_physical_size(size, scale_factor * ui_scale as f64)
                 };
                 self.resize_scene_viewport(new_viewport);
                 self.arm_resize_redraw_pump();
@@ -785,12 +1027,7 @@ impl ApplicationHandler for WgpuApp {
                 let Some(state) = left_button_state(button, state) else {
                     return;
                 };
-                let scale = self
-                    .state
-                    .as_ref()
-                    .map(|s| s.window.scale_factor())
-                    .unwrap_or(1.0);
-                let Some(cursor) = self.pointer.cursor_logical(scale) else {
+                let Some(cursor) = self.pointer.cursor_logical(self.cursor_scale_factor()) else {
                     return;
                 };
                 match state {
@@ -1009,6 +1246,261 @@ mod tests {
             app.scene().viewport,
             Size::new(1024.0, 768.0),
             "rebuilt scene must adopt the new viewport"
+        );
+    }
+
+    // ---- #179: resolution, HiDPI, live resize, UI-scale setting ----
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn logical_viewport_round_trips_across_the_acceptance_size_matrix() {
+        // The #179 acceptance criteria name a size list (handheld,
+        // small-desktop, wide-desktop) and 1x/2x/3x HiDPI scale factors.
+        // The ~390x844 phone-portrait size is deliberately excluded — the
+        // issue itself ties it to the WASM/mobile gate tracked separately
+        // as #180, out of scope here.
+        let logical_sizes = [(1280.0_f32, 800.0_f32), (1280.0, 720.0), (3440.0, 1440.0)];
+        let scale_factors = [1.0_f64, 2.0, 3.0];
+        for (width, height) in logical_sizes {
+            for scale in scale_factors {
+                let physical = winit::dpi::PhysicalSize::new(
+                    (width as f64 * scale).round() as u32,
+                    (height as f64 * scale).round() as u32,
+                );
+                let viewport = logical_viewport_from_physical_size(physical, scale);
+                assert!(
+                    (viewport.width - width).abs() < 0.01,
+                    "width mismatch at {width}x{height} @ {scale}x: got {}",
+                    viewport.width
+                );
+                assert!(
+                    (viewport.height - height).abs() < 0.01,
+                    "height mismatch at {width}x{height} @ {scale}x: got {}",
+                    viewport.height
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_scale_defaults_to_one() {
+        let app = WgpuApp::new(Scene::new(Size::new(100.0, 100.0)));
+        assert_eq!(app.ui_scale(), 1.0);
+    }
+
+    #[test]
+    fn set_ui_scale_clamps_and_rejects_non_finite_input() {
+        let mut app = WgpuApp::new(Scene::new(Size::new(100.0, 100.0)));
+        app.set_ui_scale(f32::NAN);
+        assert_eq!(app.ui_scale(), 1.0, "a non-finite value must be ignored");
+        app.set_ui_scale(100.0);
+        assert_eq!(
+            app.ui_scale(),
+            MAX_UI_SCALE,
+            "must clamp to the upper bound"
+        );
+        app.set_ui_scale(0.0);
+        assert_eq!(
+            app.ui_scale(),
+            MIN_UI_SCALE,
+            "must clamp to the lower bound"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_is_a_no_op_for_the_current_value() {
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.set_surface_size(1600, 1200, 1.0);
+        assert!(app.update_frame(), "the surface-size push must be observed");
+        assert!(
+            !app.update_frame(),
+            "the tree is clean immediately after a rebuild"
+        );
+
+        app.set_ui_scale(1.0);
+
+        assert!(
+            !app.update_frame(),
+            "re-setting the already-active ui_scale must not force a redundant rebuild"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_surface_size_rebuilds_the_declarative_scene_with_no_stale_frame() {
+        // #179 acceptance #2, for the host-embedding path specifically:
+        // before this method existed, a host driving `WgpuApp` through
+        // `update_frame()` (no winit window of its own) had no way at all
+        // to tell it about a resize.
+        //
+        // Deliberately asserts through `update_frame()`'s return value, not
+        // by peeking at `scene()` directly: that return value is the only
+        // signal #177's contract tells a host to act on, and an earlier
+        // revision of this method rebuilt eagerly inside `set_surface_size`
+        // itself — which cleared the dirty bit before the host's next
+        // `update_frame()` call could ever observe it.
+        use mkui_core::components::{Mkui as CoreMkui, Text};
+        use mkui_runtime::TextVariant;
+
+        let core = CoreMkui::new().child(Text::new("hi").variant(TextVariant::Heading1));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+
+        app.set_surface_size(1600, 1200, 2.0);
+        assert!(
+            app.update_frame(),
+            "update_frame() must report the rebuild the host is supposed to react to"
+        );
+
+        assert_eq!(
+            app.scene().viewport,
+            Size::new(800.0, 600.0),
+            "surface size / scale_factor must produce the logical viewport"
+        );
+        let has_text = app
+            .scene()
+            .primitives
+            .iter()
+            .any(|p| matches!(p, crate::types::Primitive::Text(_)));
+        assert!(
+            has_text,
+            "the scene already reflects the tree at the new surface size — no stale frame"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_surface_size_ignores_a_zero_sized_update() {
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let before = app.scene().viewport;
+
+        app.set_surface_size(0, 600, 1.0);
+
+        assert_eq!(
+            app.scene().viewport,
+            before,
+            "a zero-sized (minimized/occluded) surface report must be ignored"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_shrinks_the_logical_viewport_for_an_embedded_host() {
+        // The core of #179's UI-scale feature: it folds into the same
+        // logical viewport the OS HiDPI scale factor does, so every
+        // primitive the walker (and any custom WgpuRenderable) emits
+        // scales uniformly on screen — not just text, and with no
+        // widget-level code change anywhere.
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.set_surface_size(1600, 1200, 1.0);
+        assert!(app.update_frame());
+        assert_eq!(app.scene().viewport, Size::new(1600.0, 1200.0));
+
+        app.set_ui_scale(2.0);
+
+        assert!(
+            app.update_frame(),
+            "a ui_scale change must be observable through update_frame(), \
+             not just by peeking at scene() directly"
+        );
+        assert_eq!(
+            app.scene().viewport,
+            Size::new(800.0, 600.0),
+            "doubling ui_scale must halve the logical viewport, magnifying \
+             every primitive 2x on screen for a fixed physical surface size"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_without_a_known_surface_size_is_a_no_op_on_the_viewport() {
+        // Neither a winit window nor a prior `set_surface_size` call exists
+        // yet — there is nothing to re-sync against, so the
+        // construction-time default viewport must stand untouched.
+        let core = mkui_core::components::Mkui::new();
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let before = app.scene().viewport;
+
+        app.set_ui_scale(2.0);
+
+        assert_eq!(app.scene().viewport, before);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn set_ui_scale_keeps_hit_testing_aligned_with_the_scaled_layout() {
+        // #179: the viewport divides by `scale_factor * ui_scale`, so
+        // hit-testing must divide a latched cursor position by that same
+        // combined factor (`WgpuApp::cursor_scale_factor`, the exact
+        // method `WindowEvent::MouseInput` calls) or clicks silently drift
+        // the moment `ui_scale != 1.0`.
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui};
+
+        let core = CoreMkui::new().child(Button::new("Go"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.set_surface_size(1600, 1200, 1.0);
+        app.set_ui_scale(2.0);
+        assert!(app.update_frame());
+
+        let hit = *app
+            .hit_tests
+            .first()
+            .expect("the button must produce a hit-test entry");
+        let logical_center = Point::new(
+            hit.rect.origin.x + hit.rect.size.width / 2.0,
+            hit.rect.origin.y + hit.rect.size.height / 2.0,
+        );
+
+        // The physical cursor position a real `CursorMoved` would carry
+        // for a click on the button's center, at the combined factor the
+        // layout was produced against (`cursor_scale_factor()` — no
+        // window here, so its OS component is the 1.0 fallback; `ui_scale`
+        // is the only thing distinguishing it from a bare OS factor).
+        let effective = app.cursor_scale_factor();
+        let physical = (
+            logical_center.x as f64 * effective,
+            logical_center.y as f64 * effective,
+        );
+
+        app.pointer.update_cursor_raw(physical.0, physical.1);
+        let cursor = app
+            .pointer
+            .cursor_logical(app.cursor_scale_factor())
+            .expect("cursor must be latched after update_cursor_raw");
+        app.pointer.on_press(&app.hit_tests, cursor);
+        assert_eq!(
+            app.pointer.armed(),
+            Some(hit.node),
+            "a click computed via the same combined scale factor must hit the button"
+        );
+
+        // Negative control: dividing the identical physical position by
+        // the bare OS factor (1.0) instead of the combined one — what the
+        // `MouseInput` handler did before #179 introduced `ui_scale` —
+        // must miss. Without this, the assertion above would pass even if
+        // `cursor_scale_factor` were reverted to ignore `ui_scale`
+        // entirely, since it would just be round-tripping one formula
+        // through itself.
+        app.pointer.update_cursor_raw(physical.0, physical.1);
+        let bare_os_factor_cursor = app
+            .pointer
+            .cursor_logical(1.0)
+            .expect("cursor must be latched after update_cursor_raw");
+        app.pointer.on_press(&app.hit_tests, bare_os_factor_cursor);
+        assert_ne!(
+            app.pointer.armed(),
+            Some(hit.node),
+            "a click computed via the bare OS factor (ignoring ui_scale) must miss the button"
         );
     }
 
