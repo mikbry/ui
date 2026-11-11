@@ -372,12 +372,46 @@ fn tessellate_text(
     }
 }
 
+/// Deterministic pseudo-random value in `[0.0, 1.0)` derived from `seed` —
+/// the splitmix64 finalizer's bit-mixing step, not used for anything
+/// cryptographic, just to spread nearby/small integer seeds (the common
+/// case while `IconId`s are hand-assigned small integers) across the output
+/// range so they don't collide.
+fn hash_unit(seed: u64) -> f32 {
+    let mut x = seed;
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
+    ((x >> 40) as u32 as f32) / (1u32 << 24) as f32
+}
+
+/// Placeholder icon rendering: an `IconId`-tinted inset rect — **no icon
+/// atlas or rasterization pipeline exists yet** ([`IconMask`] is defined in
+/// `types.rs` but nothing constructs or consumes one), so this cannot draw
+/// the icon's actual artwork. What it *can* do, and didn't before #191:
+/// make the placeholder vary deterministically by `icon.icon` (size and a
+/// small horizontal offset, both keyed off a hash of the id), so two
+/// different icons in the same HUD read as visually distinct chips rather
+/// than silently rendering the identical rect regardless of which icon was
+/// requested. Real icon rasterization — reading host-supplied bytes per
+/// #173's sandboxed-asset-loading constraint, atlas-packing them, wiring
+/// `IconMask` through — is its own, currently untracked piece of work, not
+/// something this placeholder fix attempts.
 fn tessellate_icon(triangles: &mut Vec<GuiTriangle>, icon: &Icon) {
     let tint = icon.tint.multiply_alpha(0.9);
-    let inset = icon.rect.inset(Insets::all(
-        icon.rect.size.width.min(icon.rect.size.height) * 0.2,
-    ));
-    push_rect(triangles, inset, tint);
+    let short_side = icon.rect.size.width.min(icon.rect.size.height);
+    let spread = hash_unit(icon.icon.0);
+    let inset_frac = 0.15 + spread * 0.25;
+    let offset_frac = (spread - 0.5) * 0.3;
+
+    let base = icon.rect.inset(Insets::all(short_side * inset_frac));
+    let mark = Rect::new(
+        Point::new(base.origin.x + short_side * offset_frac, base.origin.y),
+        base.size,
+    );
+    push_rect(triangles, mark, tint);
 }
 
 pub(crate) fn map_align(align: TextAlign) -> MkuiTextAlign {
@@ -422,6 +456,63 @@ mod tests {
     use super::*;
     use crate::theme::WgpuTheme;
     use crate::types::{Scene, Size, Stroke, Text};
+
+    #[test]
+    fn different_icon_ids_tessellate_to_different_triangles() {
+        // Regression (#191 review): `tessellate_icon` used to ignore
+        // `icon.icon` entirely, so two chips requesting different icons
+        // rendered byte-identical placeholder triangles — a counter chip
+        // claiming to show "icon + count" couldn't actually show a
+        // different icon. The placeholder is still not real icon artwork
+        // (no atlas exists), but it must now vary by id.
+        let rect = Rect::new(Point::new(10.0, 10.0), Size::new(20.0, 20.0));
+        let tint = Color::rgba(1.0, 1.0, 1.0, 1.0);
+
+        let mut a = Vec::new();
+        tessellate_icon(
+            &mut a,
+            &Icon {
+                rect,
+                icon: crate::types::IconId(1),
+                tint,
+            },
+        );
+        let mut b = Vec::new();
+        tessellate_icon(
+            &mut b,
+            &Icon {
+                rect,
+                icon: crate::types::IconId(2),
+                tint,
+            },
+        );
+
+        assert!(!a.is_empty());
+        assert!(!b.is_empty());
+        assert_ne!(
+            a, b,
+            "two different IconIds must not tessellate to identical triangles"
+        );
+    }
+
+    #[test]
+    fn same_icon_id_tessellates_identically_across_calls() {
+        // The placeholder must still be deterministic — same id, same
+        // output — so it stays stable across frames (no per-frame jitter).
+        let rect = Rect::new(Point::new(4.0, 4.0), Size::new(16.0, 16.0));
+        let icon = Icon {
+            rect,
+            icon: crate::types::IconId(42),
+            tint: Color::rgba(0.5, 0.5, 0.5, 1.0),
+        };
+
+        let mut first = Vec::new();
+        tessellate_icon(&mut first, &icon);
+        let mut second = Vec::new();
+        tessellate_icon(&mut second, &icon);
+
+        assert_eq!(first, second);
+    }
 
     #[test]
     fn text_tessellation_produces_triangles() {

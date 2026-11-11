@@ -242,6 +242,31 @@ breaking changes can land on minor bumps).
     renderer actually draws. A headless test tessellates a real scene and
     checks the tooltip text's rendered pixel extent against the bubble
     rect to prove it.
+  - Review fix: the text width handed to `label()` carried a small
+    round-trip float error (computed by adding the tooltip padding onto the
+    measured width, then `inset()`-subtracting the same padding back off
+    the bubble — float addition isn't exactly invertible). `max_glyphs_for_width`
+    does a hard `floor()` right at that width's own boundary, so even a
+    sub-ULP shortfall dropped a whole trailing glyph — reproduced at 16- and
+    31-character tooltips (2 and 10 were a *second*, now-removed source of
+    error from the same inset round trip). Fixed by building the text rect
+    directly from the measured width (no inset-reconstruction) plus a fixed
+    0.5px safety margin absorbing any remaining float error in
+    `measure_line_width`/`max_glyphs_for_width`'s own round trip — far
+    smaller than one glyph's ~5-6px advance, so it never makes a narrower
+    string falsely fit. A test sweeps tooltip lengths 1..=64 asserting the
+    measured width always fits every character, plus an end-to-end test at
+    the four reported lengths checking the rendered `Text` primitive still
+    carries the full string.
+  - Review fix: the viewport clamp only constrained the bubble's *origin*,
+    so a bubble wider/taller than the viewport (a long sentence, or flipping
+    below a top-aligned chip in a short viewport) still had its far edge
+    run off-screen. Fixed by capping `bubble_width`/`bubble_height` to the
+    viewport *before* positioning (a tooltip too wide for the screen now
+    relies on `mkui-text`'s existing wrap/ellipsis path rather than drawing
+    an oversized bubble), then clamping both `bubble_x` and `bubble_y` into
+    `[0, viewport - bubble]`. Regression tests cover both reported
+    scenarios directly.
   - Scope decision: neither atom gets a visual showcase wiring in this PR.
     `slider`/`chip_group`/`scrollbar`/`swatch` ship the same way — unit-tested
     scene builders with no example call site — and get wired into a demo
@@ -255,6 +280,20 @@ breaking changes can land on minor bumps).
   - Both atoms are `Quad`/`Text`/`Icon` primitives only — no `slug`-feature
     vector-path fork — matching `slider`/`badge`/`chip_group`'s current
     (not-yet-migrated) shape.
+  - Review fix: `tessellate_icon` ignored `Icon::icon` entirely and always
+    drew the same tinted inset rect, so two `counter_chip`s requesting
+    different icons rendered byte-identical triangles — a chip claiming to
+    show "icon + count" couldn't actually show a different icon. No icon
+    atlas or rasterization pipeline exists anywhere in this crate yet
+    (`IconMask` is defined in `types.rs` but nothing constructs or consumes
+    one — confirmed by grep), so real icon artwork is a separate, currently
+    untracked piece of work, not something fixable as part of this PR.
+    What's fixed: the placeholder now varies its size and horizontal offset
+    deterministically from a hash of `IconId`, so two different icons in a
+    HUD at least read as visually distinct chips instead of silently
+    rendering the identical placeholder. Tests cover both that different
+    ids tessellate to different triangles and that the same id stays
+    deterministic across calls (no per-frame jitter).
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which

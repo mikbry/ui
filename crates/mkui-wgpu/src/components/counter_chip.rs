@@ -48,26 +48,40 @@ pub struct CounterChipRegions {
     pub tooltip_rect: Option<Rect>,
 }
 
-/// Width of `tooltip` at `text_style`'s font size, in pixels. Not an
-/// approximation: `mkui-text::bitmap` ships the same pure, font-load-free
-/// formula (`bitmap_scale` + `measure_line_width` over the fixed-advance
+/// Width of `tooltip` at `text_style`'s font size, in pixels, plus a small
+/// safety margin. The base measurement is not a guess: `mkui-text::bitmap`
+/// ships the same pure, font-load-free formula (`bitmap_scale` +
+/// `measure_line_width` over the fixed-advance
 /// `GLYPH_ADVANCE_PX`/`GLYPH_CELL_WIDTH_PX` constants) that
 /// [`crate::tessellation::tessellate_text`] actually lays glyphs out with
 /// via `BitmapTextSystem` — the text system every example and the headless
-/// `tessellate_scene` default to. So the bubble this sizes matches the
-/// pixels the renderer will actually draw, not a guessed character width
-/// (see `tooltip_text_triangles_stay_within_the_bubble_rect` below, which
-/// tessellates a real scene and checks the rendered text's pixel extent
-/// against this width). A host wired to a different `TextSystem` (a real
-/// font via #182's `CompositeTextSystem`) would need its own measurement;
-/// this crate's components layer has no handle to one, so it measures
-/// against its own default instead.
+/// `tessellate_scene` default to.
+///
+/// The `+ 0.5` margin exists because `measure_line_width` and
+/// `max_glyphs_for_width` (what `BitmapTextSystem::wrap` calls internally
+/// once this width is handed to [`super::label`] as `max_width_px`) are not
+/// perfectly inverse in `f32`: `max_glyphs_for_width` does a hard
+/// `((width - glyph_width) / advance).floor() + 1` right at this value's
+/// own boundary, and the multiply-then-divide round trip can land a few
+/// ULPs *below* that boundary — dropping a whole trailing glyph (reproduced
+/// at 16- and 31-character tooltips in review). Half a pixel is tiny next
+/// to one glyph's ~5-6px advance — never enough to make a *narrower* string
+/// falsely fit — but comfortably clears the float error at any realistic
+/// tooltip length (see `tooltip_width_exactly_fits_every_character_length`
+/// below, which sweeps 1..=64 chars, and
+/// `tooltip_text_triangles_stay_within_the_bubble_rect`, which checks the
+/// rendered pixel extent against this width end-to-end).
+///
+/// A host wired to a different `TextSystem` (a real font via #182's
+/// `CompositeTextSystem`) would need its own measurement; this crate's
+/// components layer has no handle to one, so it measures against its own
+/// default instead.
 fn tooltip_text_width_px(tooltip: &str, text_style: &TextStyle) -> f32 {
     let scale = bitmap_scale(text_style.font_size_px);
     let advance = GLYPH_ADVANCE_PX * scale;
     let glyph_width = GLYPH_CELL_WIDTH_PX * scale;
     let glyphs: Vec<char> = tooltip.chars().collect();
-    measure_line_width(&glyphs, advance, glyph_width)
+    measure_line_width(&glyphs, advance, glyph_width) + 0.5
 }
 
 /// Icon + count chip. Draws the pill chrome, the icon (an [`IconId`] handle
@@ -129,25 +143,41 @@ pub fn counter_chip(
     label(scene, count_rect, count.to_string(), style.count_style);
 
     let tooltip_rect = ((hovered || focused) && !tooltip.is_empty()).then(|| {
-        let text_width = tooltip_text_width_px(tooltip, &style.tooltip_text_style);
-        let bubble_width = text_width + style.tooltip_padding.left + style.tooltip_padding.right;
-        let bubble_height = style.tooltip_text_style.line_height_px
-            + style.tooltip_padding.top
-            + style.tooltip_padding.bottom;
-
         let viewport = scene.viewport;
+        let viewport_w = viewport.width.max(1.0);
+        let viewport_h = viewport.height.max(1.0);
+
+        let raw_text_width = tooltip_text_width_px(tooltip, &style.tooltip_text_style);
+        // Cap the text to what the bubble can hold inside the viewport — a
+        // tooltip wider than the screen must shrink (mkui-text's own
+        // wrap/ellipsis path, driven by the narrower `text_rect` below,
+        // handles the overflow) rather than draw a bubble wider than the
+        // screen itself.
+        let max_interior_width =
+            (viewport_w - style.tooltip_padding.left - style.tooltip_padding.right).max(1.0);
+        let text_width = raw_text_width.min(max_interior_width);
+        let bubble_width =
+            (text_width + style.tooltip_padding.left + style.tooltip_padding.right).min(viewport_w);
+        let bubble_height = (style.tooltip_text_style.line_height_px
+            + style.tooltip_padding.top
+            + style.tooltip_padding.bottom)
+            .min(viewport_h);
+
         let above_y = chip_rect.origin.y - style.tooltip_gap - bubble_height;
         // Flip below the chip when there's no room above (e.g. a HUD
         // counter pinned to the screen's top edge) rather than clipping off
         // the top — an unreachable tooltip doesn't satisfy "reveals a
-        // tooltip on hover/focus".
-        let bubble_y = if above_y >= 0.0 {
-            above_y
-        } else {
-            chip_rect.height_end() + style.tooltip_gap
-        };
+        // tooltip on hover/focus". Flipping isn't itself enough in a short
+        // viewport (flipping below a top-aligned chip can still push the
+        // bubble's bottom past the viewport's bottom edge), so the result
+        // is clamped into `[0, viewport_h - bubble_height]` either way.
+        let below_y = chip_rect.height_end() + style.tooltip_gap;
+        let bubble_y = if above_y >= 0.0 { above_y } else { below_y };
+        let max_y = (viewport_h - bubble_height).max(0.0);
+        let bubble_y = bubble_y.clamp(0.0, max_y);
+
         let centered_x = chip_rect.origin.x + (chip_rect.size.width - bubble_width) * 0.5;
-        let max_x = (viewport.width - bubble_width).max(0.0);
+        let max_x = (viewport_w - bubble_width).max(0.0);
         let bubble_x = centered_x.clamp(0.0, max_x);
 
         let bubble_rect = Rect::new(
@@ -163,9 +193,25 @@ pub fn counter_chip(
                 width: style.tooltip_stroke_width,
             }),
         });
+        // Built directly from `text_width`, never by inset-subtracting the
+        // padding back out of `bubble_width` — on a `bubble_width` built by
+        // *adding* that same padding to `text_width`, that round trip loses
+        // precision (float addition isn't exactly invertible), and the
+        // bitmap text layout's `max_glyphs_for_width` is a hard `floor()`
+        // right at the measured width's exact boundary: even a sub-ULP
+        // shortfall drops a whole trailing glyph (reproduced at tooltip
+        // lengths 2, 10, 16, and 31 chars — see
+        // `tooltip_width_exactly_fits_every_character_length` below).
+        let text_rect = Rect::new(
+            Point::new(
+                bubble_rect.origin.x + style.tooltip_padding.left,
+                bubble_rect.origin.y + style.tooltip_padding.top,
+            ),
+            Size::new(text_width, style.tooltip_text_style.line_height_px),
+        );
         label(
             scene,
-            bubble_rect.inset(style.tooltip_padding),
+            text_rect,
             tooltip.to_string(),
             style.tooltip_text_style,
         );
@@ -463,6 +509,131 @@ mod tests {
             max_x <= bubble.width_end() + 0.5,
             "tooltip text ends at {max_x}, right of the bubble's right edge {}",
             bubble.width_end()
+        );
+    }
+
+    #[test]
+    fn tooltip_width_exactly_fits_every_character_length() {
+        // Regression: `text_rect.size.width` used to be reconstructed by
+        // adding the tooltip padding onto the measured text width and then
+        // `inset()`-subtracting the same padding back off the bubble. Float
+        // addition isn't exactly invertible, so the recovered width came
+        // back a hair under the true measured width (e.g. 10.799999 for a
+        // width that should be exactly 10.8) — and because
+        // `max_glyphs_for_width` is a hard `floor()` right at that exact
+        // boundary, even a sub-ULP shortfall dropped a whole trailing
+        // glyph, down to `ellipsize_line`'s "." fallback for very short
+        // strings. Reproduced at tooltip lengths 2, 10, 16, and 31 (the
+        // review's exact repro); swept over 1..=64 here. Checks the fix at
+        // its root: `max_glyphs_for_width` at the exact width this
+        // component now hands `label()` must always fit every character —
+        // not just the four reported lengths.
+        use mkui_text::max_glyphs_for_width;
+
+        let theme = WgpuTheme::default();
+        let style = theme.counter_chip();
+
+        for len in 1..=64usize {
+            let tooltip: String = "a".repeat(len);
+            let text_width = tooltip_text_width_px(&tooltip, &style.tooltip_text_style);
+
+            let scale = bitmap_scale(style.tooltip_text_style.font_size_px);
+            let advance = mkui_text::GLYPH_ADVANCE_PX * scale;
+            let glyph_width = mkui_text::GLYPH_CELL_WIDTH_PX * scale;
+            let max_glyphs = max_glyphs_for_width(text_width, advance, glyph_width);
+
+            assert!(
+                max_glyphs >= len,
+                "a {len}-char tooltip measured at {text_width}px only fits {max_glyphs} \
+                 glyphs at that exact width — the measured width must fit every character"
+            );
+        }
+    }
+
+    #[test]
+    fn tooltip_text_is_never_truncated_end_to_end_at_flagged_lengths() {
+        // Same regression as above, exercised through the full component +
+        // tessellation path (not just the measurement formula) at the
+        // review's exact reported lengths, asserting the rendered text
+        // primitive still carries every character — not the ellipsized "."
+        // the bug produced.
+        let theme = WgpuTheme::default();
+        let style = theme.counter_chip();
+
+        for len in [2usize, 10, 16, 31] {
+            let tooltip: String = "a".repeat(len);
+            let mut s = scene();
+            let regions = counter_chip(
+                &mut s,
+                chip_rect(),
+                IconId(1),
+                7,
+                &tooltip,
+                true,
+                false,
+                &style,
+            );
+            assert!(regions.tooltip_rect.is_some());
+
+            let tooltip_texts: Vec<_> = texts(&s)
+                .into_iter()
+                .filter(|t| t.content == tooltip)
+                .collect();
+            assert_eq!(
+                tooltip_texts.len(),
+                1,
+                "a {len}-char tooltip must render with every character intact, not truncated"
+            );
+        }
+    }
+
+    #[test]
+    fn tooltip_bubble_never_exceeds_the_viewport_for_a_long_sentence() {
+        // Regression: clamping only the bubble's *origin* still let a wide
+        // bubble's far edge run off-screen (a long sentence produced a
+        // 266.4px bubble inside a 200px-wide viewport; clamping its left
+        // edge to 0 still left its right edge at 266.4). The bubble's
+        // *width* must itself be capped to the viewport before the origin
+        // is clamped.
+        let theme = WgpuTheme::default();
+        let style = theme.counter_chip();
+        let mut s = scene();
+        let chip = chip_rect();
+        let sentence =
+            "This is a normal sentence that is long enough to overflow a narrow viewport";
+
+        let regions = counter_chip(&mut s, chip, IconId(1), 7, sentence, true, false, &style);
+        let bubble = regions.tooltip_rect.expect("tooltip should be drawn");
+
+        assert!(
+            bubble.origin.x >= 0.0 && bubble.width_end() <= s.viewport.width + 0.01,
+            "bubble x-extent [{}, {}] must stay inside the {}px-wide viewport",
+            bubble.origin.x,
+            bubble.width_end(),
+            s.viewport.width
+        );
+    }
+
+    #[test]
+    fn tooltip_bubble_never_exceeds_the_viewport_in_a_short_viewport() {
+        // Regression: in a 40px-high viewport, flipping a top-aligned
+        // chip's tooltip below it placed the bubble's bottom at 48px — past
+        // the viewport. The flip must also clamp into the viewport's height,
+        // not just pick "above" vs. "below" unconditionally.
+        let theme = WgpuTheme::default();
+        let style = theme.counter_chip();
+        let mut s = Scene::new(Size::new(200.0, 40.0));
+        let chip = Rect::new(Point::new(10.0, 0.0), Size::new(70.0, 22.0));
+
+        let regions = counter_chip(&mut s, chip, IconId(1), 7, "hi", true, false, &style);
+        let bubble = regions.tooltip_rect.expect("tooltip should be drawn");
+
+        assert!(
+            bubble.origin.y >= 0.0 && bubble.height_end() <= s.viewport.height + 0.01,
+            "bubble y-extent [{}, {}] must stay inside the {}px-tall viewport",
+            bubble.origin.y,
+            bubble.height_end(),
+            s.viewport.height
         );
     }
 }
