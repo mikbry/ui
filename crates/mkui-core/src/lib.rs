@@ -49,13 +49,14 @@ pub mod theme;
 
 pub mod prelude {
     // Components (high-level cross-platform components)
-    pub use crate::components::{Button, Component, Mkui, Text, View};
+    pub use crate::components::{Button, Component, MenuList, Mkui, Text, View};
 
     // Headless components (logic-only, no rendering)
     pub use crate::headless::{
         Button as HeadlessButton, ButtonBuilder, ButtonSize, ButtonVariant, Focusable,
-        KeyboardInteractable, Text as HeadlessText, TextAlign, TextBuilder, TextVariant,
-        TextWeight, Toggle, ToggleBuilder,
+        KeyboardInteractable, MenuList as HeadlessMenuList, MenuListBuilder, MenuListItem,
+        Text as HeadlessText, TextAlign, TextBuilder, TextVariant, TextWeight, Toggle,
+        ToggleBuilder,
     };
 
     // Error handling

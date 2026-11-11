@@ -157,6 +157,53 @@ breaking changes can land on minor bumps).
     and adding `disabled`/`focused` there would ripple through the C/Python
     FFI surface and every binding's parity tests, well past this issue's
     scope.
+- **`mkui_core::headless::MenuList` — keyboard/gamepad-selectable menu list
+  (#189, C4 of #173).** A headless component for title-screen/pause-style
+  menus: `move_up`/`move_down` navigate with wraparound, `confirm` fires
+  `on_select` with the activated index, and `is_selected(index)` tells a
+  renderer which row to style distinctly. Wired through
+  `KeyboardInteractable::handle_key_down` on `"ArrowUp"`/`"ArrowDown"`/
+  `"Enter"`/`" "` — the same shared `Key` vocabulary every other headless
+  component in this crate uses, so a host that maps gamepad D-pad/stick and
+  confirm-button input into that vocabulary (per the backend-agnostic input
+  contract in `mkui_core::input`) gets gamepad navigation for free, with no
+  gamepad-specific code in `MenuList` itself. `MenuList` never reacts to
+  `Tab`/`Escape`, so it composes with a future modal dialog's focus trap
+  (#188) without fighting it — the trap can own those keys for cycling and
+  dismiss while `MenuList` only moves its own selection.
+
+  **`mkui_core::components::MenuList` — cross-platform lowering + a
+  rendered console demo**, added after review flagged that the headless
+  state machine alone left the "current selection is visually distinct"
+  criterion unverified (no renderer consumed `is_selected`). `MenuList`
+  lowers through the `NodeKind::Custom` extension slot (`type_name =
+  "menu_list"`, mirroring the `TestWidget` extension proof) rather than a
+  new `NodeKind` variant, so it doesn't ripple into every backend's
+  exhaustive match. `mkui-console`'s `walk_tree` decodes `"menu_list"`
+  nodes into one `Line::MenuListItem { label, selected }` row per item, and
+  `high_level::Mkui::render` gives the selected row a `> ` marker plus
+  inverse-video styling versus a plain, dimmed `  ` row for the rest —
+  visible by running `cargo run -p mkui-console --example menu_list`.
+  Covered by tests asserting the indicator lands on the selected row (and
+  only that row) and moves when `selected_index` changes.
+  - Scope decision: rendering is wired for `mkui-console` only. `mkui-web` /
+    `mkui-wgpu` would each need their own `"menu_list"` handler in their
+    own `Custom`-node registries (`WebRendererRegistry` /
+    `WgpuRendererRegistry`) — not filed as a follow-up issue, since #189's
+    acceptance criteria don't name a specific backend and console is
+    sufficient to verify the visual-distinction criterion end to end.
+  - Scope decision: the console demo renders statically (`selected_index`
+    fixed at construction) rather than wiring `ArrowUp`/`ArrowDown`/`Enter`
+    into `mkui-console`'s interactive run loop. That loop currently tracks
+    selection only across `Line::Button` rows (`ConsoleApp::select_prev`/
+    `select_next`); merging a second, independent selection cursor for
+    `MenuList` rows is live-navigation plumbing, not the rendering gap the
+    review flagged, and the headless `MenuList`'s own navigation is already
+    fully tested independent of any renderer.
+  - Scope decision: no per-item `disabled` state. The issue's acceptance
+    criteria cover selection + activation only; `disabled` wasn't asked for
+    and can be added alongside `Button`'s existing `disabled` precedent if
+    a future issue needs it.
 - **`mkui-wgpu::EmbeddedRenderer` — host-owned GPU and frame mode for
   embedding hosts (#175, E2 of #173, ADR 0012).** A second, parallel entry
   point alongside the existing winit-owned `Renderer`/`WgpuApp` shell (which
