@@ -55,6 +55,7 @@ pub mod prelude {
     pub use crate::headless::{
         Button as HeadlessButton, ButtonBuilder, ButtonSize, ButtonVariant, Focusable,
         KeyboardInteractable, MenuList as HeadlessMenuList, MenuListBuilder, MenuListItem,
+        SegmentedSelect, SegmentedSelectBuilder, Slider, SliderBuilder,
         Text as HeadlessText, TextAlign, TextBuilder, TextVariant, TextWeight, Toggle,
         ToggleBuilder,
     };

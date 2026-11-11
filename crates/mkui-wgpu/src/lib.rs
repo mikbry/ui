@@ -34,8 +34,9 @@
 //! - [`components`]   — scene builders organized one concern per file under
 //!   `components/`: [`components::card`], [`components::button`],
 //!   [`components::text_field`], [`components::slider`],
-//!   [`components::progress_bar`], [`components::chip_group`],
-//!   [`components::counter_chip`], [`components::scrollbar`],
+//!   [`components::toggle`], [`components::progress_bar`],
+//!   [`components::chip_group`], [`components::counter_chip`],
+//!   [`components::segmented_select`], [`components::scrollbar`],
 //!   [`components::scroll_area`], [`components::swatch`],
 //!   [`components::heading`], [`components::text`],
 //!   [`components::toast_stack`], [`components::toast_history`],

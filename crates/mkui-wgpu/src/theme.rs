@@ -229,6 +229,46 @@ pub struct SliderStyle {
     /// Extra vertical padding added to the hit rect so the control is easy
     /// to grab — rendered track height stays at `rect.size.height`.
     pub hit_padding: f32,
+    /// Text style for the live value label
+    /// [`slider_with_label`](crate::components::slider_with_label) draws
+    /// above the thumb while dragging (#190).
+    pub value_label_style: TextStyle,
+    /// Vertical gap between the thumb and the value label above it.
+    pub value_label_gap: f32,
+}
+
+/// Concrete, resolved toggle-switch (on/off) look-and-feel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToggleStyle {
+    pub off_fill: Color,
+    pub on_fill: Color,
+    pub track_stroke: Color,
+    pub track_stroke_width: f32,
+    pub thumb_fill: Color,
+    pub thumb_stroke: Color,
+    /// Gap kept between the track edge and the thumb on every side.
+    pub thumb_inset: f32,
+    /// Extra padding added to the hit rect, mirroring
+    /// [`SliderStyle::hit_padding`].
+    pub hit_padding: f32,
+}
+
+/// Concrete, resolved segmented-select look-and-feel — one continuous pill
+/// track with a sliding highlight behind the selected segment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentedStyle {
+    pub track_fill: Color,
+    pub track_stroke: Color,
+    pub track_stroke_width: f32,
+    pub track_corner_radius: f32,
+    pub highlight_fill: Color,
+    /// Gap kept between the highlight and the track edge/neighbouring
+    /// segments on every side.
+    pub highlight_inset: f32,
+    pub segment_corner_radius: f32,
+    pub label_idle: Color,
+    pub label_active: Color,
+    pub label_style: TextStyle,
 }
 
 /// Concrete, resolved progress-bar look-and-feel (#191, C6 of #173). Shares
@@ -574,6 +614,45 @@ impl WgpuTheme {
             thumb_stroke: self.tokens.surface,
             thumb_diameter: 14.0,
             hit_padding: 8.0,
+            value_label_style: TextStyle {
+                align: TextAlign::Center,
+                color: self.tokens.surface_foreground,
+                ..self.body_style()
+            },
+            value_label_gap: 4.0,
+        }
+    }
+
+    /// Default toggle-switch look. Off = recessed sunken track, matching an
+    /// idle text input; on = primary-tinted fill, matching the slider's
+    /// filled portion.
+    pub fn toggle(&self) -> ToggleStyle {
+        ToggleStyle {
+            off_fill: self.tokens.surface_sunken,
+            on_fill: self.tokens.primary.with_alpha(0.9),
+            track_stroke: self.tokens.border.with_alpha(0.22),
+            track_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            thumb_fill: self.tokens.primary_ring,
+            thumb_stroke: self.tokens.surface,
+            thumb_inset: 2.0,
+            hit_padding: 6.0,
+        }
+    }
+
+    /// Default segmented-select look: one continuous pill track, a sliding
+    /// primary-tinted highlight behind the selected segment.
+    pub fn segmented_select(&self) -> SegmentedStyle {
+        SegmentedStyle {
+            track_fill: self.tokens.surface_sunken,
+            track_stroke: self.tokens.border.with_alpha(0.18),
+            track_stroke_width: self.tokens.spacing.stroke_width_hairline,
+            track_corner_radius: self.tokens.spacing.radius_compact,
+            highlight_fill: self.tokens.primary.with_alpha(0.88),
+            highlight_inset: 3.0,
+            segment_corner_radius: self.tokens.spacing.radius_tight,
+            label_idle: self.tokens.muted_foreground.with_alpha(0.85),
+            label_active: self.tokens.primary_foreground,
+            label_style: self.body_style(),
         }
     }
 
@@ -1110,6 +1189,8 @@ mod tests {
         assert_ne!(default_theme.slider(), swapped.slider());
         assert_ne!(default_theme.progress_bar(), swapped.progress_bar());
         assert_ne!(default_theme.counter_chip(), swapped.counter_chip());
+        assert_ne!(default_theme.toggle(), swapped.toggle());
+        assert_ne!(default_theme.segmented_select(), swapped.segmented_select());
         assert_ne!(default_theme.input(true), swapped.input(true));
         assert_ne!(default_theme.input(false), swapped.input(false));
         assert_ne!(default_theme.scrollbar(), swapped.scrollbar());
