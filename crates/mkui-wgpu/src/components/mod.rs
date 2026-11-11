@@ -24,9 +24,9 @@
 //! - **variant-driven widgets** — [`card`], [`button`], [`text_field`],
 //!   [`text_field_editable`], [`slider`], [`chip_group`], [`scrollbar`],
 //!   [`scroll_area`], [`swatch`], [`heading`], [`text`], [`info_list`],
-//!   [`toast_stack`], [`toast_history`]. Each takes a variant / size / state
-//!   and pulls concrete colors from the theme. This is the layer view code
-//!   calls.
+//!   [`toast_stack`], [`toast_history`], [`dialog`], [`titled_dialog`].
+//!   Each takes a variant / size / state and pulls concrete colors from
+//!   the theme. This is the layer view code calls.
 //! - **atoms** — [`badge`], [`dot`]. Self-contained shadcn-aligned signals.
 //!
 //! Built-in components registered with `WgpuRendererRegistry` (see `bridge.rs`)
@@ -40,6 +40,7 @@ mod badge;
 mod button;
 mod card;
 mod chip_group;
+mod dialog;
 mod dot;
 mod info_list;
 mod panel;
@@ -55,6 +56,7 @@ pub use badge::badge;
 pub use button::{button, button_with, ButtonRegions, MIN_TOUCH_TARGET_PX};
 pub use card::card;
 pub use chip_group::chip_group;
+pub use dialog::{dialog, titled_dialog};
 pub use dot::dot;
 pub use info_list::info_list;
 pub use panel::{panel, titled_panel};

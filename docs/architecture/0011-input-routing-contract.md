@@ -185,3 +185,145 @@ Any verdict derived from "current state" rather than "state at the moment
 the gesture/key began" is a latent inconsistency. `key_ownership` and
 `gesture_owned` are the two places this contract now locks a verdict in at
 the start of a gesture and replays it, rather than re-deriving it.
+
+## Addendum: #188 — the dialog component lands, backdrop click + Tab trap
+
+[`crate::components::dialog`] (backdrop + panel chrome) is the modal
+stack's first real caller, closing the loop this ADR opened. Landing it
+surfaced two gaps the original contract (modal stack + Escape precedence
+only) didn't cover — a backdrop click and the keyboard focus trap — both
+closed inside `InputRouter` rather than pushed onto callers:
+
+- **`push_modal` now carries the dialog's panel rect and its explicit
+  `owned` node set.** The original `modal_stack: Vec<NodeId>` had no
+  geometry — enough for Escape, which doesn't care *where* the dialog is,
+  but not enough to tell a backdrop click from a click on the dialog's
+  own interior, or to know which controls are actually this dialog's.
+  `ModalEntry { node, panel_rect, owned }` fixes both; `push_modal`'s
+  signature changed to require them rather than adding separate setter
+  calls, since every real dialog has a panel rect and a (possibly empty)
+  control set the moment it opens.
+- **Pointer arming and the Tab focus trap scope themselves to the
+  topmost modal's `owned` set — identity, not geometry.** A first cut
+  derived "belongs to this dialog" from whether a `HitTestEntry`'s rect
+  (its center, for Tab) fell inside `panel_rect`. Review caught that this
+  is wrong: a host-supplied hit-test list carries no guarantee that every
+  entry geometrically inside the panel is actually this dialog's, nor
+  that every entry outside it isn't. A lower stacked dialog's
+  (now-covered) button, or a host control the caller forgot to omit once
+  a modal opened, can sit at any rect — including one that happens to
+  overlap the topmost dialog's panel — and geometric containment would
+  silently let it fire its action or join the focus trap. `route`'s
+  pointer-press handling now hit-tests only the subset of `hit_entries`
+  whose `NodeId` is in the topmost modal's `owned` list before arming;
+  `decide_tab_press` filters the same way. A miss against that scoped
+  set still falls back to `panel_rect` for the backdrop/interior
+  distinction — that part *is* inherently geometric (a backdrop click is
+  "outside the dialog's painted footprint", which is a rect question),
+  it's membership in the dialog that moved to identity.
+- **While any modal is open, every primary-button press is `Consumed`,
+  by exactly one of three outcomes**: it hit an *owned* interactive
+  entry (ordinary click), it missed every owned entry but landed inside
+  the panel rect (blank dialog chrome swallows it, nothing closes), or
+  it missed every owned entry and landed outside the panel rect
+  (backdrop click — pop the topmost modal). The alternative — only
+  treating a miss as "backdrop" and otherwise falling through to
+  `Ignored` — would let a modal leak clicks on its own padding/labels to
+  whatever is behind it, which is the exact bug "nothing behind an open
+  modal should react" exists to prevent.
+- **The Tab focus trap has no persistent widget registry beyond the
+  `owned` list — it derives the focus order from `hit_entries` every
+  press**, the same way pointer hit-testing already works against the
+  current frame's list rather than a retained tree (consistent with the
+  walker's eager-rebuild model, ADR 0006). An owned `NodeId` not present
+  in the current frame's `hit_entries` is simply absent from that
+  frame's cycle, rather than an error.
+- **Tab/Shift+Tab reuse the press/repeat lock-in lesson above.** Shift
+  state is latched from `WindowEvent::ModifiersChanged` (winit delivers
+  it as a separate event, not inline on `KeyEvent`); the trap only
+  advances on a *fresh* Tab press — an OS key-repeat replays the cached
+  verdict like every other key, so holding Tab down doesn't race through
+  a dialog's controls once per repeat tick. `trap_focus` resets on every
+  `push_modal`/`pop_modal`, so a freshly (re)topmost dialog always starts
+  its own cycle from the beginning rather than resuming wherever a
+  closed or now-covered dialog left off.
+- **Gamepad focus traversal is explicitly out of scope.** The acceptance
+  criteria mention "Tab/gamepad focus", but no gamepad input exists
+  anywhere in this workspace yet (no `gilrs` or equivalent dependency,
+  no gamepad `WindowEvent` equivalent) — there is nothing for this
+  contract to route today. `crate::scroll` (#194) establishes the pattern
+  this will eventually follow: a plain, device-agnostic input value (a
+  `[-1.0, 1.0]` stick axis, here a focus-move direction) with no
+  device-polling dependency of its own, driven by whatever a host's
+  controller integration hands in. #203 (parent tracker #173) is the
+  existing cross-cutting tracker for gamepad + focus navigation across
+  every P0 screen — menus, HUD, dialogs, settings, collections — and
+  already lists this issue as a dependency; Tab is the load-bearing
+  keyboard-only mechanism until #203 lands.
+
+### Review round 3 — ownership must be re-applied at release, not just press
+
+The round-2 fix above scoped pointer *arming* (the press) to the topmost
+modal's `owned` set but left *release* hit-testing the full, unscoped
+`hit_entries`. Review found two ways that gap still let a stale or
+foreign target fire:
+
+- **An unowned entry overlapping an owned button, later in the paint
+  order, blocked the owned button's own click.** `pointer::hit_test`
+  picks the topmost match on overlap (reverse iteration — see
+  `hit_test_picks_topmost_on_overlap`). A press correctly armed the owned
+  node (scoping excluded the unowned entry there), but release's
+  unscoped hit-test against the *full* list could resolve to the
+  unowned, higher-painted entry instead — `armed == Some(hit.node)` then
+  compares the armed (owned) node to the *wrong* (unowned) one and fails,
+  so the owned button's click never fires, even though the user plainly
+  clicked it.
+- **A second modal opening between press and release let a now-covered
+  dialog's button still fire.** Pressing dialog A's button arms it
+  (correctly, A was topmost). If dialog B then opens on top before the
+  matching release, A's button's `NodeId` is no longer in *any* open
+  dialog's owned set from B's perspective — but the unscoped release
+  hit-test found it again at the same cursor position regardless, and
+  fired its click through a dialog it no longer belongs to.
+
+Both trace to the same root cause: the scoping decision at press was
+never repeated at release. [`InputRouter::scope_to_topmost_modal`]
+factors the filter into one method both press and release call —
+**freshly, at the time each runs** — which is the opposite of this
+router's key-ownership lock-in contract (`key_ownership`, `gesture_owned`)
+documented above. That asymmetry is deliberate, not an inconsistency: key
+ownership locks in at press because the *host* already acted on that
+verdict before the matching release arrives (applying a key, moving a
+camera), so the release must replay the same answer or the host's state
+goes out of sync. A pointer click fires nothing on press — there is no
+host action yet to stay consistent with, only a candidate target to
+validate — so release re-deriving "is this target still valid right now"
+against current modal state is the correct contract, not a violation of
+it. `gesture_owned` (decided once, at press) still governs *consumption*
+independently of this: a gesture mkui claimed stays `Consumed` on release
+whether or not re-scoping cancels the click itself.
+
+### Review round 4 — dismissing a dialog mid-press must cancel its own armed button
+
+Round 3's `scope_to_topmost_modal` re-derives ownership against whatever
+modal is topmost *now*, which fixes a press out-living a covering dialog
+or an unowned overlap. It does not fix the dialog *the press itself
+belongs to* closing before the matching release: once that dialog is
+popped, `scope_to_topmost_modal` returns `None` (no modal is open at
+all, if it was the only one) and release falls back to hit-testing
+`hit_entries` unscoped — exactly the pre-round-3 behavior, which still
+fires the button's click if the host hasn't yet dropped the dismissed
+dialog's hit-test entries for that one event (plausible for a release
+landing in the same frame/engine-tick the dialog closed on Escape).
+
+Fixed at the source rather than at release: `InputRouter::pop_modal`
+checks whether the pointer is currently armed against one of the
+*closing* dialog's own `owned` nodes, and calls `pointer.cancel()` if
+so — clearing `armed` the same way every other cancel path in this
+router does (Escape-with-no-modal, `CursorLeft`, focus loss), leaving
+`gesture_owned` untouched so the eventual release still reports
+`Consumed`. This covers every `pop_modal` call site uniformly — Escape,
+a backdrop click (already a no-op there, since that path only pops when
+`armed` was already `None`), and any future host code that pops a modal
+directly (e.g. from inside a dialog's own button handler) — rather than
+re-deriving the same cancellation at every call site individually.
