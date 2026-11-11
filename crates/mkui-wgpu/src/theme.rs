@@ -346,6 +346,32 @@ pub struct DotStyle {
     pub diameter: f32,
 }
 
+/// Toast/banner severity variant (#193). No size axis — a toast stack is
+/// single-size by design (the issue's acceptance criteria are about
+/// stacking/dismiss/minimise behavior, not a size ladder).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ToastVariant {
+    Info,
+    Success,
+    Warning,
+    Destructive,
+}
+
+/// Concrete, resolved toast look-and-feel. Mirrors [`BadgeStyle`]'s shape:
+/// `variant` picks the colour tokens, resolved through [`WgpuTheme::toast_style`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToastStyle {
+    pub fill: Color,
+    pub stroke: Color,
+    pub stroke_width: f32,
+    pub label_color: Color,
+    pub corner_radius: f32,
+    pub padding: Insets,
+    pub shadow: ShadowStyle,
+    pub label_style: TextStyle,
+}
+
 impl Default for WgpuTheme {
     fn default() -> Self {
         let spacing = SpacingTokens {
@@ -748,6 +774,34 @@ impl WgpuTheme {
         }
     }
 
+    /// Resolve `variant` to a concrete [`ToastStyle`]. No `size` axis — see
+    /// [`ToastVariant`]'s doc comment. Every color comes from an existing
+    /// semantic token (`surface`/`success`/`warning`/`destructive`); #193
+    /// adds no new [`ThemeTokens`] field.
+    pub fn toast_style(&self, variant: ToastVariant) -> ToastStyle {
+        let (fill, label_color) = match variant {
+            ToastVariant::Info => (self.tokens.surface, self.tokens.surface_foreground),
+            ToastVariant::Success => (self.tokens.success, self.tokens.success_foreground),
+            ToastVariant::Warning => (self.tokens.warning, self.tokens.warning_foreground),
+            ToastVariant::Destructive => {
+                (self.tokens.destructive, self.tokens.destructive_foreground)
+            }
+        };
+        ToastStyle {
+            fill,
+            stroke: self.tokens.border.with_alpha(0.18),
+            stroke_width: self.tokens.spacing.stroke_width_hairline,
+            label_color,
+            corner_radius: self.tokens.spacing.radius_card,
+            padding: Insets::symmetric(12.0, 8.0),
+            shadow: self.tokens.shadow,
+            label_style: TextStyle {
+                color: label_color,
+                ..self.body_style()
+            },
+        }
+    }
+
     /// Resolve a semantic [`TextVariant`] to a concrete [`TextStyle`].
     pub fn text_style(&self, variant: TextVariant) -> TextStyle {
         match variant {
@@ -1058,5 +1112,19 @@ mod tests {
             "panel_compact() must re-derive from the mutated spacing.padding_panel token"
         );
         assert_eq!(theme.panel_compact().padding, Insets::all(42.0));
+    }
+
+    #[test]
+    fn toast_style_flips_fill_on_variant() {
+        let theme = WgpuTheme::default();
+        let info = theme.toast_style(ToastVariant::Info);
+        let destructive = theme.toast_style(ToastVariant::Destructive);
+        let warning = theme.toast_style(ToastVariant::Warning);
+        let success = theme.toast_style(ToastVariant::Success);
+        assert_ne!(info.fill, destructive.fill);
+        assert_ne!(info.fill, warning.fill);
+        assert_ne!(info.fill, success.fill);
+        assert_eq!(destructive.fill, theme.tokens.destructive);
+        assert_eq!(destructive.label_color, theme.tokens.destructive_foreground);
     }
 }
