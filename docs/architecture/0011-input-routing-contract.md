@@ -260,3 +260,45 @@ closed inside `InputRouter` rather than pushed onto callers:
   every P0 screen — menus, HUD, dialogs, settings, collections — and
   already lists this issue as a dependency; Tab is the load-bearing
   keyboard-only mechanism until #203 lands.
+
+### Review round 3 — ownership must be re-applied at release, not just press
+
+The round-2 fix above scoped pointer *arming* (the press) to the topmost
+modal's `owned` set but left *release* hit-testing the full, unscoped
+`hit_entries`. Review found two ways that gap still let a stale or
+foreign target fire:
+
+- **An unowned entry overlapping an owned button, later in the paint
+  order, blocked the owned button's own click.** `pointer::hit_test`
+  picks the topmost match on overlap (reverse iteration — see
+  `hit_test_picks_topmost_on_overlap`). A press correctly armed the owned
+  node (scoping excluded the unowned entry there), but release's
+  unscoped hit-test against the *full* list could resolve to the
+  unowned, higher-painted entry instead — `armed == Some(hit.node)` then
+  compares the armed (owned) node to the *wrong* (unowned) one and fails,
+  so the owned button's click never fires, even though the user plainly
+  clicked it.
+- **A second modal opening between press and release let a now-covered
+  dialog's button still fire.** Pressing dialog A's button arms it
+  (correctly, A was topmost). If dialog B then opens on top before the
+  matching release, A's button's `NodeId` is no longer in *any* open
+  dialog's owned set from B's perspective — but the unscoped release
+  hit-test found it again at the same cursor position regardless, and
+  fired its click through a dialog it no longer belongs to.
+
+Both trace to the same root cause: the scoping decision at press was
+never repeated at release. [`InputRouter::scope_to_topmost_modal`]
+factors the filter into one method both press and release call —
+**freshly, at the time each runs** — which is the opposite of this
+router's key-ownership lock-in contract (`key_ownership`, `gesture_owned`)
+documented above. That asymmetry is deliberate, not an inconsistency: key
+ownership locks in at press because the *host* already acted on that
+verdict before the matching release arrives (applying a key, moving a
+camera), so the release must replay the same answer or the host's state
+goes out of sync. A pointer click fires nothing on press — there is no
+host action yet to stay consistent with, only a candidate target to
+validate — so release re-deriving "is this target still valid right now"
+against current modal state is the correct contract, not a violation of
+it. `gesture_owned` (decided once, at press) still governs *consumption*
+independently of this: a gesture mkui claimed stays `Consumed` on release
+whether or not re-scoping cancels the click itself.

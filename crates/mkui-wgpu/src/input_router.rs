@@ -229,6 +229,35 @@ impl InputRouter {
             .unwrap_or(&[])
     }
 
+    /// The subset of `hit_entries` pointer arming/release may ever match
+    /// right now: `None` when no modal is open (callers hit-test
+    /// `hit_entries` unscoped), `Some(_)` — filtered to the *topmost*
+    /// modal's `owned` set — when one is.
+    ///
+    /// Callers must call this fresh at both press *and* release (review
+    /// round 3, #188): a modal transition between the two — a new dialog
+    /// opening on top of the one a press armed against — changes which
+    /// set is current, and a press's armed node must stop being
+    /// reachable the instant it's no longer owned by whatever is topmost
+    /// *now*. Re-deriving from current state here is deliberately the
+    /// opposite of the key-ownership lock-in contract elsewhere in this
+    /// router (`key_ownership`, `gesture_owned`): those lock in a verdict
+    /// at press time because the *host* already acted on it before the
+    /// matching release arrives. A pointer click fires nothing until
+    /// release, so there is no stale host action to stay consistent
+    /// with — only a stale target to refuse.
+    fn scope_to_topmost_modal(&self, hit_entries: &[HitTestEntry]) -> Option<Vec<HitTestEntry>> {
+        self.top_modal_panel_rect()?;
+        let owned = self.top_modal_owned();
+        Some(
+            hit_entries
+                .iter()
+                .copied()
+                .filter(|entry| owned.contains(&entry.node))
+                .collect(),
+        )
+    }
+
     /// Node the Tab focus trap currently sits on inside the topmost open
     /// modal. Exposed so a host can paint a focus ring around it; `None`
     /// both when no modal is open and when one is open but Tab hasn't been
@@ -352,12 +381,7 @@ impl InputRouter {
                     // arm a lower (now-covered) dialog's button or a host
                     // control the caller forgot to omit, even if its rect
                     // happens to overlap this dialog's panel (#188).
-                    let owned = self.top_modal_owned();
-                    let scoped: Vec<HitTestEntry> = hit_entries
-                        .iter()
-                        .copied()
-                        .filter(|entry| owned.contains(&entry.node))
-                        .collect();
+                    let scoped = self.scope_to_topmost_modal(hit_entries).unwrap_or_default();
                     let armed = self.pointer.on_press(&scoped, cursor);
 
                     // Nothing behind an open modal may react to a click,
@@ -390,7 +414,23 @@ impl InputRouter {
                 // release (review P2#1).
                 let gesture_owned = self.gesture_owned;
                 self.gesture_owned = false;
-                let click = self.pointer.on_release(hit_entries, cursor);
+
+                // Re-scope to *whatever modal is topmost right now* (review
+                // round 3, #188), not whatever was topmost at press time:
+                // an overlapping-but-unowned entry later in `hit_entries`
+                // must never out-rank the armed node's own hit-test, and a
+                // modal that opened *on top* between press and release
+                // must invalidate a press armed against a now-covered
+                // dialog's control — that control's `NodeId` won't be in
+                // the new topmost modal's `owned` set, so it can no longer
+                // be found here, and the stale press is silently cancelled
+                // (no click) rather than fired. `gesture_owned` above is
+                // unaffected either way: a gesture mkui claimed stays
+                // `Consumed` on release even when it's cancelled.
+                let click = match self.scope_to_topmost_modal(hit_entries) {
+                    Some(scoped) => self.pointer.on_release(&scoped, cursor),
+                    None => self.pointer.on_release(hit_entries, cursor),
+                };
                 RouteOutcome {
                     routed: Routed::from_consumed(gesture_owned || click.is_some()),
                     click,
@@ -1169,6 +1209,87 @@ mod tests {
         assert!(
             release.click.is_none(),
             "the background button must never fire its action"
+        );
+    }
+
+    // ---- review round 3: ownership must be re-applied at release, not
+    // just press ----
+
+    #[test]
+    fn an_overlapping_unowned_entry_does_not_block_the_owned_buttons_click() {
+        // Regression: release hit-tested the *full*, unscoped `hit_entries`.
+        // `hit_test` picks the topmost match on overlap (reverse iteration —
+        // later in the vec wins). An unowned entry placed after the owned
+        // button in the list, overlapping its rect, would out-rank it at
+        // release: the raw hit-test returns the unowned node, that doesn't
+        // equal the armed (owned) node, and the owned button's click never
+        // fires. Scoping release to the topmost modal's `owned` set removes
+        // the unowned entry from the hit-test entirely, so paint order
+        // among *unowned* entries can no longer affect an *owned* button.
+        let mut router = InputRouter::new();
+        router.push_modal(
+            NodeId::from_raw(1, 0),
+            dialog_panel_rect(), // (200,200)-(500,400)
+            vec![NodeId::from_raw(9, 0)],
+        );
+        let rect = Rect::new(Point::new(220.0, 220.0), Size::new(80.0, 30.0));
+        // Node 77 (unowned) is listed *after* node 9 (owned) and overlaps
+        // its rect exactly — it would win a raw, unscoped hit-test.
+        let entries = vec![button_at(9, rect), button_at(77, rect)];
+        router.route(&cursor_moved(240.0, 230.0), &entries, 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert!(press.routed.is_consumed());
+
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        let click = release
+            .click
+            .expect("the owned button's click must fire despite the overlapping unowned entry");
+        assert_eq!(click.node, NodeId::from_raw(9, 0));
+    }
+
+    #[test]
+    fn opening_a_new_modal_between_press_and_release_cancels_the_covered_buttons_click() {
+        // Regression: pressing a lower dialog's button arms it; if a *new*
+        // modal then opens on top before the matching release, the armed
+        // node belongs to a dialog that is no longer topmost. Release used
+        // to hit-test the full, unscoped `hit_entries` — finding the
+        // covered button again at the same cursor position and firing its
+        // click even though another dialog now covers it. Re-scoping at
+        // release to *whatever modal is topmost now* excludes that stale
+        // target, cancelling the activation — while the release stays
+        // `Consumed` either way, since mkui claimed the gesture at press.
+        let mut router = InputRouter::new();
+        let bottom_rect = Rect::new(Point::new(0.0, 0.0), Size::new(600.0, 600.0));
+        router.push_modal(
+            NodeId::from_raw(1, 0),
+            bottom_rect,
+            vec![NodeId::from_raw(5, 0)],
+        );
+        let entries = vec![button_at(
+            5,
+            Rect::new(Point::new(20.0, 20.0), Size::new(40.0, 20.0)),
+        )];
+        router.route(&cursor_moved(30.0, 25.0), &entries, 1.0);
+
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert!(press.routed.is_consumed());
+
+        // Another dialog opens on top before the release arrives.
+        router.push_modal(
+            NodeId::from_raw(2, 0),
+            dialog_panel_rect(),
+            vec![NodeId::from_raw(10, 0)],
+        );
+
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        assert!(
+            release.click.is_none(),
+            "the covered dialog's button must not fire once another modal has opened on top"
+        );
+        assert!(
+            release.routed.is_consumed(),
+            "the release still belongs to mkui — the gesture was claimed at press"
         );
     }
 
