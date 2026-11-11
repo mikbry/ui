@@ -245,6 +245,10 @@ pub struct InputStyle {
 pub struct ScrollbarStyle {
     pub track_fill: Color,
     pub thumb_fill: Color,
+    /// Smallest the thumb is allowed to shrink to, in track pixels, no
+    /// matter how long the content is relative to the viewport (#194) — a
+    /// thumb smaller than this stops being reliably grabbable.
+    pub min_thumb_len: f32,
 }
 
 /// Concrete, resolved color swatch look-and-feel. Used by list rows and
@@ -527,6 +531,7 @@ impl WgpuTheme {
         ScrollbarStyle {
             track_fill: self.tokens.scrollbar_track,
             thumb_fill: self.tokens.border.with_alpha(0.55),
+            min_thumb_len: 24.0,
         }
     }
 

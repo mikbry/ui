@@ -21,7 +21,7 @@
 //!   escape hatch when a caller needs a one-off style that isn't in the theme.
 //! - **variant-driven widgets** — [`card`], [`button`], [`text_field`],
 //!   [`text_field_editable`], [`slider`], [`chip_group`], [`scrollbar`],
-//!   [`swatch`], [`heading`], [`text`], [`info_list`]. Each takes a variant /
+//!   [`scroll_area`], [`swatch`], [`heading`], [`text`], [`info_list`]. Each takes a variant /
 //!   size / state and pulls concrete colors from the theme. This is the layer
 //!   view code calls.
 //! - **atoms** — [`badge`], [`dot`]. Self-contained shadcn-aligned signals.
@@ -40,6 +40,7 @@ mod chip_group;
 mod dot;
 mod info_list;
 mod panel;
+mod scroll_area;
 mod scrollbar;
 mod slider;
 mod swatch;
@@ -53,6 +54,7 @@ pub use chip_group::chip_group;
 pub use dot::dot;
 pub use info_list::info_list;
 pub use panel::{panel, titled_panel};
+pub use scroll_area::{scroll_area, ScrollAreaRegions};
 pub use scrollbar::scrollbar;
 pub use slider::{slider, SliderRegions};
 pub use swatch::swatch;

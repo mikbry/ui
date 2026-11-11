@@ -35,6 +35,7 @@
 //!   `components/`: [`components::card`], [`components::button`],
 //!   [`components::text_field`], [`components::slider`],
 //!   [`components::chip_group`], [`components::scrollbar`],
+//!   [`components::scroll_area`],
 //!   [`components::swatch`], [`components::heading`], [`components::text`], plus the
 //!   [`components::panel`] / [`components::titled_panel`] primitives the
 //!   higher-level components are built from. Mirrors the component surface
@@ -78,6 +79,7 @@ pub mod prelude;
 pub mod render;
 pub mod render_command;
 pub mod renderer;
+pub mod scroll;
 pub mod text_edit;
 pub mod theme;
 pub mod types;
@@ -102,6 +104,7 @@ pub use render::offscreen::{OffscreenError, OffscreenRenderer};
 pub use render::{RenderOutcome, Renderer};
 pub use render_command::{build_render_commands, classify_primitive, RenderCommand, RenderLane};
 pub use renderer::WgpuRenderer;
+pub use scroll::{ScrollState, WheelDelta};
 pub use text_edit::TextEditState;
 pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
 
