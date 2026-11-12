@@ -118,7 +118,10 @@ pub use scroll::{ScrollState, WheelDelta};
 pub use text_edit::TextEditState;
 pub use toast_stack::{Toast, ToastId, ToastStack, ToastTarget};
 pub use tooltip::TooltipState;
-pub use walker::{walk_app_tree, HitTestEntry, NodeLayout, WalkOptions, WalkOutput};
+pub use walker::{
+    walk_app_tree, walk_app_tree_cached, HitTestEntry, NodeLayout, WalkCache, WalkOptions,
+    WalkOutput, WalkStats,
+};
 
 // Native Slug adapter re-exports (#66), available only when the `slug` feature
 // is enabled. The adapter crate owns the GPU packing + WGSL coverage pipeline;
