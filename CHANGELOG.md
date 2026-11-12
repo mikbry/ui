@@ -8,6 +8,31 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-runtime::AppTree::subtree_revision`/`epoch` + `mkui-wgpu::walker::{walk_app_tree_cached, WalkCache, WalkStats}`
+  — per-subtree dirty tracking for the retained wgpu walker (#229).**
+  `AppTree` now tracks a monotonic revision per node, propagated up through
+  every ancestor on `push_*`/`set_text`/`set_button_label`
+  (`AppTree::subtree_revision(id)` — `O(depth)` per mutation, `O(1)` to
+  read), plus a coarse `epoch` bumped only by the pre-existing `mark_dirty`
+  escape hatch. `walk_app_tree_cached` is an incremental sibling of the
+  stateless `walk_app_tree`: a caller-owned `WalkCache` lets a built-in
+  (`View`/`Text`/`Button`) subtree whose `subtree_revision` — and exact
+  layout position/content-width/inherited-foreground — hasn't moved since
+  the cache last captured it be spliced from the cached primitives/hit
+  entries/layouts instead of re-walked, so a HUD with one ticking value
+  among many unchanging rows skips layout math, text measurement, and
+  registry dispatch for every row that didn't change. No translation is
+  attempted — a near-miss (an earlier sibling's height changed) just falls
+  back to a normal re-walk of that subtree, so the incremental output is
+  always identical to a fresh `walk_app_tree` call. A subtree containing
+  any `NodeKind::Custom` node is never cached (its renderer may read state
+  outside the tree entirely — scroll offset, hover, the toast queue — which
+  `subtree_revision` cannot see); a theme or viewport change flushes the
+  whole cache. `WgpuApp::try_rebuild_scene_from_tree` now drives the cached
+  path by default. Scope decision: hardware CPU/GPU budget verification
+  (#177 acceptance criteria #1-#3) stays with #230, which needs #173's toy
+  host example to profile against — this issue ships the mechanism + a
+  regression test proving the skip, not a measured number.
 - **`mkui-wgpu::toast_stack::ToastStack` + `components::{toast_stack, toast_history}`
   — toast/banner stack: dismiss, minimise, unread count, history (#193, C8 of
   #173).** `ToastStack` is a caller-owned, immediate-mode-friendly state

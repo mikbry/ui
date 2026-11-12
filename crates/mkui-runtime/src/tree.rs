@@ -124,6 +124,20 @@ pub struct AppTree {
     free: Vec<u32>,
     root: NodeId,
     dirty: bool,
+    /// Monotonic counter bumped by every fine-grained mutation routed
+    /// through [`AppTree::touch`] (`push_*`, `set_text`, `set_button_label`)
+    /// (#229). Each touched node's slot, and every ancestor up to the root,
+    /// records the counter's new value as its `subtree_revision` — see
+    /// [`AppTree::subtree_revision`] for what a caller does with that.
+    next_revision: u64,
+    /// Bumped only by the coarse [`AppTree::mark_dirty`] escape hatch (the
+    /// path an action closure uses to request a redraw after mutating state
+    /// `touch` never sees — e.g. data a custom renderer reads from outside
+    /// the tree). A per-subtree cache keyed on `subtree_revision` alone
+    /// cannot see that kind of change, so it additionally gates on `epoch`
+    /// (see [`AppTree::epoch`]): any bump invalidates every cached subtree,
+    /// trading precision for safety on the untracked-mutation path.
+    epoch: u64,
     actions: ActionRegistry,
 }
 
@@ -131,6 +145,12 @@ pub struct AppTree {
 struct Slot {
     generation: u32,
     node: Option<Node>,
+    /// Revision this node's own content last changed at (#229). `0` until
+    /// the node's first mutation.
+    own_revision: u64,
+    /// `max` of `own_revision` and every descendant's `subtree_revision`
+    /// (#229) — the value [`AppTree::subtree_revision`] returns.
+    subtree_revision: u64,
 }
 
 impl AppTree {
@@ -141,6 +161,8 @@ impl AppTree {
             free: Vec::new(),
             root: NodeId::from_raw(0, 0),
             dirty: false,
+            next_revision: 0,
+            epoch: 0,
             actions: ActionRegistry::new(),
         };
         // The root is allocated like any other node so its NodeId follows the
@@ -159,14 +181,76 @@ impl AppTree {
     }
 
     /// Mark the tree dirty so the next render frame redraws. Call sites:
-    /// any structural mutation (push_*, set_*) and any fired action that
-    /// itself sets `RuntimeCtx::mark_dirty`.
+    /// any fired action that itself sets `RuntimeCtx::mark_dirty`. Also
+    /// bumps [`AppTree::epoch`] (#229) — this is the coarse, whole-tree
+    /// escape hatch, so a per-subtree cache has no finer signal to key on
+    /// and must invalidate everything. `push_*`/`set_*` do **not** call
+    /// this; they route through the private fine-grained revision tracker
+    /// instead, which sets `dirty` without bumping `epoch`.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.epoch += 1;
     }
 
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    /// Bumped by [`AppTree::mark_dirty`] only (#229). A per-subtree render
+    /// cache keyed on [`AppTree::subtree_revision`] must also invalidate
+    /// everything whenever this changes — `mark_dirty` is the signal an
+    /// action fires after mutating state outside the tracked setters, which
+    /// `subtree_revision` cannot see.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// The revision `id`'s subtree (the node itself plus every descendant)
+    /// last changed at (#229), or `None` if `id` is stale/missing. `0`
+    /// means untouched since construction. A caller that cached this
+    /// subtree's rendered output tagged with a previous call's return value
+    /// can treat an unchanged value as "nothing inside this subtree moved
+    /// since" and reuse the cached output instead of re-walking — see
+    /// `mkui-wgpu`'s `walker::WalkCache`.
+    pub fn subtree_revision(&self, id: NodeId) -> Option<u64> {
+        let slot = self.nodes.get(id.index() as usize)?;
+        if slot.generation != id.generation {
+            return None;
+        }
+        slot.node.as_ref()?;
+        Some(slot.subtree_revision)
+    }
+
+    /// Route a mutation to node `id` through the fine-grained revision
+    /// tracker (#229): bump the global counter, stamp `id`'s slot as
+    /// changed at the new revision, and propagate that same revision up
+    /// through every ancestor's `subtree_revision` (parent links only — no
+    /// subtree walk) so an ancestor's cached subtree can also tell it needs
+    /// a re-walk. Also sets the coarse `dirty` flag, same as the old
+    /// `mark_dirty` call sites this replaces, but — deliberately — does
+    /// **not** bump `epoch`: that stays reserved for mutations `touch`
+    /// never sees (see [`AppTree::mark_dirty`]).
+    fn touch(&mut self, id: NodeId) {
+        self.next_revision += 1;
+        let revision = self.next_revision;
+        if let Some(slot) = self.nodes.get_mut(id.index() as usize) {
+            if slot.generation == id.generation {
+                slot.own_revision = revision;
+                slot.subtree_revision = revision;
+            }
+        }
+        let mut current = self.get(id).and_then(|n| n.parent);
+        while let Some(ancestor) = current {
+            let Some(slot) = self.nodes.get_mut(ancestor.index() as usize) else {
+                break;
+            };
+            if slot.generation != ancestor.generation {
+                break;
+            }
+            slot.subtree_revision = revision;
+            current = slot.node.as_ref().and_then(|n| n.parent);
+        }
+        self.dirty = true;
     }
 
     pub fn actions(&self) -> &ActionRegistry {
@@ -342,7 +426,7 @@ impl AppTree {
             }
         };
         if changed {
-            self.mark_dirty();
+            self.touch(id);
         }
         changed
     }
@@ -366,7 +450,7 @@ impl AppTree {
             }
         };
         if changed {
-            self.mark_dirty();
+            self.touch(id);
         }
         changed
     }
@@ -381,7 +465,7 @@ impl AppTree {
         if let Some(parent_node) = self.get_mut(parent) {
             parent_node.children.push(id);
         }
-        self.mark_dirty();
+        self.touch(id);
         id
     }
 
@@ -390,6 +474,8 @@ impl AppTree {
         if let Some(idx) = self.free.pop() {
             let slot = &mut self.nodes[idx as usize];
             slot.generation = slot.generation.wrapping_add(1);
+            slot.own_revision = 0;
+            slot.subtree_revision = 0;
             let id = NodeId::from_raw(idx, slot.generation);
             slot.node = Some(Node {
                 id,
@@ -413,6 +499,8 @@ impl AppTree {
                     class,
                     resolved,
                 }),
+                own_revision: 0,
+                subtree_revision: 0,
             });
             id
         }
@@ -596,5 +684,109 @@ mod tests {
             panic!("expected Button")
         };
         assert_eq!(b.label, "Resume");
+    }
+
+    // ---- per-subtree revision tracking (#229) ----
+
+    #[test]
+    fn set_text_bumps_the_nodes_own_subtree_revision_and_every_ancestors() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "").unwrap();
+        let text = tree
+            .push_text(row, "hp: 100", TextVariant::Body, "")
+            .unwrap();
+
+        let root_rev_before = tree.subtree_revision(root).unwrap();
+        let row_rev_before = tree.subtree_revision(row).unwrap();
+        let text_rev_before = tree.subtree_revision(text).unwrap();
+
+        assert!(tree.set_text(text, "hp: 90"));
+
+        assert!(tree.subtree_revision(text).unwrap() > text_rev_before);
+        assert!(
+            tree.subtree_revision(row).unwrap() > row_rev_before,
+            "a child's mutation must bump its parent's subtree_revision too"
+        );
+        assert!(
+            tree.subtree_revision(root).unwrap() > root_rev_before,
+            "a child's mutation must propagate all the way to the root"
+        );
+    }
+
+    #[test]
+    fn set_text_on_unchanged_value_does_not_bump_any_subtree_revision() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let text = tree
+            .push_text(root, "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        let root_rev = tree.subtree_revision(root).unwrap();
+        let text_rev = tree.subtree_revision(text).unwrap();
+
+        assert!(!tree.set_text(text, "hp: 100"));
+
+        assert_eq!(tree.subtree_revision(text).unwrap(), text_rev);
+        assert_eq!(tree.subtree_revision(root).unwrap(), root_rev);
+    }
+
+    #[test]
+    fn mutating_one_sibling_leaves_an_unrelated_siblings_subtree_revision_untouched() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let dirty_row = tree
+            .push_text(root, "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        let clean_row = tree
+            .push_text(root, "level 3", TextVariant::Body, "")
+            .unwrap();
+        let clean_rev = tree.subtree_revision(clean_row).unwrap();
+
+        assert!(tree.set_text(dirty_row, "hp: 90"));
+
+        assert_eq!(
+            tree.subtree_revision(clean_row).unwrap(),
+            clean_rev,
+            "an unrelated sibling's subtree_revision must not change"
+        );
+    }
+
+    #[test]
+    fn push_bumps_the_new_parents_subtree_revision() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let container = tree.push_view(root, "").unwrap();
+        let before = tree.subtree_revision(container).unwrap();
+
+        tree.push_text(container, "new row", TextVariant::Body, "")
+            .unwrap();
+
+        assert!(tree.subtree_revision(container).unwrap() > before);
+    }
+
+    #[test]
+    fn mark_dirty_bumps_epoch_but_set_text_does_not() {
+        let mut tree = AppTree::new();
+        let text = tree
+            .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        let epoch_after_push = tree.epoch();
+
+        assert!(tree.set_text(text, "hp: 90"));
+        assert_eq!(
+            tree.epoch(),
+            epoch_after_push,
+            "a tracked setter must not bump epoch — only the coarse mark_dirty escape hatch does"
+        );
+
+        tree.mark_dirty();
+        assert!(tree.epoch() > epoch_after_push);
+    }
+
+    #[test]
+    fn subtree_revision_of_a_stale_node_is_none() {
+        let tree = AppTree::new();
+        let stale = NodeId::from_raw(99, 0);
+        assert!(tree.subtree_revision(stale).is_none());
     }
 }

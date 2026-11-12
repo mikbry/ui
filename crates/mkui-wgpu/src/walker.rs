@@ -39,13 +39,44 @@
 //!
 //! - **No `thread_local!` for the active tree** — walker is parameterised
 //!   on `&AppTree` directly, never via global state.
-//! - **No incremental diffing** — eager rebuild on the dirty signal.
 //! - **No `wgpu::*` / `winit::*` calls** — walker only writes into
 //!   `Scene` + `Vec<HitTestEntry>`; the renderer + input modules own
 //!   platform calls.
 //! - **No raw `nodes[i]` indexing** — every lookup goes through
 //!   `tree.get(id)` so the generation-counter staleness guard fires
 //!   when a NodeId points at a recycled slot.
+//!
+//! ## Per-subtree dirty tracking (#229)
+//!
+//! [`walk_app_tree`] is the stateless reference implementation: a fresh
+//! `Scene` / hit-test vec / layouts vec every call, no caching, exactly the
+//! Codex round-7/round-10 "eager rebuild on the dirty signal" model this
+//! module used to document unconditionally. [`walk_app_tree_cached`] is the
+//! opt-in incremental sibling a long-lived host (`WgpuApp`) drives instead:
+//! it threads a [`WalkCache`] through the same recursive walk, and at each
+//! node [`AppTree::subtree_revision`] says whether anything under that node
+//! changed since the cache entry was built. A clean built-in (`View` /
+//! `Text` / `Button`) subtree is spliced from the cached primitives / hit
+//! entries / layouts instead of being re-walked — no layout math, no text
+//! measurement, no registry dispatch for anything underneath it.
+//!
+//! A subtree is cached only when the walk that built it touched no
+//! `NodeKind::Custom` node anywhere inside it (tracked via
+//! [`WalkStats`]'s internal `saw_custom` bookkeeping). Extension renderers
+//! can read state that lives outside the tree entirely (scroll offset,
+//! hover, the toast queue, wall-clock-driven animation) — see
+//! `crate::bridge::WgpuRenderable` — so their output is not a pure function
+//! of `subtree_revision` and must never be treated as cacheable.
+//!
+//! The cache key also requires the entry's `content_x` / `cursor_y` /
+//! `content_width` / inherited foreground color to match exactly — no
+//! translation is attempted. This means a changed node still invalidates
+//! every later sibling whose *height* changed (the common "same text, same
+//! line count" tick does not), but it can never reuse a stale position: a
+//! near-miss just falls back to a normal re-walk of that one subtree,
+//! identical to the stateless path.
+
+use std::collections::HashMap;
 
 use mkui_core::error::MkuiError;
 use mkui_runtime::{
@@ -74,7 +105,7 @@ use crate::types::{
 ///
 /// Field names match the round-10 §"Concrete Shape" sketch (`node`,
 /// `rect`, `action`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HitTestEntry {
     pub node: NodeId,
     pub rect: Rect,
@@ -96,7 +127,7 @@ pub struct HitTestEntry {
 /// `Custom`-node renderers may push their own [`NodeLayout`] entries
 /// through [`WalkOutput::layouts`] in a future sprint; v0.6.0 records
 /// only the built-in nodes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NodeLayout {
     pub node: NodeId,
     pub rect: Rect,
@@ -124,11 +155,95 @@ pub struct WalkOptions<'a> {
 /// per-frame hit-test list, and the per-node layout snapshots. Returned
 /// as a single struct so callers consume the walker through one move
 /// rather than juggling three out-parameters.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct WalkOutput {
     pub scene: Scene,
     pub hit_tests: Vec<HitTestEntry>,
     pub layouts: Vec<NodeLayout>,
+}
+
+/// Per-call counters [`walk_app_tree_cached`] returns alongside its
+/// [`WalkOutput`] (#229): `walked` is how many nodes the walker actually
+/// recursed into (a cache miss, or caching disabled), `reused` is how many
+/// were spliced from [`WalkCache`] instead. Both count subtree *roots* the
+/// walker made a cache decision about, not every node transitively visited
+/// — a reused `View` with fifty descendants counts once, not 51 times.
+///
+/// `saw_custom` is bookkeeping private to the walk itself (whether the
+/// subtree currently being decided touched a `NodeKind::Custom` node) and
+/// is not meaningful to a caller once the walk returns.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WalkStats {
+    pub walked: u32,
+    pub reused: u32,
+    saw_custom: bool,
+}
+
+/// Everything a cache hit needs to match exactly — see the module docs'
+/// "Per-subtree dirty tracking" section for why this is an exact match
+/// rather than a translate-and-reuse. `Eq`-by-value on `f32` fields is
+/// intentional: both sides of the comparison are the literal result of
+/// the same deterministic arithmetic run twice, never an independently
+/// measured or rounded quantity, so there is no NaN/epsilon concern here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CacheKey {
+    subtree_revision: u64,
+    content_x: f32,
+    cursor_y: f32,
+    content_width: f32,
+    foreground: Color,
+}
+
+/// One cached subtree: the exact context it was built under (`CacheKey`),
+/// the `cursor_y` the walk had advanced to by the time the subtree's walk
+/// finished, and the primitives/hit-entries/layouts it appended — captured
+/// as the slice appended between entering and leaving the subtree, so
+/// splicing them back in reproduces the exact paint/hit-test order a real
+/// re-walk would have produced.
+struct CacheEntry {
+    key: CacheKey,
+    exit_cursor_y: f32,
+    primitives: Vec<Primitive>,
+    hits: Vec<HitTestEntry>,
+    layouts: Vec<NodeLayout>,
+}
+
+/// Persistent, caller-owned cache backing [`walk_app_tree_cached`] (#229).
+/// Keyed by [`NodeId`] — holds at most one entry per node that has ever
+/// been a cache-miss candidate, across however many frames the cache has
+/// lived for. `WgpuApp` owns one for the life of the app; tests construct
+/// their own with [`WalkCache::new`].
+///
+/// A theme or viewport change is not part of the per-node cache key (every
+/// entry would otherwise need to carry both, just to invalidate on the rare
+/// frame they change): [`walk_app_tree_cached`] instead flushes the whole
+/// cache up front whenever either differs from the last call, or whenever
+/// [`AppTree::epoch`] has moved (the coarse "something changed outside the
+/// tracked setters" signal — see that method's docs).
+#[derive(Default)]
+pub struct WalkCache {
+    entries: HashMap<NodeId, CacheEntry>,
+    last_epoch: Option<u64>,
+    last_viewport: Option<Size>,
+    last_theme: Option<WgpuTheme>,
+}
+
+impl WalkCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn invalidate_if_stale(&mut self, epoch: u64, viewport: Size, theme: WgpuTheme) {
+        let stale = self.last_epoch != Some(epoch)
+            || self.last_viewport != Some(viewport)
+            || self.last_theme != Some(theme);
+        if stale {
+            self.entries.clear();
+            self.last_epoch = Some(epoch);
+            self.last_viewport = Some(viewport);
+            self.last_theme = Some(theme);
+        }
+    }
 }
 
 /// Tailwind half-rem unit: every numeric resolved-style field
@@ -148,7 +263,9 @@ const VIEWPORT_OUTER_MARGIN_PX: f32 = 24.0;
 ///
 /// Eager rebuild: callers invoke this fresh per frame once
 /// `AppTree::is_dirty()` returns true (or on first paint). The function
-/// does not look at `is_dirty` itself; the caller owns the gate.
+/// does not look at `is_dirty` itself; the caller owns the gate. This is
+/// the stateless reference implementation — no cache, always a full walk.
+/// [`walk_app_tree_cached`] is the incremental sibling.
 ///
 /// `Result<_, MkuiError>` is plumbed through so future extension
 /// renderers that surface real errors can flow them up the stack;
@@ -158,9 +275,50 @@ pub fn walk_app_tree(
     registry: &WgpuRendererRegistry,
     options: &WalkOptions<'_>,
 ) -> Result<WalkOutput, MkuiError> {
+    walk_app_tree_inner(tree, registry, options, None).map(|(output, _stats)| output)
+}
+
+/// Incremental sibling of [`walk_app_tree`] (#229): same output, but a
+/// built-in (`View`/`Text`/`Button`) subtree whose
+/// [`AppTree::subtree_revision`] hasn't moved since `cache` last captured
+/// it — at the exact same layout position — is spliced from the cached
+/// primitives/hit-entries/layouts instead of being re-walked. See the
+/// module docs' "Per-subtree dirty tracking" section for the cacheability
+/// rules. Returns the fresh [`WalkOutput`] plus a [`WalkStats`] the caller
+/// can use to confirm the cache is actually doing something (e.g. in a
+/// test, or future profiling).
+///
+/// `cache` is keyed by `NodeId` and persists across calls — the caller
+/// (`WgpuApp`) owns one for the life of the app and passes it every frame.
+/// A theme or viewport change flushes it wholesale (those aren't part of
+/// the per-node cache key). `options.text_system` is **not** checked —
+/// swapping it mid-flight (e.g. `WgpuApp::set_text_system`) changes how a
+/// cached `Text` node measures without moving `AppTree::subtree_revision`
+/// at all, so a caller that does this must hand in a fresh [`WalkCache`]
+/// itself rather than rely on this function to notice.
+pub fn walk_app_tree_cached(
+    tree: &AppTree,
+    registry: &WgpuRendererRegistry,
+    options: &WalkOptions<'_>,
+    cache: &mut WalkCache,
+) -> Result<(WalkOutput, WalkStats), MkuiError> {
+    walk_app_tree_inner(tree, registry, options, Some(cache))
+}
+
+fn walk_app_tree_inner(
+    tree: &AppTree,
+    registry: &WgpuRendererRegistry,
+    options: &WalkOptions<'_>,
+    mut cache: Option<&mut WalkCache>,
+) -> Result<(WalkOutput, WalkStats), MkuiError> {
+    if let Some(cache) = cache.as_deref_mut() {
+        cache.invalidate_if_stale(tree.epoch(), options.viewport, options.theme);
+    }
+
     let mut scene = Scene::new(options.viewport);
     let mut hit_tests: Vec<HitTestEntry> = Vec::new();
     let mut layouts: Vec<NodeLayout> = Vec::new();
+    let mut stats = WalkStats::default();
 
     let content_width = (options.viewport.width - VIEWPORT_OUTER_MARGIN_PX * 2.0).max(0.0);
 
@@ -179,15 +337,26 @@ pub fn walk_app_tree(
         };
 
         if let Some(root) = tree.get(tree.root()) {
-            walk_children(tree, &root.children, &mut ctx, content_width, &mut layouts)?;
+            walk_children(
+                tree,
+                &root.children,
+                &mut ctx,
+                content_width,
+                &mut layouts,
+                cache,
+                &mut stats,
+            )?;
         }
     }
 
-    Ok(WalkOutput {
-        scene,
-        hit_tests,
-        layouts,
-    })
+    Ok((
+        WalkOutput {
+            scene,
+            hit_tests,
+            layouts,
+        },
+        stats,
+    ))
 }
 
 fn walk_children(
@@ -196,6 +365,8 @@ fn walk_children(
     ctx: &mut WgpuRenderCtx<'_>,
     content_width: f32,
     layouts: &mut Vec<NodeLayout>,
+    mut cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
     let mut first_flow_child = true;
     for child_id in children {
@@ -211,14 +382,118 @@ fn walk_children(
             // child" slot either, so the next flow-participating sibling
             // is placed exactly as if this node were not in the tree at
             // all — not merely as if this node had zero height.
-            walk_node(tree, node, ctx, content_width, layouts)?;
+            walk_node_or_cached(
+                tree,
+                node,
+                ctx,
+                content_width,
+                layouts,
+                cache.as_deref_mut(),
+                stats,
+            )?;
             continue;
         }
         if !first_flow_child {
             ctx.cursor_y += gap_px(&node.resolved);
         }
         first_flow_child = false;
-        walk_node(tree, node, ctx, content_width, layouts)?;
+        walk_node_or_cached(
+            tree,
+            node,
+            ctx,
+            content_width,
+            layouts,
+            cache.as_deref_mut(),
+            stats,
+        )?;
+    }
+    Ok(())
+}
+
+/// Try a cache hit for `node`'s subtree before falling back to a real
+/// [`walk_node`] (#229). With `cache: None` (the stateless [`walk_app_tree`]
+/// path) this is just a thin, allocation-free pass-through to `walk_node`.
+///
+/// A hit requires `node.id`'s cached entry to match *exactly* on
+/// `subtree_revision` plus every bit of layout context the entry was built
+/// under (`content_x`, `cursor_y`, `content_width`, inherited foreground) —
+/// see the module docs for why no translation is attempted. On a hit, the
+/// cached primitives/hits/layouts are cloned into the live output and
+/// `ctx.cursor_y` jumps straight to the cached exit value — no layout math,
+/// no text measurement, no registry dispatch.
+///
+/// On a miss, this calls through to [`walk_node`] and, provided the walk
+/// touched no `NodeKind::Custom` node anywhere inside it, captures the
+/// newly-appended primitives/hits/layouts into a fresh cache entry so the
+/// *next* frame can hit.
+fn walk_node_or_cached(
+    tree: &AppTree,
+    node: &mkui_runtime::Node,
+    ctx: &mut WgpuRenderCtx<'_>,
+    content_width: f32,
+    layouts: &mut Vec<NodeLayout>,
+    cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
+) -> Result<(), MkuiError> {
+    let Some(cache) = cache else {
+        stats.walked += 1;
+        return walk_node(tree, node, ctx, content_width, layouts, None, stats);
+    };
+    let Some(subtree_revision) = tree.subtree_revision(node.id) else {
+        stats.walked += 1;
+        return walk_node(tree, node, ctx, content_width, layouts, Some(cache), stats);
+    };
+
+    let key = CacheKey {
+        subtree_revision,
+        content_x: ctx.content_x,
+        cursor_y: ctx.cursor_y,
+        content_width,
+        foreground: ctx.current_foreground,
+    };
+
+    if let Some(entry) = cache.entries.get(&node.id) {
+        if entry.key == key {
+            ctx.scene
+                .primitives
+                .extend(entry.primitives.iter().cloned());
+            ctx.hits.extend(entry.hits.iter().copied());
+            layouts.extend(entry.layouts.iter().copied());
+            ctx.cursor_y = entry.exit_cursor_y;
+            stats.reused += 1;
+            return Ok(());
+        }
+    }
+
+    stats.walked += 1;
+    let saved_saw_custom = stats.saw_custom;
+    stats.saw_custom = false;
+    let primitives_start = ctx.scene.primitives.len();
+    let hits_start = ctx.hits.len();
+    let layouts_start = layouts.len();
+
+    walk_node(tree, node, ctx, content_width, layouts, Some(cache), stats)?;
+
+    let subtree_saw_custom = stats.saw_custom;
+    stats.saw_custom = saved_saw_custom || subtree_saw_custom;
+
+    if subtree_saw_custom {
+        // Never cache a subtree a `Custom` renderer touched (#229 — see the
+        // module docs): its output can depend on state that lives outside
+        // the tree entirely, so `subtree_revision` cannot prove it's safe
+        // to reuse. Drop any stale entry rather than leave it around.
+        cache.entries.remove(&node.id);
+    } else {
+        cache.entries.insert(
+            node.id,
+            CacheEntry {
+                key,
+                exit_cursor_y: ctx.cursor_y,
+                primitives: ctx.scene.primitives[primitives_start..].to_vec(),
+                hits: ctx.hits[hits_start..].to_vec(),
+                layouts: layouts[layouts_start..].to_vec(),
+            },
+        );
     }
     Ok(())
 }
@@ -253,23 +528,45 @@ fn walk_node(
     ctx: &mut WgpuRenderCtx<'_>,
     content_width: f32,
     layouts: &mut Vec<NodeLayout>,
+    cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
     match &node.kind {
         NodeKind::Root => {
             // Walked from the top-level entry; recurse defensively in
             // case a Root ever appears as a child (it should not, per
             // AppTree's contract).
-            walk_children(tree, &node.children, ctx, content_width, layouts)?;
+            walk_children(
+                tree,
+                &node.children,
+                ctx,
+                content_width,
+                layouts,
+                cache,
+                stats,
+            )?;
         }
-        NodeKind::View(_) => render_view(tree, node, ctx, content_width, layouts)?,
+        NodeKind::View(_) => render_view(tree, node, ctx, content_width, layouts, cache, stats)?,
         NodeKind::Text(t) => render_text(node, t, ctx, content_width, layouts),
         NodeKind::Button(b) => render_button(node, b, ctx, layouts),
         NodeKind::Custom { type_name, props } => {
+            // Custom renderers may read state that lives outside the tree
+            // (#229 — see the module docs): poison this subtree for caching
+            // purposes regardless of what it does with its children below.
+            stats.saw_custom = true;
             let outcome = ctx
                 .registry
                 .render_custom_node(type_name, node, props, ctx)?;
             if matches!(outcome, WgpuRenderOutcome::RecurseChildren) {
-                walk_children(tree, &node.children, ctx, content_width, layouts)?;
+                walk_children(
+                    tree,
+                    &node.children,
+                    ctx,
+                    content_width,
+                    layouts,
+                    cache,
+                    stats,
+                )?;
             }
         }
     }
@@ -282,6 +579,8 @@ fn render_view(
     ctx: &mut WgpuRenderCtx<'_>,
     content_width: f32,
     layouts: &mut Vec<NodeLayout>,
+    cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
     let style = &node.resolved;
     let pad_x = padding_x_px(style);
@@ -324,7 +623,15 @@ fn render_view(
     ctx.content_x = inner_left;
     ctx.cursor_y = outer_top + pad_y;
 
-    walk_children(tree, &node.children, ctx, inner_width, layouts)?;
+    walk_children(
+        tree,
+        &node.children,
+        ctx,
+        inner_width,
+        layouts,
+        cache,
+        stats,
+    )?;
 
     let content_bottom = ctx.cursor_y;
     let outer_bottom = content_bottom + pad_y;
@@ -1598,6 +1905,211 @@ mod tests {
             y_of(&baseline_texts, "Sibling"),
             y_of(&tooltip_texts, "Sibling"),
             "a tooltip (always a flow float) must not shift the next sibling at all"
+        );
+    }
+
+    // ---- per-subtree dirty tracking / WalkCache (#229) ----
+
+    fn hud_options<'a>(text_system: &'a dyn TextSystem, viewport: Size) -> WalkOptions<'a> {
+        WalkOptions {
+            viewport,
+            theme: WgpuTheme::default(),
+            text_system,
+        }
+    }
+
+    /// Acceptance #3: editing one leaf's text must not force a full-tree
+    /// walk — every unrelated row must be spliced from the cache instead of
+    /// re-walked, and the fast path must still reproduce exactly what a
+    /// fresh, uncached walk would have produced (acceptance #2).
+    #[test]
+    fn cached_walk_reuses_unchanged_sibling_subtrees_after_a_single_text_edit() {
+        const ROWS: usize = 50;
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let mut texts = Vec::with_capacity(ROWS);
+        for i in 0..ROWS {
+            let row = tree.push_view(root, "").unwrap();
+            let text = tree
+                .push_text(row, format!("row {i}"), TextVariant::Body, "")
+                .unwrap();
+            texts.push(text);
+        }
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 4000.0));
+        let mut cache = WalkCache::new();
+
+        let (_first_out, first_stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+        assert_eq!(
+            first_stats.reused, 0,
+            "nothing is cached yet; the first walk must report zero reuse"
+        );
+        assert_eq!(
+            first_stats.walked as usize,
+            ROWS * 2,
+            "the first walk must walk every row's View and its Text child once each"
+        );
+
+        // Same font/width — still a single line, so this does not change
+        // row 0's height and must not shift any later sibling.
+        assert!(tree.set_text(texts[0], "row 0 (updated)"));
+
+        let (incremental_out, second_stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+
+        assert_eq!(
+            second_stats.walked, 2,
+            "only the dirty row's View and its Text child should be re-walked, got {second_stats:?}"
+        );
+        assert_eq!(
+            second_stats.reused,
+            (ROWS - 1) as u32,
+            "every other row's View subtree must be spliced from the cache"
+        );
+
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+        assert_eq!(
+            incremental_out, fresh,
+            "the incrementally-rebuilt output must exactly match a fresh, uncached walk"
+        );
+    }
+
+    /// A clean subtree is only safe to reuse at its *exact* previous
+    /// position. When an earlier sibling's height changes (wraps onto an
+    /// extra line here), every later sibling must miss and re-walk rather
+    /// than reuse a now-wrong cached position — and the result must still
+    /// match a fresh walk exactly.
+    #[test]
+    fn cached_walk_rewalks_later_siblings_when_an_earlier_one_changes_height() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let heading = tree.push_text(root, "hi", TextVariant::Body, "").unwrap();
+        let after = tree
+            .push_text(root, "after", TextVariant::Body, "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        // Narrow enough that a long string wraps onto a second line.
+        let options = hud_options(&text_system, Size::new(140.0, 400.0));
+        let mut cache = WalkCache::new();
+
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+
+        assert!(tree.set_text(
+            heading,
+            "a heading long enough to wrap onto a second line at this width"
+        ));
+
+        let (out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+        assert_eq!(
+            stats.reused, 0,
+            "the wrapped heading shifted every sibling's position, so none can be reused: {stats:?}"
+        );
+
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+        assert_eq!(out, fresh);
+        let _ = after;
+    }
+
+    /// The coarse [`AppTree::mark_dirty`] escape hatch (what an action
+    /// closure calls after mutating state the tracked setters never see)
+    /// must flush the *entire* cache, not just whatever subtree happens to
+    /// look dirty — `subtree_revision` cannot see that kind of change at
+    /// all.
+    #[test]
+    fn mark_dirty_flushes_the_whole_cache_even_with_no_tracked_mutation() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        for i in 0..5 {
+            tree.push_text(root, format!("row {i}"), TextVariant::Body, "")
+                .unwrap();
+        }
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+
+        tree.mark_dirty();
+
+        let (_out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+        assert_eq!(
+            stats.reused, 0,
+            "mark_dirty's epoch bump must invalidate every cached subtree: {stats:?}"
+        );
+    }
+
+    /// A theme swap repaints every themed color without touching the tree
+    /// at all — `subtree_revision` never moves, so the cache must be
+    /// flushed on the theme (and viewport) comparison instead.
+    #[test]
+    fn theme_change_flushes_the_whole_cache_and_output_matches_a_fresh_walk() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        tree.push_text(root, "hello", TextVariant::Body, "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let viewport = Size::new(800.0, 600.0);
+        let mut cache = WalkCache::new();
+
+        let options_a = hud_options(&text_system, viewport);
+        walk_app_tree_cached(&tree, &registry, &options_a, &mut cache).expect("first walk");
+
+        let mut theme_b = WgpuTheme::default();
+        theme_b.tokens.surface_foreground = Color {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 1.0,
+        };
+        let options_b = WalkOptions {
+            viewport,
+            theme: theme_b,
+            text_system: &text_system,
+        };
+
+        let (out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options_b, &mut cache).expect("second walk");
+        assert_eq!(
+            stats.reused, 0,
+            "a theme change must invalidate every cached subtree: {stats:?}"
+        );
+
+        let fresh = walk_app_tree(&tree, &registry, &options_b).expect("fresh reference walk");
+        assert_eq!(out, fresh);
+    }
+
+    /// A `Custom` node's subtree must never be served from the cache: its
+    /// output can depend on state outside the tree entirely, which
+    /// `subtree_revision` cannot see.
+    #[test]
+    fn a_subtree_containing_a_custom_node_is_never_cached() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "").unwrap();
+        tree.push_custom(row, "tooltip", serde_json::json!({}), "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+        let (_out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+        assert_eq!(
+            stats.reused, 0,
+            "a subtree containing a Custom node must always re-walk: {stats:?}"
         );
     }
 }

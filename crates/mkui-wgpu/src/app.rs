@@ -31,7 +31,7 @@ use crate::pointer::{left_button_state, PointerState};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render::{RenderOutcome, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::walker::{walk_app_tree, HitTestEntry, WalkOptions};
+use crate::walker::{walk_app_tree_cached, HitTestEntry, WalkCache, WalkOptions};
 #[cfg(not(target_arch = "wasm32"))]
 use mkui_runtime::RuntimeSignal;
 #[cfg(not(target_arch = "wasm32"))]
@@ -64,11 +64,17 @@ pub struct WgpuApp {
     #[cfg(not(target_arch = "wasm32"))]
     headless: bool,
     /// Most recent per-frame hit-test list. Replaced wholesale on each
-    /// rebuild via [`walk_app_tree`]'s [`WalkOutput`]; the input router
-    /// reads this slice (no `&mut` is ever handed to a renderer or
-    /// action closure).
+    /// rebuild via [`crate::walker::walk_app_tree_cached`]'s `WalkOutput`;
+    /// the input router reads this slice (no `&mut` is ever handed to a
+    /// renderer or action closure).
     #[cfg(not(target_arch = "wasm32"))]
     hit_tests: Vec<HitTestEntry>,
+    /// Per-subtree render cache (#229) backing [`WgpuApp::try_rebuild_scene_from_tree`].
+    /// Lives for the whole app, not just one rebuild — see [`WalkCache`]'s
+    /// own docs for what invalidates it (an `AppTree::epoch` bump, or a
+    /// theme/viewport change).
+    #[cfg(not(target_arch = "wasm32"))]
+    walk_cache: WalkCache,
     #[cfg(not(target_arch = "wasm32"))]
     pointer: PointerState,
     /// True until the freshly-created window has produced its first
@@ -232,6 +238,8 @@ impl WgpuApp {
             #[cfg(not(target_arch = "wasm32"))]
             hit_tests: Vec::new(),
             #[cfg(not(target_arch = "wasm32"))]
+            walk_cache: WalkCache::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             pointer: PointerState::new(),
             #[cfg(not(target_arch = "wasm32"))]
             first_paint_pending: true,
@@ -262,8 +270,10 @@ impl WgpuApp {
 
     /// Build a declarative-path app from a runtime [`mkui_core::components::Mkui`]
     /// plus a custom-component registry. The event loop rebuilds the scene
-    /// from the tree per frame (eager rebuild — Sprint 4 substrate
-    /// contract, ADR 0006).
+    /// from the tree on every dirty frame (Sprint 4 substrate contract, ADR
+    /// 0006) — within that rebuild, an unchanged built-in subtree is
+    /// spliced from a cache rather than re-walked (#229, ADR 0006's
+    /// "Update (#229)" section).
     pub fn with_app_tree(
         core: mkui_core::components::Mkui,
         registry: WgpuRendererRegistry,
@@ -304,8 +314,19 @@ impl WgpuApp {
         &self.text_system
     }
 
+    /// Swap the active text system. Also flushes the per-subtree
+    /// [`WalkCache`] (#229) that backs the declarative-path rebuild: a
+    /// cached subtree's `Text` primitives were
+    /// measured (line count, wrapped height) against the *previous* text
+    /// system, and nothing about that measurement is visible in
+    /// `AppTree::subtree_revision` — reusing it after the swap would paint
+    /// stale geometry under the new system's metrics.
     pub fn set_text_system(&mut self, text_system: Arc<dyn TextSystem>) {
         self.text_system = text_system;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.walk_cache = WalkCache::new();
+        }
     }
 
     pub fn theme(&self) -> &WgpuTheme {
@@ -449,8 +470,8 @@ impl WgpuApp {
         };
         let output = {
             let core_ref = core.borrow();
-            match walk_app_tree(core_ref.tree(), registry, &options) {
-                Ok(out) => out,
+            match walk_app_tree_cached(core_ref.tree(), registry, &options, &mut self.walk_cache) {
+                Ok((out, _stats)) => out,
                 Err(err) => {
                     eprintln!("mkui-wgpu: walk_app_tree error: {err}");
                     return false;

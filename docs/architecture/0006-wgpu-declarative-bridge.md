@@ -129,11 +129,28 @@ like it calls `update_frame`.
 above; `set_theme` was also folded into the same compare-before-write
 contract (a theme swap wasn't marking the tree dirty at all, a latent gap
 `update_frame` made visible). Skipping unchanged *subtrees* within a
-single dirty rebuild — the issue's headline "retained tree" framing — is
-deliberately deferred to a follow-up; see that issue for why eager
-whole-tree rebuild-on-dirty remains the right default until a performance
-baseline says otherwise (unchanged from the Codex round 7 rationale
-above).
+single dirty rebuild — the issue's headline "retained tree" framing — was
+deliberately deferred to a follow-up at the time this ADR was written; see
+the next subsection for where that follow-up landed.
+
+#### Update (#229): per-subtree dirty tracking
+
+The whole-tree dirty bit above is unchanged — `AppTree::is_dirty` still
+gates whether `update_frame` walks at all. What #229 adds is *within* that
+walk: `AppTree` now tracks a monotonic revision per node (propagated up
+through every ancestor on `push_*`/`set_text`/`set_button_label`), and
+`mkui-wgpu::walker::walk_app_tree_cached` — the function
+`try_rebuild_scene_from_tree` now calls — threads a caller-owned
+`WalkCache` through the walk. A built-in (`View`/`Text`/`Button`) subtree
+whose revision, exact layout position, content-width, and inherited
+foreground all match what the cache already has is spliced from the
+cached primitives/hit-entries/layouts instead of re-walked; anything else
+(a `Custom` node anywhere inside it, a theme/viewport change, the coarse
+`mark_dirty` escape hatch, or just a cache miss) falls back to the eager
+whole-subtree rebuild this ADR describes, with no translation attempted.
+The Codex round 7 rationale for *not* building a general incremental
+layout engine still holds — this is a position-exact cache keyed on
+content that already has a cheap equality check, not a diffing algorithm.
 
 ### Closure capture
 
