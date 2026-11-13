@@ -774,6 +774,7 @@ dependencies = [
  "bytemuck",
  "mkui-core",
  "mkui-text",
+ "mkui-vector2d",
  "mkui-wgpu",
  "pollster",
  "wgpu",

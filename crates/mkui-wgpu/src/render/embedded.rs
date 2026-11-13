@@ -25,7 +25,14 @@
 //! to also drive the Slug vector-glyph lane (`slug` feature, ADR 0007) and
 //! `Primitive::VectorPath`, the same ordered command-classification +
 //! lane-flush shape [`super::Renderer::render`] already implements (see
-//! [`crate::render_command`]). (#187) real backdrop blur
+//! [`crate::render_command`]). #259 completes the component-text half of
+//! that: under `slug`, `EmbeddedRenderer::set_slug_font` selects a
+//! registered Slug face for every component `Primitive::Text` to route
+//! through, mirroring `Renderer::set_slug_font` — `render_into` expands
+//! the scene through `slug_text::expand_slug_text` before classification,
+//! same as the standalone path. (These three names are plain code spans,
+//! not doc links: all three exist only under `slug`, so a link would dangle
+//! on an off-feature build.) (#187) real backdrop blur
 //! (`Primitive::Backdrop`) is still not wired in; those primitives are
 //! silently skipped (the same no-op [`crate::tessellate_primitives`] already
 //! gives them on an unselected lane), not rejected. A glass panel still
@@ -83,11 +90,15 @@
 
 use std::ops::Range;
 
+#[cfg(feature = "slug")]
+use mkui_text::FontId;
 use mkui_text::TextSystem;
 
 use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
 use crate::{tessellate_primitives, Scene};
 
+#[cfg(feature = "slug")]
+use mkui_vector2d::{SlugBlobCache, SlugConfig};
 #[cfg(feature = "slug")]
 use mkui_vector2d_wgpu::{PreparedSlug, SlugAdapter};
 
@@ -159,6 +170,20 @@ pub struct EmbeddedRenderer {
     /// triangle-lane-only behavior, unchanged).
     #[cfg(feature = "slug")]
     slug_adapter: SlugAdapter,
+    /// The registered face component text routes through the Slug lane
+    /// against, or `None` to keep every component `Primitive::Text` on the
+    /// bitmap lane — mirrors [`super::Renderer::slug_font_id`]/
+    /// [`super::Renderer::set_slug_font`] (#171 Part B.2). Set via
+    /// [`EmbeddedRenderer::set_slug_font`]; `None` by default, so a host that
+    /// never opts a font in stays byte-identical to the pre-#259 bitmap-only
+    /// embedded path.
+    #[cfg(feature = "slug")]
+    slug_font_id: Option<FontId>,
+    /// Persistent Slug blob cache backing [`crate::slug_text::expand_slug_text`]
+    /// — held across frames (like [`super::Renderer::slug_text_cache`]) so a
+    /// warm cache never re-decodes or re-encodes an already-seen glyph.
+    #[cfg(feature = "slug")]
+    slug_text_cache: SlugBlobCache,
 }
 
 impl EmbeddedRenderer {
@@ -189,12 +214,28 @@ impl EmbeddedRenderer {
             target_format,
             #[cfg(feature = "slug")]
             slug_adapter,
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
+            #[cfg(feature = "slug")]
+            slug_text_cache: SlugBlobCache::new(SlugConfig::new(16, 16, 1)),
         }
     }
 
     /// The host target format this renderer's pipeline was built against.
     pub fn target_format(&self) -> wgpu::TextureFormat {
         self.target_format
+    }
+
+    /// Select the registered [`FontId`] component text (every widget renders
+    /// through exactly one [`Primitive::Text`](crate::Primitive::Text) seam)
+    /// should route through the Slug lane against, or `None` to keep the
+    /// bitmap lane as the sole path — mirrors
+    /// [`super::Renderer::set_slug_font`]. Per glyph/run that still can't be
+    /// drawn as Slug falls back to the bitmap lane automatically; the widget
+    /// as a whole always renders.
+    #[cfg(feature = "slug")]
+    pub fn set_slug_font(&mut self, font_id: Option<FontId>) {
+        self.slug_font_id = font_id;
     }
 
     /// Record the UI render pass for `scene` into the host's own `encoder`
@@ -223,7 +264,7 @@ impl EmbeddedRenderer {
     /// already knows its own target's size every frame.
     #[allow(clippy::too_many_arguments)] // every argument is load-bearing, borrowed host state (#234 added `queue`); same escape hatch as `components::dot`/`components::button`.
     pub fn render_into(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
@@ -241,12 +282,34 @@ impl EmbeddedRenderer {
         let (target_width, _) = target_size;
         let device_pixel_ratio = target_width as f32 / scene.viewport.width.max(1.0);
 
+        // #259: when a Slug font is selected, expand every component's
+        // `Primitive::Text` into Slug + (per-run/per-glyph fallback) bitmap
+        // primitives *before* command classification — mirrors
+        // `Renderer::render`'s own `expanded_primitives` (#171 Part B.2).
+        // With no font selected (the default) or the `slug` feature off,
+        // `primitives` is exactly `scene.primitives` — byte-identical to the
+        // pre-#259 bitmap-only embedded path.
+        #[cfg(feature = "slug")]
+        let expanded_primitives = self.slug_font_id.map(|font_id| {
+            crate::slug_text::expand_slug_text(
+                &scene.primitives,
+                font_id,
+                text_system,
+                &mut self.slug_text_cache,
+            )
+        });
+        #[cfg(feature = "slug")]
+        let primitives: &[crate::types::Primitive] =
+            expanded_primitives.as_deref().unwrap_or(&scene.primitives);
+        #[cfg(not(feature = "slug"))]
+        let primitives: &[crate::types::Primitive] = &scene.primitives;
+
         // Tessellate a contiguous triangle-lane primitive range into one
         // vertex buffer, or `None` when it yields no geometry — mirrors
         // `Renderer::render`'s own `make_triangles` closure.
         let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
             let triangles =
-                tessellate_primitives(&scene.primitives[range], text_system, device_pixel_ratio);
+                tessellate_primitives(&primitives[range], text_system, device_pixel_ratio);
             let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
             if vertices.is_empty() {
                 return None;
@@ -268,7 +331,7 @@ impl EmbeddedRenderer {
         // classify), so this collapses to exactly the Phase 1 behavior: one
         // contiguous triangle run per `Backdrop` boundary, with `Backdrop`
         // itself still silently skipped.
-        let commands = build_render_commands(&scene.primitives, classify_primitive);
+        let commands = build_render_commands(primitives, classify_primitive);
         let mut lane_draws: Vec<LaneDraw> = Vec::new();
         let mut pending_triangles: Option<Range<usize>> = None;
         for command in &commands {
@@ -291,7 +354,7 @@ impl EmbeddedRenderer {
                     // emits a `SlugGlyphs` command, so this arm cannot run.
                     #[cfg(feature = "slug")]
                     {
-                        let glyphs = scene_slug_glyphs(&scene.primitives[range]);
+                        let glyphs = scene_slug_glyphs(&primitives[range]);
                         if let Some(prepared) = self.slug_adapter.prepare(
                             device,
                             queue,
@@ -313,7 +376,7 @@ impl EmbeddedRenderer {
                     // emits a `VectorPath` command, so this arm cannot run.
                     #[cfg(feature = "slug")]
                     {
-                        let paths = scene_vector_paths(&scene.primitives[range]);
+                        let paths = scene_vector_paths(&primitives[range]);
                         let paints = vector_path_paints(&paths);
                         if let Some(prepared) = self.slug_adapter.prepare_path_paints(
                             device,
@@ -525,7 +588,7 @@ mod tests {
 
             // One encoder, one submission — the host's — carrying both the
             // (already-recorded) host content and mkui's UI pass.
-            let embedded = EmbeddedRenderer::new(
+            let mut embedded = EmbeddedRenderer::new(
                 host.device(),
                 host.format(),
                 EmbeddedColorSpace::EncodedUnorm,
@@ -578,7 +641,7 @@ mod tests {
             host.clear(wgpu::Color::BLACK);
             let before = host.read_rgba().expect("baseline readback");
 
-            let embedded = EmbeddedRenderer::new(
+            let mut embedded = EmbeddedRenderer::new(
                 host.device(),
                 host.format(),
                 EmbeddedColorSpace::EncodedUnorm,
@@ -703,7 +766,7 @@ mod tests {
                     cap_height_px: f32::INFINITY,
                 });
 
-                let embedded = EmbeddedRenderer::new(
+                let mut embedded = EmbeddedRenderer::new(
                     host.device(),
                     host.format(),
                     EmbeddedColorSpace::EncodedUnorm,
@@ -773,7 +836,7 @@ mod tests {
                     &theme,
                 );
 
-                let embedded = EmbeddedRenderer::new(
+                let mut embedded = EmbeddedRenderer::new(
                     host.device(),
                     host.format(),
                     EmbeddedColorSpace::EncodedUnorm,
@@ -830,6 +893,125 @@ mod tests {
                     outside,
                     pixel_at(&before, size, 1, 1),
                     "a pixel outside the vector path must survive untouched"
+                );
+            }
+
+            // ---- #259: component `Primitive::Text` routed through
+            // `set_slug_font` + `expand_slug_text`, mirroring the standalone
+            // `Renderer`'s own #171 Part B.2 wiring.
+
+            const ABEL: &[u8] =
+                include_bytes!("../../../mkui-text/tests/fixtures/abel/Abel-Regular.ttf");
+
+            /// Register the licensed Abel fixture as a Slug provider beside
+            /// the built-in bitmap face.
+            fn registered() -> (mkui_text::CompositeTextSystem, mkui_text::FontId) {
+                let mut sys = mkui_text::CompositeTextSystem::new();
+                let id = sys
+                    .register_sfnt_face(Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+                    .expect("Abel registers");
+                (sys, id)
+            }
+
+            /// One `Primitive::Text` scene, identical across both tests below
+            /// — only `EmbeddedRenderer::set_slug_font` differs between runs.
+            fn text_scene(size: u32) -> Scene {
+                use crate::types::{FontFaceId, Text, TextAlign, TextStyle};
+
+                let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                scene.text(Text {
+                    rect: crate::Rect::new(Point::new(4.0, 32.0), crate::Size::new(88.0, 32.0)),
+                    content: "Mag".to_string(),
+                    style: TextStyle {
+                        font: FontFaceId(mkui_text::FontId::BITMAP.raw()),
+                        font_size_px: 24.0,
+                        line_height_px: 28.0,
+                        color: crate::Color::rgb(1.0, 1.0, 1.0),
+                        align: TextAlign::Start,
+                    },
+                });
+                scene
+            }
+
+            /// Render `scene` into a fresh offscreen host through `text_system`,
+            /// building the `EmbeddedRenderer` against that *same* host's
+            /// device/format (a pipeline built against one `OffscreenRenderer`'s
+            /// device cannot draw into another's), optionally selecting
+            /// `slug_font_id`. Returns the readback RGBA bytes.
+            fn render_text(
+                text_system: &dyn mkui_text::TextSystem,
+                slug_font_id: Option<mkui_text::FontId>,
+                size: u32,
+                scene: &Scene,
+            ) -> Vec<u8> {
+                let host = host(size, size);
+                host.clear(wgpu::Color::BLACK);
+                let mut embedded = EmbeddedRenderer::new(
+                    host.device(),
+                    host.format(),
+                    EmbeddedColorSpace::EncodedUnorm,
+                );
+                embedded.set_slug_font(slug_font_id);
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded component-text test encoder"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    scene,
+                    text_system,
+                );
+                host.queue().submit(Some(encoder.finish()));
+                host.read_rgba().expect("component-text readback")
+            }
+
+            #[test]
+            fn render_into_keeps_component_text_on_the_bitmap_lane_by_default() {
+                // A `CompositeTextSystem` with a Slug face registered, but no
+                // `set_slug_font` call, must render component text exactly
+                // like the plain `BitmapTextSystem` every other test in this
+                // file uses — the "default OFF" half of #171 Part B.2's
+                // contract, now proven for the embedded path too.
+                let size = 96u32;
+                let (sys, _abel_id) = registered();
+                let scene = text_scene(size);
+
+                let composite_bytes = render_text(&sys, None, size, &scene);
+                let bitmap_bytes = render_text(&BitmapTextSystem::new(), None, size, &scene);
+
+                assert_eq!(
+                    composite_bytes, bitmap_bytes,
+                    "an embedded renderer with no `set_slug_font` call must stay byte-identical \
+                     to the bitmap-only path, even when the text system has a Slug face registered"
+                );
+            }
+
+            #[test]
+            fn render_into_routes_component_text_through_the_slug_lane_once_a_font_is_selected() {
+                // The regression #259 exists to fix: before `EmbeddedRenderer`
+                // learned `set_slug_font`/`expand_slug_text`, swapping in a
+                // `CompositeTextSystem` with a registered real face compiled
+                // and ran, but the registered face was never looked up —
+                // `tessellate_text` always asks for `FontId::BITMAP`. This
+                // proves selecting a Slug font actually changes the rendered
+                // output.
+                let size = 96u32;
+                let (sys, abel_id) = registered();
+                let scene = text_scene(size);
+
+                let bitmap_bytes = render_text(&sys, None, size, &scene);
+                let slug_bytes = render_text(&sys, Some(abel_id), size, &scene);
+
+                assert_ne!(
+                    bitmap_bytes, slug_bytes,
+                    "selecting a Slug font via `set_slug_font` must change the rendered \
+                     component text (bitmap lane vs. real anti-aliased Slug glyphs) — an \
+                     unchanged readback means `render_into` never reached `expand_slug_text`"
                 );
             }
         }

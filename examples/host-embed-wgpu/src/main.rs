@@ -28,7 +28,13 @@
 //! not the two-quad placeholder #175 shipped it with; this issue only
 //! assembles the scene, it does not measure anything itself.
 //!
-//! `cargo run -p host-embed-wgpu --release` opens the window.
+//! `cargo run -p host-embed-wgpu --release` opens the window: HUD text
+//! renders through the real Abel TTF face via the Slug lane (#259's
+//! anti-aliased-text fix — this crate's default-on `slug` feature, see its
+//! `Cargo.toml`). `cargo run -p host-embed-wgpu --release
+//! --no-default-features` instead keeps every component on
+//! `mkui_text::CompositeTextSystem`'s built-in bitmap face (the 5x7 cell,
+//! scaled up — same as the pre-#259 standalone `BitmapTextSystem`).
 //! `HEADLESS=1 cargo run -p host-embed-wgpu` exits before opening a window,
 //! the same CI-smoke convention `native-window`/`native-showcase` use.
 //!
@@ -63,7 +69,7 @@ use winit::{
 };
 
 use mkui_core::headless::{KeyboardInteractable, MenuList};
-use mkui_text::BitmapTextSystem;
+use mkui_text::CompositeTextSystem;
 use mkui_wgpu::components::{
     badge, counter_chip, dot, glass_panel, label, progress_bar, segmented_select,
     slider_with_label, titled_dialog, toast_stack, toggle, tooltip, tooltip_rect, TOOLTIP_GAP_PX,
@@ -73,6 +79,13 @@ use mkui_wgpu::{
     EmbeddedColorSpace, EmbeddedRenderer, GlassMode, IconId, PanelLayout, Point, Quad, Rect, Scene,
     Size, TextVariant, ToastStack, ToastVariant, TooltipPlacement, TooltipState, WgpuTheme,
 };
+
+/// Abel (Google Fonts, SIL Open Font License 1.1) — embedded for this example
+/// only, never the library (#259). Only referenced under `slug`; an
+/// off-feature build never decodes it.
+#[cfg(feature = "slug")]
+const ABEL_TTF: &[u8] =
+    include_bytes!("../../../crates/mkui-text/tests/fixtures/abel/Abel-Regular.ttf");
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -433,7 +446,7 @@ impl Gpu {
     /// Record and submit exactly one frame: the host's lit 3D pass, then
     /// mkui's HUD pass into the same encoder and the same swapchain view,
     /// then one `queue.submit` and present (#175's acceptance bar).
-    fn render(&mut self, elapsed_secs: f32, hud_scene: &Scene, text_system: &BitmapTextSystem) {
+    fn render(&mut self, elapsed_secs: f32, hud_scene: &Scene, text_system: &CompositeTextSystem) {
         let (frame, reconfigure_after_present) = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => (frame, false),
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
@@ -930,17 +943,17 @@ struct HostApp {
     viewport: Size,
     theme: WgpuTheme,
     hud: HudState,
-    // Bitmap text only, deliberately: `EmbeddedRenderer::render_into`'s
-    // triangle-lane `tessellate_text` hardcodes `FontId::BITMAP` regardless
-    // of which `TextSystem` is passed in (see that fn's own comment), so
-    // swapping this for a `CompositeTextSystem` + a registered real TTF
-    // face would compile but change nothing on screen — the registered
-    // face would simply never be looked up. `EmbeddedRenderer` now drives
-    // the Slug vector lane too (#234), but turning this HUD's *text* onto
-    // it also needs routing wrapped/centered Slug text correctly (#233);
-    // until that lands, every component in this HUD stays on the blocky
-    // 5×7 bitmap face.
-    text_system: BitmapTextSystem,
+    // Real anti-aliased TTF text via the Slug lane (#259), gated on this
+    // crate's own `slug` feature (default ON — see its `Cargo.toml`): a
+    // composite registry seeded with the built-in bitmap face plus the Abel
+    // SFNT face decoded from `ABEL_TTF`, routed through
+    // `EmbeddedRenderer::set_slug_font` in `resumed` below. Built with
+    // `--no-default-features`, Abel is never registered at all and every
+    // component stays on `CompositeTextSystem`'s own built-in bitmap face —
+    // byte-identical to the pre-#259 standalone `BitmapTextSystem` path.
+    text_system: CompositeTextSystem,
+    #[cfg(feature = "slug")]
+    abel_font_id: mkui_text::FontId,
     start: Instant,
     last_toast_at: f32,
     toast_cycle: usize,
@@ -948,13 +961,24 @@ struct HostApp {
 
 impl HostApp {
     fn new() -> Self {
+        #[cfg_attr(not(feature = "slug"), allow(unused_mut))]
+        let mut text_system = CompositeTextSystem::new();
+        #[cfg(feature = "slug")]
+        let abel_font_id = text_system
+            .register_sfnt_face(
+                std::sync::Arc::from(ABEL_TTF.to_vec().into_boxed_slice()),
+                0,
+            )
+            .expect("Abel registers");
         Self {
             window: None,
             gpu: None,
             viewport: Size::new(960.0, 720.0),
             theme: WgpuTheme::default(),
             hud: HudState::new(),
-            text_system: BitmapTextSystem::new(),
+            text_system,
+            #[cfg(feature = "slug")]
+            abel_font_id,
             start: Instant::now(),
             // Negative, not zero: the first `RedrawRequested` (elapsed ≈ 0)
             // must already satisfy `elapsed - last_toast_at >=
@@ -1028,7 +1052,12 @@ impl ApplicationHandler for HostApp {
                 return;
             }
         };
-        let gpu = pollster::block_on(Gpu::new(window.clone()));
+        #[cfg_attr(not(feature = "slug"), allow(unused_mut))]
+        let mut gpu = pollster::block_on(Gpu::new(window.clone()));
+        // Route HUD component text through the real Abel Slug face instead
+        // of `EmbeddedRenderer`'s default bitmap-only lane (#259).
+        #[cfg(feature = "slug")]
+        gpu.embedded.set_slug_font(Some(self.abel_font_id));
         self.gpu = Some(gpu);
         self.window = Some(window.clone());
         window.request_redraw();
@@ -1240,5 +1269,121 @@ mod tests {
         let viewport = logical_viewport(winit::dpi::PhysicalSize::new(1920, 1440), 2.0);
         assert_eq!(viewport.width, 960.0);
         assert_eq!(viewport.height, 720.0);
+    }
+
+    // #259: a CPU-only proof that the HUD's own text actually reaches the
+    // Slug lane once Abel is registered — the real-window visual check
+    // acceptance bullet 1 asks for is deferred to #230 (see the PR body); this
+    // is the evidence this PR ships in its place. Exercises exactly the same
+    // `expand_slug_text` seam `EmbeddedRenderer::render_into` drives at
+    // runtime (`resumed`'s `set_slug_font` call above), just without a GPU.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn hud_text_routes_through_the_slug_lane_once_abel_is_registered() {
+        use mkui_vector2d::{SlugBlobCache, SlugConfig};
+        use mkui_wgpu::slug_text::expand_slug_text;
+
+        let mut text_system = CompositeTextSystem::new();
+        let abel_font_id = text_system
+            .register_sfnt_face(
+                std::sync::Arc::from(ABEL_TTF.to_vec().into_boxed_slice()),
+                0,
+            )
+            .expect("Abel registers");
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let theme = WgpuTheme::default();
+
+        for overlay in [
+            OverlayState::Closed,
+            OverlayState::Open,
+            OverlayState::QuitConfirm,
+        ] {
+            let mut hud = HudState::new();
+            hud.overlay = overlay;
+            let mut last_toast_at = -TOAST_INTERVAL_SECS;
+            let mut cycle = 0usize;
+            maybe_fire_toast(&mut hud.toasts, &mut last_toast_at, &mut cycle, 0.0);
+            // Mirrors `resumed`'s own `RedrawRequested` handler exactly
+            // (`set_focused(overlay == Open)`) — the tooltip is focus-driven,
+            // not drawn unconditionally, so a test that skips this never
+            // exercises `components::tooltip`'s text at all.
+            hud.tooltip.set_focused(overlay == OverlayState::Open);
+
+            let scene = build_hud_scene(viewport(), 0.0, &hud, &theme);
+            let text_count = scene
+                .primitives
+                .iter()
+                .filter(|p| matches!(p, Primitive::Text(_)))
+                .count();
+            assert!(text_count > 0, "{overlay:?}'s scene must contain text");
+
+            // Named labels, not just a count — proves specific tight-rect
+            // content is actually present before asserting it all survives
+            // Slug routing below. "LIVE" (56x24 badge), "2480" (the score
+            // `counter_chip`'s count label — its own "Score" tooltip string
+            // never paints here since this call site passes
+            // hovered=focused=false), and the first toast string are always
+            // present (base HUD); "Audio (M)" (80x20) + the default-quality
+            // "MEDIUM" badge only once the pause overlay is open; the
+            // tooltip only when `Open` specifically (see above).
+            for label in ["LIVE", "2480", "Checkpoint saved"] {
+                assert!(
+                    has_text(&scene, label),
+                    "{overlay:?}'s scene must contain the \"{label}\" label"
+                );
+            }
+            if overlay != OverlayState::Closed {
+                for label in ["Audio (M)", "MEDIUM"] {
+                    assert!(
+                        has_text(&scene, label),
+                        "{overlay:?}'s scene must contain the \"{label}\" label"
+                    );
+                }
+            }
+            if overlay == OverlayState::Open {
+                assert!(
+                    has_text(&scene, "Lower quality reduces GPU load."),
+                    "{overlay:?}'s scene must contain the focus-driven tooltip text"
+                );
+            }
+
+            let expanded =
+                expand_slug_text(&scene.primitives, abel_font_id, &text_system, &mut cache);
+            let slug_glyphs = expanded
+                .iter()
+                .filter(|p| matches!(p, Primitive::SlugGlyph(_)))
+                .count();
+            assert!(
+                slug_glyphs > 0,
+                "{overlay:?}'s HUD scene must route at least one glyph through the Slug \
+                 lane once Abel is registered"
+            );
+
+            // Every tight-rect label ("LIVE"/quality badges, "Audio (M)", the
+            // menu rows, the toast) must actually route through Slug, not
+            // silently stay on `expand_text_primitive`'s whole-primitive
+            // bitmap-lane bail (its two guards: no Slug run at all for this
+            // face, or a line still too wide even after ellipsizing) — #259's
+            // acceptance bar is "throughout the HUD", not "somewhere in the
+            // HUD". A single whitespace-only leftover is NOT that bug: it's
+            // `place_slug_run`'s documented *per-glyph* fallback (a space
+            // glyph's own outline has no drawable curves, so just that one
+            // character's bitmap_fallback degrades — functionally invisible,
+            // since the bitmap space glyph is itself blank) — distinct from a
+            // whole label bailing, which would carry the label's full
+            // original (non-whitespace) content.
+            let bailed_labels: Vec<&str> = expanded
+                .iter()
+                .filter_map(|p| match p {
+                    Primitive::Text(t) if !t.content.trim().is_empty() => Some(t.content.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                bailed_labels.is_empty(),
+                "{overlay:?}'s HUD scene bailed these labels to the bitmap lane entirely: \
+                 {bailed_labels:?} — every one of {text_count} must route through Slug"
+            );
+        }
     }
 }

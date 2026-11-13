@@ -8,7 +8,7 @@
 //! size-independent Slug blobs; [`place_slug_run`] places each glyph at its
 //! screen-pixel pen position and hands the renderer a [`PlacedSlugGlyph`] it
 //! can push into a [`Scene`](crate::Scene) as a
-//! [`Primitive::SlugGlyph`](crate::Primitive::SlugGlyph). The font-unit→pixel
+//! [`Primitive::SlugGlyph`]. The font-unit→pixel
 //! scale and the y-up→y-down flip are applied downstream by
 //! `mkui-vector2d-wgpu`'s packing — this function only computes the pen origin
 //! and the per-unit scale.
