@@ -669,11 +669,23 @@ mod tests {
                 // `OffscreenRenderer::format()` is `Rgba8Unorm`, so this is
                 // `EmbeddedColorSpace::EncodedUnorm` — exercising
                 // `fs_slug_encode_srgb`, not the pass-through `fs_slug` the
-                // standalone `Renderer` always uses. A linear mid-gray fill
-                // (`0.5`) is deliberately not `0.0`/`1.0`: those two values
-                // are fixed points of the sRGB OETF, so they couldn't tell a
-                // correctly-encoding pipeline apart from a pass-through one
-                // that regressed to `fs_slug` by mistake.
+                // standalone `Renderer` always uses. A mid-gray fill (`0.5`)
+                // is deliberately not `0.0`/`1.0`: those two are fixed points
+                // of the sRGB OETF, so a mistaken pass-through couldn't be
+                // told apart from a correct encode at full coverage/alpha.
+                //
+                // `scene_slug_glyphs` (the scene-level seam `render_into`
+                // always goes through) linearizes this *authored*
+                // sRGB-perceptual `0.5` to `≈0.214` before it ever reaches
+                // the GPU — same as every other Slug/vector-path color in
+                // the tree. `fs_slug_encode_srgb` then re-encodes `≈0.214`
+                // back to `≈0.5` (the two are exact inverses), so with full
+                // coverage and `alpha=1.0` (no background to blend against)
+                // the correctly-encoding pipeline's final byte is `≈128` —
+                // the *same* byte the authored `0.5` started as. A pipeline
+                // that regressed to the pass-through `fs_slug` would instead
+                // write the un-encoded linear `0.214` straight through, i.e.
+                // `≈55`.
                 let size = 64u32;
                 let host = host(size, size);
                 host.clear(wgpu::Color::BLACK);
@@ -715,13 +727,13 @@ mod tests {
                 let after = host.read_rgba().expect("post-UI readback");
 
                 // Well inside the square, away from its anti-aliased edges:
-                // full coverage, so the fragment shader's output is exactly
-                // `linear_to_srgb(0.5)` ≈ `188/255` — not the un-encoded
-                // `128/255` a pass-through `fs_slug` would have written.
+                // full coverage, so (per the module doc above) the correctly
+                // round-tripped byte is `≈128` — not the un-encoded `≈55` a
+                // pass-through `fs_slug` would have written.
                 let inside = pixel_at(&after, size, 32, 32);
                 assert_close(
                     inside,
-                    [188, 188, 188, 255],
+                    [128, 128, 128, 255],
                     3,
                     "Slug glyph interior pixel must be sRGB-encoded for an EncodedUnorm host",
                 );
@@ -785,16 +797,22 @@ mod tests {
                 let after = host.read_rgba().expect("post-UI readback");
 
                 // `fill_color.to_linear_rgba()` (the scene-level seam) and
-                // `fs_slug_encode_srgb`'s OETF are exact inverses, so the
-                // dot's own centre pixel must round-trip back to
-                // approximately the theme's authored sRGB byte value — not
-                // half as bright, which is what it would be had the OETF
-                // not run at all.
+                // `fs_slug_encode_srgb`'s OETF are exact inverses, so with
+                // full coverage the shader's output color round-trips back
+                // to the theme's authored sRGB fill — but the theme's
+                // `success` token is *not* fully opaque (`a = 0.96`), so
+                // that round-tripped color still blends against the black
+                // clear per `wgpu::BlendState::ALPHA_BLENDING`
+                // (`src * src_a + dst * (1 - src_a)`, `dst = 0` here): the
+                // expected byte is `fill.{r,g,b} * fill.a * 255`, not the
+                // fill color alone. A pipeline that regressed to the
+                // pass-through `fs_slug` would instead blend the
+                // *un-encoded* linear fill (visibly darker).
                 let fill = theme.dot_style(DotVariant::Ok, DotSize::Md).fill;
                 let expected = [
-                    (fill.r * 255.0).round() as u8,
-                    (fill.g * 255.0).round() as u8,
-                    (fill.b * 255.0).round() as u8,
+                    (fill.r * fill.a * 255.0).round() as u8,
+                    (fill.g * fill.a * 255.0).round() as u8,
+                    (fill.b * fill.a * 255.0).round() as u8,
                     255,
                 ];
                 let covered = pixel_at(&after, size, 16, 16);
@@ -802,7 +820,7 @@ mod tests {
                     covered,
                     expected,
                     3,
-                    "the dot's own centre must round-trip to the authored sRGB fill color",
+                    "the dot's own centre must round-trip to the authored sRGB fill color blended over black",
                 );
 
                 // Untouched: a corner well outside the dot's radius must
