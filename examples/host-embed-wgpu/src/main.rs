@@ -1303,6 +1303,11 @@ mod tests {
             let mut last_toast_at = -TOAST_INTERVAL_SECS;
             let mut cycle = 0usize;
             maybe_fire_toast(&mut hud.toasts, &mut last_toast_at, &mut cycle, 0.0);
+            // Mirrors `resumed`'s own `RedrawRequested` handler exactly
+            // (`set_focused(overlay == Open)`) — the tooltip is focus-driven,
+            // not drawn unconditionally, so a test that skips this never
+            // exercises `components::tooltip`'s text at all.
+            hud.tooltip.set_focused(overlay == OverlayState::Open);
 
             let scene = build_hud_scene(viewport(), 0.0, &hud, &theme);
             let text_count = scene
@@ -1311,6 +1316,36 @@ mod tests {
                 .filter(|p| matches!(p, Primitive::Text(_)))
                 .count();
             assert!(text_count > 0, "{overlay:?}'s scene must contain text");
+
+            // Named labels, not just a count — proves specific tight-rect
+            // content is actually present before asserting it all survives
+            // Slug routing below. "LIVE" (56x24 badge), "2480" (the score
+            // `counter_chip`'s count label — its own "Score" tooltip string
+            // never paints here since this call site passes
+            // hovered=focused=false), and the first toast string are always
+            // present (base HUD); "Audio (M)" (80x20) + the default-quality
+            // "MEDIUM" badge only once the pause overlay is open; the
+            // tooltip only when `Open` specifically (see above).
+            for label in ["LIVE", "2480", "Checkpoint saved"] {
+                assert!(
+                    has_text(&scene, label),
+                    "{overlay:?}'s scene must contain the \"{label}\" label"
+                );
+            }
+            if overlay != OverlayState::Closed {
+                for label in ["Audio (M)", "MEDIUM"] {
+                    assert!(
+                        has_text(&scene, label),
+                        "{overlay:?}'s scene must contain the \"{label}\" label"
+                    );
+                }
+            }
+            if overlay == OverlayState::Open {
+                assert!(
+                    has_text(&scene, "Lower quality reduces GPU load."),
+                    "{overlay:?}'s scene must contain the focus-driven tooltip text"
+                );
+            }
 
             let expanded =
                 expand_slug_text(&scene.primitives, abel_font_id, &text_system, &mut cache);

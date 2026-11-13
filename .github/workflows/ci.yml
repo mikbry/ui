@@ -659,6 +659,13 @@ jobs:
             ${{ runner.os }}-cargo-doc-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
       - run: cargo doc --workspace --no-deps --locked --exclude console-showcase --exclude web-showcase --exclude native-showcase
+      # `examples/host-embed-wgpu` defaults its own `slug` feature on (#259),
+      # which unifies `mkui-wgpu`'s `slug` feature ON across the whole
+      # `--workspace` build above — so that invocation no longer builds
+      # `mkui-wgpu`'s docs with `slug` off. Pin that leg here too (same
+      # rationale as the `test`/`clippy` jobs' `mkui-wgpu-default` leg); the
+      # job-level `RUSTDOCFLAGS` above already applies.
+      - run: cargo doc -p mkui-wgpu --no-deps --locked
 
   build-release:
     name: build-release
