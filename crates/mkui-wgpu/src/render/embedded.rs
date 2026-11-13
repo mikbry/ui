@@ -20,20 +20,22 @@
 //!
 //! ## What it does not (yet) support
 //!
-//! Phase 1 (#175) covers the triangle lane only — the UI shapes, bitmap
-//! text, and borders every component renders through today. The Slug
-//! vector-glyph lane (`slug` feature, ADR 0007), `Primitive::VectorPath`,
-//! and (#187) real backdrop blur (`Primitive::Backdrop`) are not wired into
+//! Phase 1 (#175) covered the triangle lane only; #234 extends
 //! [`EmbeddedRenderer::render_into`](crate::EmbeddedRenderer::render_into)
-//! yet; primitives of those kinds are silently skipped (the same no-op
-//! [`crate::tessellate_primitives`] already gives them on an unselected
-//! lane), not rejected. A glass panel still renders *something* here: it
-//! also emits a translucent `Quad` (the tint) that composites normally
-//! through the triangle lane — it just loses the blur, degrading to a flat
-//! tint over whatever the host already drew. Follow-up: extending the
-//! embedded path to the Slug/vector lane is tracked separately (#234), and
-//! to the backdrop-blur lane in #187's own follow-up, so Phase 1 stays
-//! scoped to the hosting contract itself.
+//! to also drive the Slug vector-glyph lane (`slug` feature, ADR 0007) and
+//! `Primitive::VectorPath`, the same ordered command-classification +
+//! lane-flush shape [`super::Renderer::render`] already implements (see
+//! [`crate::render_command`]). (#187) real backdrop blur
+//! (`Primitive::Backdrop`) is still not wired in; those primitives are
+//! silently skipped (the same no-op [`crate::tessellate_primitives`] already
+//! gives them on an unselected lane), not rejected. A glass panel still
+//! renders *something* here: it also emits a translucent `Quad` (the tint)
+//! that composites normally through the triangle lane — it just loses the
+//! blur, degrading to a flat tint over whatever the host already drew.
+//! Follow-up: extending the embedded path to the backdrop-blur lane is
+//! #187's own follow-up, so this stays scoped to render lanes that compose
+//! into the host's own view directly, with no sampling-the-frame-so-far
+//! step.
 //!
 //! ## Color space
 //!
@@ -79,11 +81,19 @@
 //! between the two — `EmbeddedRenderer` never inspects `target_format` to
 //! decide.
 
+use std::ops::Range;
+
 use mkui_text::TextSystem;
 
+use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
 use crate::{tessellate_primitives, Scene};
 
+#[cfg(feature = "slug")]
+use mkui_vector2d_wgpu::{PreparedSlug, SlugAdapter};
+
 use super::{build_ui_pipeline, gui_vertices};
+#[cfg(feature = "slug")]
+use super::{scene_slug_glyphs, scene_vector_paths, vector_path_paints};
 
 use wgpu::util::DeviceExt;
 
@@ -111,6 +121,22 @@ impl EmbeddedColorSpace {
             EmbeddedColorSpace::EncodedUnorm => "fs_ui_triangles_encode_srgb",
         }
     }
+
+    /// Picks the Slug-lane fragment entry point for this color space (#234),
+    /// mirroring [`Self::fragment_entry_point`] for the triangle lane — see
+    /// the module docs' "Color space" section. `slug.wgsl`'s `fs_slug` makes
+    /// the same pass-through assumption `fs_ui_triangles` does (the authored
+    /// color is already linear and the target either auto-encodes on write
+    /// or is itself a linear store); `fs_slug_encode_srgb` applies the same
+    /// manual OETF `fs_ui_triangles_encode_srgb` does, for the one UNORM-
+    /// target case that needs it.
+    #[cfg(feature = "slug")]
+    fn slug_fragment_entry_point(self) -> &'static str {
+        match self {
+            EmbeddedColorSpace::Linear => "fs_slug",
+            EmbeddedColorSpace::EncodedUnorm => "fs_slug_encode_srgb",
+        }
+    }
 }
 
 /// Host-owned GPU and frame entry point (#175). Owns only the UI render
@@ -122,6 +148,17 @@ impl EmbeddedColorSpace {
 pub struct EmbeddedRenderer {
     ui_pipeline: wgpu::RenderPipeline,
     target_format: wgpu::TextureFormat,
+    /// Native Slug glyph + vector-path lane adapter (#234), present only
+    /// under the `slug` feature. Built once against the host's borrowed
+    /// device, target format, and the Slug-lane fragment entry point
+    /// [`EmbeddedColorSpace::slug_fragment_entry_point`] picked for
+    /// `color_space` — mirroring [`super::Renderer`]'s own `slug_adapter`
+    /// field — so [`render_into`](Self::render_into) can drive
+    /// `Primitive::SlugGlyph` / `Primitive::VectorPath` the same way the
+    /// standalone path does. Off-feature builds never construct it (Phase 1
+    /// triangle-lane-only behavior, unchanged).
+    #[cfg(feature = "slug")]
+    slug_adapter: SlugAdapter,
 }
 
 impl EmbeddedRenderer {
@@ -141,9 +178,17 @@ impl EmbeddedRenderer {
     ) -> Self {
         let ui_pipeline =
             build_ui_pipeline(device, target_format, 1, color_space.fragment_entry_point());
+        #[cfg(feature = "slug")]
+        let slug_adapter = SlugAdapter::with_fragment_entry_point(
+            device,
+            target_format,
+            color_space.slug_fragment_entry_point(),
+        );
         Self {
             ui_pipeline,
             target_format,
+            #[cfg(feature = "slug")]
+            slug_adapter,
         }
     }
 
@@ -155,9 +200,20 @@ impl EmbeddedRenderer {
     /// Record the UI render pass for `scene` into the host's own `encoder`
     /// and `view`, loading the existing contents (`wgpu::LoadOp::Load`) so
     /// the host's already-drawn 3D scene survives underneath — this call
-    /// never clears. Does not create an encoder, does not submit to `queue`,
+    /// never clears. Does not create an encoder, does not submit `queue`,
     /// and does not present; the host does all three exactly once per frame,
-    /// around this call.
+    /// around this call. `queue` is only used (under the `slug` feature) to
+    /// upload this frame's Slug glyph / vector-path GPU resources — see
+    /// `mkui_vector2d_wgpu::SlugAdapter::prepare`.
+    ///
+    /// Drives the same ordered command stream [`super::Renderer::render`]
+    /// does (#234, see [`crate::render_command`]): triangle-lane primitives
+    /// (UI shapes, bitmap text, borders) and Slug-lane primitives
+    /// (`Primitive::SlugGlyph` / `Primitive::VectorPath`, `slug` feature
+    /// only) interleave in `Scene::primitives` order, each lane switch
+    /// flushing the other so paint order holds. `Primitive::Backdrop` is
+    /// still not wired in (see the module docs); it is silently skipped,
+    /// not rejected, same as before.
     ///
     /// `target_size` is the physical-pixel size of `view`'s underlying
     /// texture, used (like [`super::Renderer::render`]) to derive the
@@ -165,34 +221,131 @@ impl EmbeddedRenderer {
     /// (logical pixels, ADR 0006 §"Viewport units contract") for text/bitmap
     /// device-pixel snapping. The host, not this renderer, owns resize — it
     /// already knows its own target's size every frame.
+    #[allow(clippy::too_many_arguments)] // every argument is load-bearing, borrowed host state (#234 added `queue`); same escape hatch as `components::dot`/`components::button`.
     pub fn render_into(
         &self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
         target_size: (u32, u32),
         scene: &Scene,
         text_system: &dyn TextSystem,
     ) {
+        // Only the `slug`-gated `SlugAdapter::prepare`/`prepare_path_paints`
+        // calls below touch `queue`; an off-feature build never reaches
+        // them, so the parameter would otherwise go unused.
+        #[cfg(not(feature = "slug"))]
+        let _ = queue;
+
         let (target_width, _) = target_size;
         let device_pixel_ratio = target_width as f32 / scene.viewport.width.max(1.0);
 
-        // Phase 1 (#175): the triangle lane only. `tessellate_primitives`
-        // already no-ops `Primitive::SlugGlyph` / `Primitive::VectorPath`
-        // (see `crate::tessellation`), so running every primitive straight
-        // through it, with no lane splitting, is byte-identical to the
-        // standalone path's triangle lane and simply skips any Slug/vector
-        // path primitives for now (see the module docs).
-        let triangles = tessellate_primitives(&scene.primitives, text_system, device_pixel_ratio);
-        let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
-        if vertices.is_empty() {
+        // Tessellate a contiguous triangle-lane primitive range into one
+        // vertex buffer, or `None` when it yields no geometry — mirrors
+        // `Renderer::render`'s own `make_triangles` closure.
+        let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
+            let triangles =
+                tessellate_primitives(&scene.primitives[range], text_system, device_pixel_ratio);
+            let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
+            if vertices.is_empty() {
+                return None;
+            }
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mkui-wgpu Embedded UI Vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            Some(LaneDraw::Triangles {
+                buffer,
+                vertex_count: vertices.len() as u32,
+            })
+        };
+
+        // With the `slug` feature off, `classify_primitive` only ever
+        // assigns `UiTriangles` / `BitmapText` / `Backdrop` (there is no
+        // `Primitive::SlugGlyph` / `Primitive::VectorPath` variant to
+        // classify), so this collapses to exactly the Phase 1 behavior: one
+        // contiguous triangle run per `Backdrop` boundary, with `Backdrop`
+        // itself still silently skipped.
+        let commands = build_render_commands(&scene.primitives, classify_primitive);
+        let mut lane_draws: Vec<LaneDraw> = Vec::new();
+        let mut pending_triangles: Option<Range<usize>> = None;
+        for command in &commands {
+            let range = command.primitives();
+            match command {
+                RenderCommand::UiTriangles(_) | RenderCommand::BitmapText(_) => {
+                    pending_triangles = Some(match pending_triangles {
+                        Some(open) => open.start..range.end,
+                        None => range,
+                    });
+                }
+                RenderCommand::SlugGlyphs(_) => {
+                    // Flush any open triangle run so the Slug glyphs
+                    // composite over exactly the primitives that preceded
+                    // them — same invariant as `Renderer::render`.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    // Without the `slug` feature `classify_primitive` never
+                    // emits a `SlugGlyphs` command, so this arm cannot run.
+                    #[cfg(feature = "slug")]
+                    {
+                        let glyphs = scene_slug_glyphs(&scene.primitives[range]);
+                        if let Some(prepared) = self.slug_adapter.prepare(
+                            device,
+                            queue,
+                            [scene.viewport.width, scene.viewport.height],
+                            device_pixel_ratio,
+                            &glyphs,
+                        ) {
+                            lane_draws.push(LaneDraw::Slug(prepared));
+                        }
+                    }
+                }
+                RenderCommand::VectorPath(_) => {
+                    // Same lane-flush invariant as the `SlugGlyphs` arm
+                    // above.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    // Without the `slug` feature `classify_primitive` never
+                    // emits a `VectorPath` command, so this arm cannot run.
+                    #[cfg(feature = "slug")]
+                    {
+                        let paths = scene_vector_paths(&scene.primitives[range]);
+                        let paints = vector_path_paints(&paths);
+                        if let Some(prepared) = self.slug_adapter.prepare_path_paints(
+                            device,
+                            queue,
+                            [scene.viewport.width, scene.viewport.height],
+                            device_pixel_ratio,
+                            &paints,
+                        ) {
+                            lane_draws.push(LaneDraw::Slug(prepared));
+                        }
+                    }
+                }
+                RenderCommand::Backdrop(_) => {
+                    // Real backdrop blur (#187) is still not wired into the
+                    // embedded path (see the module docs) — flush any open
+                    // triangle run (same lane-flush invariant as the arms
+                    // above) and silently skip the backdrop primitive
+                    // itself, the same no-op this renderer has always given
+                    // it.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                }
+            }
+        }
+        if let Some(open) = pending_triangles.take() {
+            lane_draws.extend(make_triangles(open));
+        }
+
+        if lane_draws.is_empty() {
             return;
         }
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mkui-wgpu Embedded UI Vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("mkui-wgpu Embedded UI Pass"),
@@ -210,10 +363,38 @@ impl EmbeddedRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.ui_pipeline);
-        pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw(0..vertices.len() as u32, 0..1);
+        for draw in &lane_draws {
+            match draw {
+                LaneDraw::Triangles {
+                    buffer,
+                    vertex_count,
+                } => {
+                    pass.set_pipeline(&self.ui_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*vertex_count, 0..1);
+                }
+                #[cfg(feature = "slug")]
+                LaneDraw::Slug(prepared) => {
+                    self.slug_adapter.draw(&mut pass, prepared);
+                }
+            }
+        }
     }
+}
+
+/// One frame's per-command GPU draw resource for [`EmbeddedRenderer`]
+/// (#234), built before the render pass so it outlives the borrow — the
+/// embedded parallel to [`super::LaneDraw`]. There is no `Backdrop` variant:
+/// unlike the standalone path, `EmbeddedRenderer` has no backdrop-blur pass
+/// to sample into, so `RenderCommand::Backdrop` never produces a draw (see
+/// [`EmbeddedRenderer::render_into`]).
+enum LaneDraw {
+    Triangles {
+        buffer: wgpu::Buffer,
+        vertex_count: u32,
+    },
+    #[cfg(feature = "slug")]
+    Slug(PreparedSlug),
 }
 
 #[cfg(test)]
@@ -266,7 +447,10 @@ mod tests {
     // host's device/queue/target" — `OffscreenRenderer` already exposes
     // exactly the borrowed `device()` / `queue()` / `view()` / `format()`
     // triple a real host would hand `EmbeddedRenderer`. Gated on `gpu-tests`
-    // only (no `slug` dependency — Phase 1 is the triangle lane).
+    // only — the triangle lane has no `slug` dependency. The Slug/vector-path
+    // lane's own acceptance tests (#234) live in the nested `slug_lane`
+    // module below, dual-gated on `gpu-tests` + `slug` the same way
+    // `render::slug_gpu` and friends are.
     #[cfg(feature = "gpu-tests")]
     mod gpu {
         use crate::render::embedded::{EmbeddedColorSpace, EmbeddedRenderer};
@@ -353,6 +537,7 @@ mod tests {
                     });
             embedded.render_into(
                 host.device(),
+                host.queue(),
                 &mut encoder,
                 host.view(),
                 (size, size),
@@ -406,6 +591,7 @@ mod tests {
             let scene = Scene::new(crate::Size::new(size as f32, size as f32));
             embedded.render_into(
                 host.device(),
+                host.queue(),
                 &mut encoder,
                 host.view(),
                 (size, size),
@@ -419,6 +605,215 @@ mod tests {
                 after, before,
                 "an empty scene must leave the host's already-drawn content untouched"
             );
+        }
+
+        // ---- GPU acceptance tests (#234): the Slug glyph + vector-path
+        // lanes, dual-gated on `gpu-tests` + `slug` the same way
+        // `render::slug_gpu` / `render::dot_vector_gpu` are. Reuses this
+        // module's `host` / `pixel_at` / `assert_close` helpers.
+        #[cfg(feature = "slug")]
+        mod slug_lane {
+            use std::sync::Arc;
+
+            use mkui_vector2d::Vec2;
+            use mkui_vector2d_wgpu::{
+                BandRange, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph,
+            };
+
+            use super::{assert_close, host, pixel_at};
+            use crate::components::dot;
+            use crate::render::embedded::{EmbeddedColorSpace, EmbeddedRenderer};
+            use crate::theme::{DotSize, DotVariant, WgpuTheme};
+            use crate::types::{DotAnimation, Point, Scene};
+            use mkui_text::BitmapTextSystem;
+
+            /// A hand-authored filled square glyph, font units y-up, bounds
+            /// (0,0)-(100,100) — same shape as `render::slug_gpu`'s fixture,
+            /// duplicated locally since that module is private to its own
+            /// file (test-only, not reusable across files).
+            fn square_glyph() -> Arc<SlugGlyph> {
+                let line = |p0: Vec2, p2: Vec2| SlugCurve { p0, p1: p2, p2 };
+                Arc::new(SlugGlyph {
+                    revision: 1,
+                    bounds: GlyphBounds {
+                        x_min: 0.0,
+                        y_min: 0.0,
+                        x_max: 100.0,
+                        y_max: 100.0,
+                    },
+                    curves: vec![
+                        line(Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0)),
+                        line(Vec2::new(100.0, 0.0), Vec2::new(100.0, 100.0)),
+                        line(Vec2::new(100.0, 100.0), Vec2::new(0.0, 100.0)),
+                        line(Vec2::new(0.0, 100.0), Vec2::new(0.0, 0.0)),
+                    ],
+                    horizontal_bands: vec![BandRange {
+                        lower: 0.0,
+                        upper: 100.0,
+                        first_curve: 0,
+                        curve_count: 2,
+                    }],
+                    horizontal_curve_indices: vec![1, 3],
+                    vertical_bands: vec![BandRange {
+                        lower: 0.0,
+                        upper: 100.0,
+                        first_curve: 0,
+                        curve_count: 2,
+                    }],
+                    vertical_curve_indices: vec![2, 0],
+                })
+            }
+
+            #[test]
+            fn render_into_drives_the_slug_glyph_lane_with_the_host_color_space() {
+                // `OffscreenRenderer::format()` is `Rgba8Unorm`, so this is
+                // `EmbeddedColorSpace::EncodedUnorm` — exercising
+                // `fs_slug_encode_srgb`, not the pass-through `fs_slug` the
+                // standalone `Renderer` always uses. A linear mid-gray fill
+                // (`0.5`) is deliberately not `0.0`/`1.0`: those two values
+                // are fixed points of the sRGB OETF, so they couldn't tell a
+                // correctly-encoding pipeline apart from a pass-through one
+                // that regressed to `fs_slug` by mistake.
+                let size = 64u32;
+                let host = host(size, size);
+                host.clear(wgpu::Color::BLACK);
+                let before = host.read_rgba().expect("baseline readback");
+
+                let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                scene.slug_glyph(PlacedSlugGlyph {
+                    blob: square_glyph(),
+                    // Scale 0.5 px/unit, pen origin bottom-left — lands the
+                    // square at screen x,y in [7,57], same placement as
+                    // `render::slug_gpu`'s fixture.
+                    origin_px: [7.0, 57.0],
+                    scale_px_per_unit: 0.5,
+                    color: [0.5, 0.5, 0.5, 1.0],
+                    cap_height_px: f32::INFINITY,
+                });
+
+                let embedded = EmbeddedRenderer::new(
+                    host.device(),
+                    host.format(),
+                    EmbeddedColorSpace::EncodedUnorm,
+                );
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded slug lane test encoder"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    &scene,
+                    &BitmapTextSystem::new(),
+                );
+                host.queue().submit(Some(encoder.finish()));
+
+                let after = host.read_rgba().expect("post-UI readback");
+
+                // Well inside the square, away from its anti-aliased edges:
+                // full coverage, so the fragment shader's output is exactly
+                // `linear_to_srgb(0.5)` ≈ `188/255` — not the un-encoded
+                // `128/255` a pass-through `fs_slug` would have written.
+                let inside = pixel_at(&after, size, 32, 32);
+                assert_close(
+                    inside,
+                    [188, 188, 188, 255],
+                    3,
+                    "Slug glyph interior pixel must be sRGB-encoded for an EncodedUnorm host",
+                );
+
+                // Untouched: a pixel outside the glyph's bounds must survive
+                // `LoadOp::Load` byte-for-byte.
+                let outside = pixel_at(&after, size, 2, 2);
+                assert_eq!(
+                    outside,
+                    pixel_at(&before, size, 2, 2),
+                    "a pixel outside the Slug glyph must survive untouched"
+                );
+            }
+
+            #[test]
+            fn render_into_drives_the_vector_path_lane() {
+                // The real `dot()` component, compiled with `slug`, emits a
+                // `Primitive::VectorPath` circle — the same scene-level seam
+                // `render::dot_vector_gpu` exercises against the standalone
+                // path, driven here through `EmbeddedRenderer::render_into`
+                // instead.
+                let size = 32u32;
+                let host = host(size, size);
+                host.clear(wgpu::Color::BLACK);
+                let before = host.read_rgba().expect("baseline readback");
+
+                let theme = WgpuTheme::default();
+                let center = Point::new(16.0, 16.0);
+                let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                dot(
+                    &mut scene,
+                    center,
+                    DotVariant::Ok,
+                    DotSize::Md,
+                    false,
+                    DotAnimation::None,
+                    &theme,
+                );
+
+                let embedded = EmbeddedRenderer::new(
+                    host.device(),
+                    host.format(),
+                    EmbeddedColorSpace::EncodedUnorm,
+                );
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded vector path test encoder"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    &scene,
+                    &BitmapTextSystem::new(),
+                );
+                host.queue().submit(Some(encoder.finish()));
+
+                let after = host.read_rgba().expect("post-UI readback");
+
+                // `fill_color.to_linear_rgba()` (the scene-level seam) and
+                // `fs_slug_encode_srgb`'s OETF are exact inverses, so the
+                // dot's own centre pixel must round-trip back to
+                // approximately the theme's authored sRGB byte value — not
+                // half as bright, which is what it would be had the OETF
+                // not run at all.
+                let fill = theme.dot_style(DotVariant::Ok, DotSize::Md).fill;
+                let expected = [
+                    (fill.r * 255.0).round() as u8,
+                    (fill.g * 255.0).round() as u8,
+                    (fill.b * 255.0).round() as u8,
+                    255,
+                ];
+                let covered = pixel_at(&after, size, 16, 16);
+                assert_close(
+                    covered,
+                    expected,
+                    3,
+                    "the dot's own centre must round-trip to the authored sRGB fill color",
+                );
+
+                // Untouched: a corner well outside the dot's radius must
+                // survive `LoadOp::Load` byte-for-byte.
+                let outside = pixel_at(&after, size, 1, 1);
+                assert_eq!(
+                    outside,
+                    pixel_at(&before, size, 1, 1),
+                    "a pixel outside the vector path must survive untouched"
+                );
+            }
         }
     }
 }

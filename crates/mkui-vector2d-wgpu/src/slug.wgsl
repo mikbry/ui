@@ -294,6 +294,33 @@ fn fs_slug(in: VsOut) -> @location(0) vec4<f32> {
     return vec4<f32>(g.color.rgb, g.color.a * cov.value);
 }
 
+// linear -> sRGB OETF, matching `mkui-wgpu`'s `ui_triangles.wgsl` function of
+// the same name and `present.wgsl`'s `linear_to_srgb`.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = c <= vec3<f32>(0.0031308);
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, cutoff);
+}
+
+// Host-embedded direct-draw entry point (#234), mirroring `mkui-wgpu`'s
+// `ui_triangles.wgsl` `fs_ui_triangles_encode_srgb`: `g.color` is already
+// linear (every Slug glyph / vector path color is linearized at the
+// `mkui-wgpu` render boundary before upload, same as the UI triangle lane),
+// but this draw writes straight into the host's target with no present pass
+// to apply the OETF afterward. Used only when the host's target format has
+// no automatic sRGB encode on write — see
+// `mkui_wgpu::render::embedded::EmbeddedColorSpace::EncodedUnorm`.
+@fragment
+fn fs_slug_encode_srgb(in: VsOut) -> @location(0) vec4<f32> {
+    let g = glyphs[in.glyph_index];
+    let cov = slug_coverage(g, in.font_pos);
+    if (cov.value <= 0.0) {
+        discard;
+    }
+    return vec4<f32>(linear_to_srgb(g.color.rgb), g.color.a * cov.value);
+}
+
 // Debug entry point exposing the coverage the fragment shader computes just
 // before it scales the fill colour's alpha (dame-rubric § Phase 1 "coverage
 // bounded in pre-clamp float buffer" criterion): `x` is `calc_coverage`'s

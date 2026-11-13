@@ -434,8 +434,28 @@ pub struct SlugAdapter {
 
 impl SlugAdapter {
     /// Build the Slug pipeline for `target_format`. The device is borrowed —
-    /// the adapter takes no ownership of GPU lifecycle.
+    /// the adapter takes no ownership of GPU lifecycle. Draws through
+    /// `slug.wgsl`'s pass-through `"fs_slug"` entry point; see
+    /// [`Self::with_fragment_entry_point`] for the one caller that needs a
+    /// different one.
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::with_fragment_entry_point(device, target_format, "fs_slug")
+    }
+
+    /// Build the Slug pipeline for `target_format`, drawing through
+    /// `fragment_entry_point` instead of the default pass-through
+    /// `"fs_slug"`. Exists for `mkui_wgpu::render::embedded::EmbeddedRenderer`
+    /// (#234), which must pick `"fs_slug_encode_srgb"` when the host's draw
+    /// target has no automatic sRGB encode on write — see `slug.wgsl` for
+    /// both entry points and `mkui-wgpu`'s `EmbeddedColorSpace` for the
+    /// color-space contract this mirrors (`ui_triangles.wgsl`'s
+    /// `fs_ui_triangles` / `fs_ui_triangles_encode_srgb` pair). Every other
+    /// caller keeps using [`Self::new`].
+    pub fn with_fragment_entry_point(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        fragment_entry_point: &str,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mkui-vector2d-wgpu Slug Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("slug.wgsl").into()),
@@ -478,7 +498,7 @@ impl SlugAdapter {
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: Some("fs_slug"),
+                entry_point: Some(fragment_entry_point),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &targets,
             }),

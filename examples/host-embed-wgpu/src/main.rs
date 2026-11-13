@@ -508,6 +508,7 @@ impl Gpu {
         // (`wgpu::LoadOp::Load`), never submits, and never presents.
         self.embedded.render_into(
             &self.device,
+            &self.queue,
             &mut encoder,
             &view,
             (self.config.width, self.config.height),
@@ -934,11 +935,11 @@ struct HostApp {
     // of which `TextSystem` is passed in (see that fn's own comment), so
     // swapping this for a `CompositeTextSystem` + a registered real TTF
     // face would compile but change nothing on screen — the registered
-    // face would simply never be looked up. Real anti-aliased text here is
-    // blocked on wiring the Slug vector lane into `EmbeddedRenderer`
-    // (#234) plus routing wrapped/centered Slug text correctly (#233);
-    // until then, every component in this HUD stays on the blocky 5×7
-    // bitmap face.
+    // face would simply never be looked up. `EmbeddedRenderer` now drives
+    // the Slug vector lane too (#234), but turning this HUD's *text* onto
+    // it also needs routing wrapped/centered Slug text correctly (#233);
+    // until that lands, every component in this HUD stays on the blocky
+    // 5×7 bitmap face.
     text_system: BitmapTextSystem,
     start: Instant,
     last_toast_at: f32,
