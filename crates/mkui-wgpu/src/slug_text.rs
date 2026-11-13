@@ -236,19 +236,6 @@ fn expand_text_primitive(
 
     let line_height = text.style.line_height_px.max(1.0);
     let max_lines = ((text.rect.size.height / line_height).floor() as usize).max(1);
-    // `SfntProvider::layout_local` (#182) now genuinely wraps, aligns, caps
-    // line count, and ellipsizes, so none of these three cases would
-    // actually misrender if routed through Slug. But this call site is not
-    // yet updated to pass a multi-line box, a non-Start alignment, or a hard
-    // break through — it still only ever calls the provider with `max_lines:
-    // Some(1)` and the primitive's own `Start`/non-`\n` content below, and
-    // bails everything else to the bitmap lane. Relaxing these three guards
-    // so already-correct Slug output is actually drawn is #233's scope (it
-    // needs GPU/Lavapipe verification this crate's CPU-only tests can't give
-    // it); this guard stays load-bearing until that lands.
-    if max_lines > 1 || text.style.align != TextAlign::Start || text.content.contains('\n') {
-        return vec![Primitive::Text(text.clone())];
-    }
 
     let spec = LayoutSpec {
         font_id: slug_font_id,
@@ -256,7 +243,7 @@ fn expand_text_primitive(
         font_size_px: text.style.font_size_px,
         line_height_px: line_height,
         align: map_align(text.style.align),
-        max_lines: Some(1),
+        max_lines: Some(max_lines),
         hinting: HintingMode::None,
         variations: VariationSettings::empty(),
         synthesis_flags: 0,
@@ -798,11 +785,12 @@ mod tests {
     }
 
     #[test]
-    fn non_start_alignment_stays_on_the_bitmap_lane() {
-        // `SfntProvider::layout_local` honors `spec.align` correctly since
-        // #182, but `expand_text_primitive`'s own guard (not the provider)
-        // still bails any non-`Start` primitive to the bitmap lane —
-        // relaxing that guard is #233's scope, pending GPU verification.
+    fn non_start_alignment_routes_through_slug() {
+        // `SfntProvider::layout_local` has honored `spec.align` correctly
+        // since #182; #233 removed `expand_text_primitive`'s own redundant
+        // non-`Start` guard, so a fully-mapped, fully-fitting Center-aligned
+        // primitive now draws entirely through Slug instead of bailing to
+        // bitmap.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -813,16 +801,25 @@ mod tests {
         let primitives = vec![Primitive::Text(text.clone())];
 
         let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
-        assert_eq!(expanded, vec![Primitive::Text(text)]);
+        let slug_count = expanded
+            .iter()
+            .filter(|p| matches!(p, Primitive::SlugGlyph(_)))
+            .count();
+        assert_eq!(slug_count, 3, "M, a, g are each one drawable Slug glyph");
+        assert!(
+            !expanded.iter().any(|p| matches!(p, Primitive::Text(_))),
+            "a fully-mapped Center-aligned string needs no bitmap fallback"
+        );
     }
 
     #[test]
-    fn a_multiline_capable_box_stays_on_the_bitmap_lane() {
+    fn a_multiline_capable_box_routes_through_slug() {
         // `SfntProvider::layout_local` genuinely wraps multi-line content
-        // since #182, but `expand_text_primitive` still always calls it with
-        // `max_lines: Some(1)` and bails a taller box to bitmap before ever
-        // reaching the provider — relaxing that is #233's scope, pending GPU
-        // verification.
+        // since #182; #233 removed `expand_text_primitive`'s own
+        // `max_lines > 1` guard, so a taller box now reaches the provider
+        // instead of bailing to bitmap before ever calling it. Single-word
+        // content still lays out on one line, but the box no longer forces
+        // that through the `max_lines: Some(1)` path.
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
@@ -833,34 +830,61 @@ mod tests {
         let primitives = vec![Primitive::Text(text.clone())];
 
         let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
-        assert_eq!(expanded, vec![Primitive::Text(text)]);
+        let slug_count = expanded
+            .iter()
+            .filter(|p| matches!(p, Primitive::SlugGlyph(_)))
+            .count();
+        assert_eq!(slug_count, 3, "M, a, g are each one drawable Slug glyph");
+        assert!(
+            !expanded.iter().any(|p| matches!(p, Primitive::Text(_))),
+            "a fully-mapped string in a multiline-capable box needs no bitmap fallback"
+        );
     }
 
     #[test]
-    fn content_with_a_hard_line_break_stays_on_the_bitmap_lane() {
-        // `SfntProvider::layout_local` honors a hard `'\n'` break correctly
-        // since #182 (it splits on `'\n'` exactly like the bitmap lane's
-        // `wrap_text_lines`), but `expand_text_primitive`'s own guard still
-        // bails any content containing `'\n'` before calling the provider —
-        // relaxing that is #233's scope, pending GPU verification. A tall
-        // (multi-line-capable) box would already bail via the `max_lines`
-        // guard, so size the box to exactly one line to prove the `\n` check
-        // is independently load-bearing.
+    fn content_with_a_hard_line_break_routes_through_slug_across_two_lines() {
+        // `SfntProvider::layout_local` has honored a hard `'\n'` break
+        // correctly since #182 (it splits on `'\n'` exactly like the bitmap
+        // lane's `wrap_text_lines`); #233 removed `expand_text_primitive`'s
+        // own `content.contains('\n')` guard, so a box tall enough for both
+        // resulting lines now routes each line through Slug. The two glyphs
+        // must land at distinct baselines, proving two separate lines were
+        // actually laid out (not just one line with the break ignored).
         let mut sys = CompositeTextSystem::new();
         let font_id = sys
             .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
             .unwrap();
         let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
-        let (text, _) = text_primitive("M\nA", 16.0);
+        let (mut text, _) = text_primitive("M\nA", 16.0);
+        text.rect.size.height *= 2.0;
         assert_eq!(
             ((text.rect.size.height / text.style.line_height_px.max(1.0)).floor() as usize).max(1),
-            1,
-            "the box must allow exactly one line, so only the \\n check can be gating"
+            2,
+            "the box must allow exactly two lines"
         );
         let primitives = vec![Primitive::Text(text.clone())];
 
         let expanded = expand_slug_text(&primitives, font_id, &sys, &mut cache);
-        assert_eq!(expanded, vec![Primitive::Text(text)]);
+        let slug_glyphs: Vec<&PlacedSlugGlyph> = expanded
+            .iter()
+            .filter_map(|p| match p {
+                Primitive::SlugGlyph(g) => Some(g),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            slug_glyphs.len(),
+            2,
+            "M and A are each one drawable Slug glyph"
+        );
+        assert!(
+            !expanded.iter().any(|p| matches!(p, Primitive::Text(_))),
+            "a fully-mapped hard-break string needs no bitmap fallback"
+        );
+        assert_ne!(
+            slug_glyphs[0].origin_px[1], slug_glyphs[1].origin_px[1],
+            "M and A must land on two distinct baselines, proving the hard break split the lines"
+        );
     }
 
     #[test]
