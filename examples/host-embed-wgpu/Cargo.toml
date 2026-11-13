@@ -5,11 +5,36 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Default ON (#259's acceptance bar: a plain `cargo run -p host-embed-wgpu
+# --release` must render real anti-aliased text). Still a real, separately
+# disable-able feature — not a bare `mkui-wgpu` dependency feature — so
+# `cargo run -p host-embed-wgpu --no-default-features` and
+# `cargo clippy -p host-embed-wgpu --no-default-features` stay meaningful,
+# the same shape `atoms-on-wgpu`/`vector-showcase`/`text` already use for
+# their own opt-in `slug` features.
+#
+# Defaulting this on unifies `mkui-wgpu`'s `slug` feature ON across the
+# *whole* `--workspace` build graph once this crate is in it, which flips
+# CI's `workspace-default` leg's `mkui-wgpu` build to `slug`-on too — losing
+# that leg's exercise of `mkui-wgpu`'s `cfg(not(feature = "slug"))` path
+# (verified: `cargo test --workspace ... --all-targets` still passes 878/878
+# with this unified on, so nothing actually regresses under `slug`; only the
+# *default-off* path stops being covered by that one leg). `.github/
+# workflows/ci.yml` pins that lost coverage back with a dedicated
+# `mkui-wgpu-default` test leg + a default-features `mkui-wgpu` clippy line.
+slug = ["mkui-wgpu/slug", "dep:mkui-vector2d"]
+default = ["slug"]
+
 [dependencies]
 # The "host": owns its own wgpu instance/adapter/device/queue/surface and a
 # lit 3D cube pass, exactly like a real game/engine host would (#175).
 mkui-wgpu = { path = "../../crates/mkui-wgpu" }
 mkui-text = { path = "../../crates/mkui-text" }
+# Only for the `#[cfg(test)]` CPU proof that HUD text actually routes through
+# the Slug lane (`SlugBlobCache`/`SlugConfig`) — optional, forwarded by `slug`
+# above, same as `examples/text`'s own `mkui-vector2d` dependency.
+mkui-vector2d = { path = "../../crates/mkui-vector2d", optional = true }
 # `mkui_core::headless::MenuList` — the pause overlay's keyboard-navigable
 # menu list (#255); this crate's render functions have no menu-list atom of
 # their own (mkui-wgpu's components layer only draws it), so the headless

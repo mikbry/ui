@@ -8,6 +8,29 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-wgpu::EmbeddedRenderer::set_slug_font` + `examples/host-embed-wgpu`
+  — real anti-aliased text via the Slug lane (#259).** `EmbeddedRenderer`
+  gains the same component-text routing `Renderer::set_slug_font` already
+  had (#171 Part B.2): selecting a registered Slug face expands every
+  `Primitive::Text` through `slug_text::expand_slug_text` before command
+  classification, so a host-embedded HUD's labels/badges/menus/tooltips
+  render through real SFNT outlines instead of the 5x7 bitmap face. `#234`
+  had already wired the Slug glyph/vector-path *draw* lanes into
+  `render_into`; this closes the remaining gap — component text itself was
+  still unconditionally laid out against `FontId::BITMAP`. **Breaking:**
+  `EmbeddedRenderer::render_into` now takes `&mut self` (was `&self`), since
+  the new Slug-font path needs to mutate a persistent glyph cache the same
+  way `Renderer::render` already does. `examples/host-embed-wgpu` switches
+  its `BitmapTextSystem` to `mkui_text::CompositeTextSystem`, registers the
+  licensed Abel TTF fixture (Google Fonts, SIL OFL), and calls
+  `set_slug_font` behind its own `slug` feature — default **on** (`cargo run
+  -p host-embed-wgpu --release` now renders anti-aliased text out of the
+  box; `--no-default-features` keeps the pre-#259 bitmap-only path). Default-
+  on here unifies `mkui-wgpu`'s `slug` feature across the whole
+  `--workspace` build graph, so `.github/workflows/ci.yml` gained a
+  dedicated `mkui-wgpu-default` test leg and a default-features `mkui-wgpu`
+  clippy line to keep linting/running `mkui-wgpu`'s `cfg(not(feature =
+  "slug"))` path somewhere.
 - **`examples/host-embed-wgpu` — extended into a full HUD/pause-menu scene
   for #230's profiling target (#255).** The host-owned-GPU example's UI pass
   (#175) grows from two placeholder quads into something resembling a real

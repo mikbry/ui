@@ -139,6 +139,12 @@ jobs:
       # `compile_error!` guard (#102). They build package-aware (see the
       # `mkui-examples` job + ADR 0006). #105 owns the wider feature matrix.
       - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --all-targets --locked -- -D warnings
+      # `examples/host-embed-wgpu` defaults its own `slug` feature on (#259),
+      # which unifies `mkui-wgpu`'s `slug` feature ON across the whole
+      # `--workspace` build above — so that invocation no longer lints
+      # `mkui-wgpu`'s `cfg(not(feature = "slug"))` path. Pin one default-
+      # features leg here so that path keeps getting linted somewhere.
+      - run: cargo clippy -p mkui-wgpu --all-targets --locked -- -D warnings
 
   test:
     # Package-aware feature matrix (#105). The default `--workspace` leg runs
@@ -201,6 +207,14 @@ jobs:
           # mkui-wgpu: compile-only `--all-features` (gpu-tests can't run here).
           - name: mkui-wgpu-compile
             args: -p mkui-wgpu --all-features --no-run
+          # mkui-wgpu, default features, actually run: `examples/host-embed-wgpu`
+          # defaults its own `slug` feature on (#259), which unifies
+          # `mkui-wgpu`'s `slug` feature ON across the whole `workspace-default`
+          # leg above — so that leg no longer exercises `mkui-wgpu`'s
+          # `cfg(not(feature = "slug"))` tests (e.g. `dot::tests::
+          # off_slug_dot_is_byte_identical_to_v0_10_0`). Pin that coverage here.
+          - name: mkui-wgpu-default
+            args: -p mkui-wgpu
           # mkui-c: per-backend (web+console can't coexist — #102).
           - name: mkui-c-console
             args: -p mkui-c --no-default-features --features console
