@@ -8,6 +8,22 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`examples/host-embed-wgpu` — extended into a full HUD/pause-menu scene
+  for #230's profiling target (#255).** The host-owned-GPU example's UI pass
+  (#175) grows from two placeholder quads into something resembling a real
+  game HUD, assembled entirely from batch 15's already-shipped components:
+  an always-on-screen `progress_bar` + `counter_chip` + "LIVE" `badge`/status
+  `dot`, and a `toast_stack` banner that fires on a timer. `Escape` opens a
+  pause/settings overlay — a `glass_panel` backdrop (`GlassMode::Solid`,
+  since `EmbeddedRenderer::render_into` doesn't wire up the `Backdrop` blur
+  lane yet), a keyboard-navigable `mkui_core::headless::MenuList`, a
+  `toggle`/`slider_with_label`/`segmented_select` settings row, a focus-
+  driven `tooltip`, and — selecting "Quit" — a `titled_dialog` confirmation
+  stacked on top. Still one `wgpu::CommandEncoder` and one `queue.submit`
+  per frame (#175's contract, unregressed). This issue only assembles the
+  scene; #230 (not this issue) measures CPU/GPU frame cost and memory
+  against it. No new library component work — strictly wiring up what
+  batch 15 (#186–#194) already shipped.
 - **`mkui-runtime::AppTree::subtree_revision`/`epoch` + `mkui-wgpu::walker::{walk_app_tree_cached, WalkCache, WalkStats}`
   — per-subtree dirty tracking for the retained wgpu walker (#229).**
   `AppTree` now tracks a monotonic revision per node, propagated up through

@@ -17,9 +17,35 @@
 //! ONE `queue.submit`, then present — satisfying #175's acceptance bar: one
 //! frame, one queue submission, no extra texture copy.
 //!
+//! The UI pass itself is a believable HUD/pause-menu scene (#255), built
+//! from the components `#173`'s batch 15 shipped: an always-on health
+//! `progress_bar` + score `counter_chip` + a "LIVE" `badge`/status `dot`,
+//! plus a toast/banner `toast_stack` firing on a timer — and, behind
+//! `Escape`, a pause overlay (`glass_panel` chrome, a keyboard-navigable
+//! `MenuList`, a `toggle`/`slider_with_label`/`segmented_select` settings
+//! row, a `tooltip`, and a `titled_dialog` quit confirmation stacked on
+//! top). #230 profiles CPU/GPU frame cost and memory against this scene,
+//! not the two-quad placeholder #175 shipped it with; this issue only
+//! assembles the scene, it does not measure anything itself.
+//!
 //! `cargo run -p host-embed-wgpu --release` opens the window.
 //! `HEADLESS=1 cargo run -p host-embed-wgpu` exits before opening a window,
 //! the same CI-smoke convention `native-window`/`native-showcase` use.
+//!
+//! ## Manual profiling
+//!
+//! This binary is #230's profiling target, not a profiler itself — run it
+//! under the host platform's own GPU/CPU capture tool while it's open:
+//!
+//! - **macOS** — Instruments' Metal System Trace, or Xcode's GPU frame
+//!   capture, attached to the running `host-embed-wgpu` process.
+//! - **Windows** — PIX or RenderDoc, launching/attaching to the built
+//!   `host-embed-wgpu.exe`.
+//!
+//! Press `Escape` to open the pause overlay (exercising the glass panel +
+//! menu + settings + tooltip + dialog lanes together) and `Escape`/`Enter`
+//! to navigate it — the richer, GPU-heavier frame #230 wants captured
+//! alongside the base HUD's steady per-frame cost.
 
 mod mat4;
 
@@ -30,15 +56,22 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{Key as WinitKey, KeyCode, NamedKey, PhysicalKey},
     window::{Window, WindowId},
 };
 
+use mkui_core::headless::{KeyboardInteractable, MenuList};
 use mkui_text::BitmapTextSystem;
+use mkui_wgpu::components::{
+    badge, counter_chip, dot, glass_panel, label, progress_bar, segmented_select,
+    slider_with_label, titled_dialog, toast_stack, toggle, tooltip, tooltip_rect, TOOLTIP_GAP_PX,
+};
 use mkui_wgpu::{
-    Color, CornerRadii, EmbeddedColorSpace, EmbeddedRenderer, Point, Primitive, Quad, Rect, Scene,
-    Size,
+    BadgeSize, BadgeVariant, Color, CornerRadii, DotAnimation, DotSize, DotVariant,
+    EmbeddedColorSpace, EmbeddedRenderer, GlassMode, IconId, PanelLayout, Point, Quad, Rect, Scene,
+    Size, TextVariant, ToastStack, ToastVariant, TooltipPlacement, TooltipState, WgpuTheme,
 };
 
 #[repr(C)]
@@ -492,33 +525,424 @@ impl Gpu {
     }
 }
 
-/// Build the HUD scene: a small translucent badge + status dot in the
-/// corner. Deliberately minimal (mirrors `native-window`'s single-quad
-/// smoke) — proving mkui draws *on top of* the host's already-rendered
-/// cube, in the same frame, is the point; an elaborate HUD is not.
-fn build_hud_scene(viewport: Size) -> Scene {
+/// Whether the pause/settings overlay is hidden, open, or showing its
+/// nested "quit to desktop?" confirmation. `QuitConfirm` stacks a second
+/// [`titled_dialog`] *on top of* the already-drawn overlay — stacking falls
+/// out of call order, same as [`mkui_wgpu::components::dialog`]'s own doc
+/// comment describes — rather than replacing it, so Escape from
+/// `QuitConfirm` can cleanly fall back to `Open`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayState {
+    Closed,
+    Open,
+    QuitConfirm,
+}
+
+/// Fresh pause menu, pre-selecting "Resume" (`MenuList::builder`'s default
+/// first-item selection) — rebuilt every time the overlay transitions from
+/// `Closed` to `Open` so a reopened pause menu never remembers a stale
+/// selection from the last time it was open.
+fn build_pause_menu() -> MenuList {
+    MenuList::builder().items(["Resume", "Quit"]).build()
+}
+
+/// Every piece of per-frame HUD state the host owns across frames — the
+/// renderer is immediate-mode and retains no component tree of its own
+/// (see `counter_chip`'s module doc), so whatever the scene should show
+/// next frame has to live here, not in the `Scene` built from it.
+struct HudState {
+    overlay: OverlayState,
+    menu: MenuList,
+    /// Toggled by `M` while the overlay is open — the one genuinely
+    /// keyboard-interactive settings control; `volume`/`quality` below are
+    /// rendered but held static, satisfying the issue's "at least one"
+    /// toggle/slider/segmented-select bar without inventing extra input
+    /// plumbing the issue doesn't ask for.
+    mute: bool,
+    volume: f32,
+    quality: usize,
+    tooltip: TooltipState,
+    toasts: ToastStack,
+}
+
+impl HudState {
+    fn new() -> Self {
+        Self {
+            overlay: OverlayState::Closed,
+            menu: build_pause_menu(),
+            mute: false,
+            volume: 0.65,
+            quality: 1,
+            tooltip: TooltipState::new(),
+            toasts: ToastStack::new(),
+        }
+    }
+}
+
+/// Toast/banner firing cadence (#255's "firing periodically" acceptance
+/// bullet) and the small rotation of messages it cycles through.
+const TOAST_INTERVAL_SECS: f32 = 4.0;
+const TOAST_MESSAGES: [(ToastVariant, &str); 3] = [
+    (ToastVariant::Info, "Checkpoint saved"),
+    (ToastVariant::Success, "Objective complete"),
+    (ToastVariant::Warning, "Low ammo"),
+];
+
+/// Push the next toast once `elapsed_secs` has advanced `TOAST_INTERVAL_SECS`
+/// past `*last_toast_at`, cycling through `TOAST_MESSAGES`. Pure state
+/// mutation, no `Scene` — kept separate from rendering so the firing
+/// cadence is testable without a GPU.
+fn maybe_fire_toast(
+    toasts: &mut ToastStack,
+    last_toast_at: &mut f32,
+    cycle: &mut usize,
+    elapsed_secs: f32,
+) {
+    if elapsed_secs - *last_toast_at < TOAST_INTERVAL_SECS {
+        return;
+    }
+    *last_toast_at = elapsed_secs;
+    let (variant, message) = TOAST_MESSAGES[*cycle % TOAST_MESSAGES.len()];
+    *cycle += 1;
+    toasts.push(variant, message);
+}
+
+/// The always-on-screen base HUD: health `progress_bar`, score
+/// `counter_chip`, a "LIVE" `badge` + status `dot`, and the periodically
+/// firing `toast_stack` — present every frame regardless of the pause
+/// overlay, so #230 always has a believable minimum scene to profile.
+fn draw_base_hud(
+    scene: &mut Scene,
+    viewport: Size,
+    elapsed_secs: f32,
+    hud: &HudState,
+    theme: &WgpuTheme,
+) {
+    // Health bar — a slow bob so the base HUD isn't perfectly static under
+    // profiling, same spirit as the host's own rotating cube.
+    let health_fraction = 0.55 + 0.1 * (elapsed_secs * 0.5).sin();
+    let bar_rect = Rect::new(Point::new(24.0, 24.0), Size::new(220.0, 18.0));
+    progress_bar(scene, bar_rect, health_fraction, &theme.progress_bar());
+
+    let chip_rect = Rect::new(
+        Point::new(bar_rect.width_end() + 12.0, 20.0),
+        Size::new(96.0, 26.0),
+    );
+    counter_chip(
+        scene,
+        chip_rect,
+        IconId(1),
+        2480,
+        "Score",
+        false,
+        false,
+        &theme.counter_chip(),
+    );
+
+    let dot_point = Point::new(viewport.width - 96.0, 36.0);
+    dot(
+        scene,
+        dot_point,
+        DotVariant::Ok,
+        DotSize::Sm,
+        true,
+        DotAnimation::Pulse,
+        theme,
+    );
+    let status_badge_rect = Rect::new(
+        Point::new(viewport.width - 80.0, 24.0),
+        Size::new(56.0, 24.0),
+    );
+    badge(
+        scene,
+        status_badge_rect,
+        "LIVE",
+        BadgeVariant::Secondary,
+        BadgeSize::Sm,
+        theme,
+    );
+
+    let toast_region = Rect::new(
+        Point::new(
+            (viewport.width - 260.0).max(0.0),
+            (viewport.height - 200.0).max(0.0),
+        ),
+        Size::new(240.0, 180.0),
+    );
+    let mut layout = PanelLayout::<()>::default();
+    toast_stack(scene, &mut layout, toast_region, &hud.toasts, theme, |_| ());
+}
+
+/// The pause menu's rows: a highlight behind [`MenuList::is_selected`]'s
+/// current row, then each item's label — [`MenuList`] itself carries no
+/// wgpu rendering (#255 only assembles existing batch-15 render
+/// components; `MenuList` isn't one), so this is the thin per-row paint
+/// loop a host wires up itself.
+fn render_menu(scene: &mut Scene, rect: Rect, menu: &MenuList, theme: &WgpuTheme) {
+    const ROW_HEIGHT: f32 = 36.0;
+    const ROW_GAP: f32 = 8.0;
+
+    for (index, item) in menu.items().iter().enumerate() {
+        let row_rect = Rect::new(
+            Point::new(
+                rect.origin.x,
+                rect.origin.y + index as f32 * (ROW_HEIGHT + ROW_GAP),
+            ),
+            Size::new(rect.size.width, ROW_HEIGHT),
+        );
+        if menu.is_selected(index) {
+            scene.quad(Quad {
+                rect: row_rect,
+                fill: Color::rgba(0.4, 0.6, 0.9, 0.35),
+                corner_radii: CornerRadii::all(8.0),
+                stroke: None,
+            });
+        }
+        let label_style = theme.body_style();
+        let label_rect = Rect::new(
+            Point::new(
+                row_rect.origin.x + 12.0,
+                row_rect.origin.y + (row_rect.size.height - label_style.line_height_px) * 0.5,
+            ),
+            Size::new(
+                (row_rect.size.width - 24.0).max(0.0),
+                label_style.line_height_px,
+            ),
+        );
+        label(scene, label_rect, item.label(), label_style);
+    }
+}
+
+/// The settings column: an audio status `dot` + mute `toggle`, a volume
+/// `slider_with_label`, and a quality `segmented_select` + `badge` — plus a
+/// keyboard-focus-driven `tooltip` anchored above the quality control.
+fn render_settings(scene: &mut Scene, rect: Rect, hud: &HudState, theme: &WgpuTheme) {
+    let mut y = rect.origin.y;
+
+    let dot_point = Point::new(rect.origin.x + 6.0, y + 10.0);
+    dot(
+        scene,
+        dot_point,
+        if hud.mute {
+            DotVariant::Warn
+        } else {
+            DotVariant::Ok
+        },
+        DotSize::Md,
+        false,
+        DotAnimation::None,
+        theme,
+    );
+    label(
+        scene,
+        Rect::new(Point::new(rect.origin.x + 20.0, y), Size::new(80.0, 20.0)),
+        "Audio (M)",
+        theme.body_style(),
+    );
+    let toggle_rect = Rect::new(
+        Point::new(rect.width_end() - 44.0, y - 2.0),
+        Size::new(44.0, 24.0),
+    );
+    toggle(scene, toggle_rect, !hud.mute, &theme.toggle());
+    y += 20.0 + 16.0;
+
+    label(
+        scene,
+        Rect::new(
+            Point::new(rect.origin.x, y),
+            Size::new(rect.size.width, 18.0),
+        ),
+        "Volume",
+        theme.text_style(TextVariant::Muted),
+    );
+    y += 20.0;
+    let slider_rect = Rect::new(
+        Point::new(rect.origin.x, y),
+        Size::new(rect.size.width, 8.0),
+    );
+    let volume_label = format!("{:.0}%", hud.volume * 100.0);
+    slider_with_label(
+        scene,
+        slider_rect,
+        hud.volume,
+        Some(&volume_label),
+        &theme.slider(),
+    );
+    y += 36.0 + 16.0;
+
+    label(
+        scene,
+        Rect::new(
+            Point::new(rect.origin.x, y),
+            Size::new(rect.size.width, 18.0),
+        ),
+        "Quality",
+        theme.text_style(TextVariant::Muted),
+    );
+    y += 20.0;
+    const QUALITY_LABELS: [&str; 3] = ["Low", "Medium", "High"];
+    let select_rect = Rect::new(
+        Point::new(rect.origin.x, y),
+        Size::new((rect.size.width - 64.0).max(0.0), 28.0),
+    );
+    let mut layout = PanelLayout::<()>::default();
+    segmented_select(
+        scene,
+        &mut layout,
+        select_rect,
+        &QUALITY_LABELS,
+        hud.quality,
+        &theme.segmented_select(),
+        |_| (),
+    );
+    let quality_badge_rect = Rect::new(
+        Point::new(select_rect.width_end() + 8.0, y + 2.0),
+        Size::new(56.0, 24.0),
+    );
+    badge(
+        scene,
+        quality_badge_rect,
+        QUALITY_LABELS[hud.quality].to_uppercase(),
+        BadgeVariant::Secondary,
+        BadgeSize::Sm,
+        theme,
+    );
+
+    // Tooltip last, per its own doc comment, so the bubble always draws
+    // over everything else this frame — visible on keyboard *focus*
+    // (`TooltipState::set_focused`, driven by the overlay being open),
+    // not hover; this host has no pointer at all.
+    if hud.tooltip.is_visible() {
+        let bubble_size = Size::new(220.0, 36.0);
+        let bubble_rect = tooltip_rect(
+            select_rect,
+            bubble_size,
+            TooltipPlacement::Top,
+            TOOLTIP_GAP_PX,
+            scene.viewport,
+        );
+        tooltip(scene, bubble_rect, "Lower quality reduces GPU load.", theme);
+    }
+}
+
+/// The pause/settings overlay's outer chrome (a `glass_panel`) plus its
+/// menu + settings columns, and — only in [`OverlayState::QuitConfirm`] —
+/// a second `titled_dialog` stacked on top asking to confirm quitting.
+///
+/// `GlassMode::Solid`, not `Blur`: [`EmbeddedRenderer::render_into`]
+/// doesn't wire up the `Primitive::Backdrop` blur lane yet (#175's
+/// `render/embedded.rs` module doc — tracked as its own #187 follow-up), so
+/// `Blur` would paint a `Color::TRANSPARENT`-filled panel here, i.e. an
+/// outline with no visible chrome at all. `Solid` is the documented
+/// fallback for exactly this case — "no blur cost," by construction.
+fn draw_pause_overlay(scene: &mut Scene, viewport: Size, hud: &HudState, theme: &WgpuTheme) {
+    let panel_rect = Rect::new(
+        Point::new(
+            (viewport.width - 560.0).max(0.0) * 0.5,
+            (viewport.height - 420.0).max(0.0) * 0.5,
+        ),
+        Size::new(
+            560.0_f32.min(viewport.width),
+            420.0_f32.min(viewport.height),
+        ),
+    );
+    let content = glass_panel(
+        scene,
+        panel_rect,
+        theme.glass_panel_style(),
+        GlassMode::Solid,
+    );
+
+    let title_style = theme.title_style();
+    label(
+        scene,
+        Rect::new(
+            content.origin,
+            Size::new(content.size.width, title_style.line_height_px),
+        ),
+        "Paused",
+        title_style,
+    );
+    let body = Rect::new(
+        Point::new(
+            content.origin.x,
+            content.origin.y + title_style.line_height_px + 12.0,
+        ),
+        Size::new(
+            content.size.width,
+            (content.size.height - title_style.line_height_px - 12.0).max(0.0),
+        ),
+    );
+    const MENU_WIDTH: f32 = 160.0;
+    const COLUMN_GAP: f32 = 24.0;
+    let menu_rect = Rect::new(body.origin, Size::new(MENU_WIDTH, body.size.height));
+    let settings_rect = Rect::new(
+        Point::new(body.origin.x + MENU_WIDTH + COLUMN_GAP, body.origin.y),
+        Size::new(
+            (body.size.width - MENU_WIDTH - COLUMN_GAP).max(0.0),
+            body.size.height,
+        ),
+    );
+
+    render_menu(scene, menu_rect, &hud.menu, theme);
+    render_settings(scene, settings_rect, hud, theme);
+
+    if hud.overlay == OverlayState::QuitConfirm {
+        let confirm_rect = Rect::new(
+            Point::new(viewport.width * 0.5 - 160.0, viewport.height * 0.5 - 70.0),
+            Size::new(320.0, 140.0),
+        );
+        let confirm_content = titled_dialog(
+            scene,
+            confirm_rect,
+            "Quit to desktop?",
+            theme.dialog(),
+            theme.title_style(),
+        );
+        label(
+            scene,
+            confirm_content,
+            "Enter to confirm, Esc to cancel",
+            theme.text_style(TextVariant::Muted),
+        );
+    }
+}
+
+/// Build this frame's full HUD scene: the always-on base HUD, plus the
+/// pause overlay (and its nested quit-confirm dialog) whenever
+/// `hud.overlay` isn't [`OverlayState::Closed`]. Rebuilt fresh every frame
+/// — like every other `Scene` producer in this crate, nothing here is
+/// retained between frames; `hud` (owned by [`HostApp`] across frames) is
+/// what makes two consecutive calls differ.
+fn build_hud_scene(viewport: Size, elapsed_secs: f32, hud: &HudState, theme: &WgpuTheme) -> Scene {
     let mut scene = Scene::new(viewport);
-    scene.push(Primitive::Quad(Quad {
-        rect: Rect::new(Point::new(24.0, 24.0), Size::new(220.0, 64.0)),
-        fill: Color::rgba(0.07, 0.09, 0.12, 0.82),
-        corner_radii: CornerRadii::all(12.0),
-        stroke: None,
-    }));
-    scene.push(Primitive::Quad(Quad {
-        rect: Rect::new(Point::new(36.0, 36.0), Size::new(28.0, 28.0)),
-        fill: Color::rgba(0.35, 0.85, 0.55, 1.0),
-        corner_radii: CornerRadii::all(6.0),
-        stroke: None,
-    }));
+    draw_base_hud(&mut scene, viewport, elapsed_secs, hud, theme);
+    if hud.overlay != OverlayState::Closed {
+        draw_pause_overlay(&mut scene, viewport, hud, theme);
+    }
     scene
 }
 
 struct HostApp {
     window: Option<Arc<Window>>,
     gpu: Option<Gpu>,
-    hud_scene: Scene,
+    viewport: Size,
+    theme: WgpuTheme,
+    hud: HudState,
+    // Bitmap text only, deliberately: `EmbeddedRenderer::render_into`'s
+    // triangle-lane `tessellate_text` hardcodes `FontId::BITMAP` regardless
+    // of which `TextSystem` is passed in (see that fn's own comment), so
+    // swapping this for a `CompositeTextSystem` + a registered real TTF
+    // face would compile but change nothing on screen — the registered
+    // face would simply never be looked up. Real anti-aliased text here is
+    // blocked on wiring the Slug vector lane into `EmbeddedRenderer`
+    // (#234) plus routing wrapped/centered Slug text correctly (#233);
+    // until then, every component in this HUD stays on the blocky 5×7
+    // bitmap face.
     text_system: BitmapTextSystem,
     start: Instant,
+    last_toast_at: f32,
+    toast_cycle: usize,
 }
 
 impl HostApp {
@@ -526,9 +950,62 @@ impl HostApp {
         Self {
             window: None,
             gpu: None,
-            hud_scene: build_hud_scene(Size::new(960.0, 720.0)),
+            viewport: Size::new(960.0, 720.0),
+            theme: WgpuTheme::default(),
+            hud: HudState::new(),
             text_system: BitmapTextSystem::new(),
             start: Instant::now(),
+            // Negative, not zero: the first `RedrawRequested` (elapsed ≈ 0)
+            // must already satisfy `elapsed - last_toast_at >=
+            // TOAST_INTERVAL_SECS`, so the first toast fires promptly
+            // rather than only after one full interval of silence.
+            last_toast_at: -TOAST_INTERVAL_SECS,
+            toast_cycle: 0,
+        }
+    }
+
+    /// Host-owned keyboard routing (ADR 0012: the host, not mkui, owns
+    /// input here) — no backend maps winit's `Key`/`PhysicalKey` into
+    /// [`mkui_core::input::Key`] yet, so this talks to [`MenuList`] through
+    /// the same literal key-string vocabulary its own tests use
+    /// (`"ArrowUp"`/`"ArrowDown"`), rather than inventing that mapping
+    /// layer for a single example (out of this issue's scope — "only
+    /// assembling what batch 15 already shipped").
+    fn handle_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        match self.hud.overlay {
+            OverlayState::Closed => {
+                if matches!(&event.logical_key, WinitKey::Named(NamedKey::Escape)) {
+                    self.hud.menu = build_pause_menu();
+                    self.hud.overlay = OverlayState::Open;
+                }
+            }
+            OverlayState::Open => match &event.logical_key {
+                WinitKey::Named(NamedKey::Escape) => self.hud.overlay = OverlayState::Closed,
+                WinitKey::Named(NamedKey::ArrowUp) => self.hud.menu.handle_key_down("ArrowUp"),
+                WinitKey::Named(NamedKey::ArrowDown) => self.hud.menu.handle_key_down("ArrowDown"),
+                WinitKey::Named(NamedKey::Enter) => {
+                    let selected = self
+                        .hud
+                        .menu
+                        .selected_item()
+                        .map(|item| item.label().to_string());
+                    match selected.as_deref() {
+                        Some("Resume") => self.hud.overlay = OverlayState::Closed,
+                        Some("Quit") => self.hud.overlay = OverlayState::QuitConfirm,
+                        _ => {}
+                    }
+                }
+                _ => {
+                    if event.physical_key == PhysicalKey::Code(KeyCode::KeyM) {
+                        self.hud.mute = !self.hud.mute;
+                    }
+                }
+            },
+            OverlayState::QuitConfirm => match &event.logical_key {
+                WinitKey::Named(NamedKey::Enter) => event_loop.exit(),
+                WinitKey::Named(NamedKey::Escape) => self.hud.overlay = OverlayState::Open,
+                _ => {}
+            },
         }
     }
 }
@@ -580,12 +1057,27 @@ impl ApplicationHandler for HostApp {
                     .as_ref()
                     .map(|window| window.scale_factor())
                     .unwrap_or(1.0);
-                self.hud_scene.viewport = logical_viewport(size, scale);
+                self.viewport = logical_viewport(size, scale);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.handle_key(&event, event_loop);
+                }
             }
             WindowEvent::RedrawRequested => {
+                let elapsed = self.start.elapsed().as_secs_f32();
+                maybe_fire_toast(
+                    &mut self.hud.toasts,
+                    &mut self.last_toast_at,
+                    &mut self.toast_cycle,
+                    elapsed,
+                );
+                self.hud
+                    .tooltip
+                    .set_focused(self.hud.overlay == OverlayState::Open);
+                let scene = build_hud_scene(self.viewport, elapsed, &self.hud, &self.theme);
                 if let Some(gpu) = self.gpu.as_mut() {
-                    let elapsed = self.start.elapsed().as_secs_f32();
-                    gpu.render(elapsed, &self.hud_scene, &self.text_system);
+                    gpu.render(elapsed, &scene, &self.text_system);
                 }
                 if let Some(window) = self.window.as_ref() {
                     window.request_redraw();
@@ -603,7 +1095,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `resumed` never runs to reach a headless check placed there; the
     // check has to happen before the event loop is constructed at all.
     if std::env::var_os("HEADLESS").is_some() {
-        let _ = build_hud_scene(Size::new(960.0, 720.0));
+        let _ = build_hud_scene(
+            Size::new(960.0, 720.0),
+            0.0,
+            &HudState::new(),
+            &WgpuTheme::default(),
+        );
         return Ok(());
     }
 
@@ -616,6 +1113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mkui_wgpu::Primitive;
 
     #[test]
     fn build_cube_vertices_emits_six_faces_of_two_triangles() {
@@ -639,10 +1137,101 @@ mod tests {
         );
     }
 
+    fn viewport() -> Size {
+        Size::new(960.0, 720.0)
+    }
+
+    fn has_text(scene: &Scene, content: &str) -> bool {
+        scene
+            .primitives
+            .iter()
+            .any(|p| matches!(p, Primitive::Text(t) if t.content == content))
+    }
+
     #[test]
-    fn build_hud_scene_carries_the_badge_and_status_dot() {
-        let scene = build_hud_scene(Size::new(960.0, 720.0));
-        assert_eq!(scene.primitives.len(), 2, "badge panel + status dot");
+    fn build_hud_scene_always_paints_the_base_hud_without_a_pause_overlay() {
+        let theme = WgpuTheme::default();
+        let hud = HudState::new();
+        let scene = build_hud_scene(viewport(), 0.0, &hud, &theme);
+        assert!(
+            !scene.primitives.is_empty(),
+            "base HUD must paint something"
+        );
+        assert!(
+            !has_text(&scene, "Paused"),
+            "pause overlay must stay hidden until Escape is pressed"
+        );
+    }
+
+    #[test]
+    fn build_hud_scene_shows_the_pause_overlay_once_open() {
+        let theme = WgpuTheme::default();
+        let mut hud = HudState::new();
+        hud.overlay = OverlayState::Open;
+        let scene = build_hud_scene(viewport(), 0.0, &hud, &theme);
+        assert!(has_text(&scene, "Paused"));
+        assert!(has_text(&scene, "Resume"));
+        assert!(has_text(&scene, "Quit"));
+    }
+
+    #[test]
+    fn build_hud_scene_stacks_the_quit_confirm_dialog_over_the_pause_menu() {
+        let theme = WgpuTheme::default();
+        let mut hud = HudState::new();
+        hud.overlay = OverlayState::QuitConfirm;
+        let scene = build_hud_scene(viewport(), 0.0, &hud, &theme);
+        assert!(has_text(&scene, "Quit to desktop?"));
+        let backdrop_quads = scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Quad(q) if q.fill == theme.dialog().backdrop))
+            .count();
+        assert_eq!(
+            backdrop_quads, 1,
+            "only the stacked quit-confirm dialog paints a full-viewport dialog backdrop"
+        );
+    }
+
+    #[test]
+    fn build_pause_menu_preselects_resume() {
+        let menu = build_pause_menu();
+        assert_eq!(
+            menu.selected_item().map(|item| item.label()),
+            Some("Resume")
+        );
+    }
+
+    #[test]
+    fn maybe_fire_toast_pushes_one_toast_per_interval_and_cycles_messages() {
+        let mut toasts = ToastStack::new();
+        let mut last_toast_at = -TOAST_INTERVAL_SECS;
+        let mut cycle = 0usize;
+
+        maybe_fire_toast(&mut toasts, &mut last_toast_at, &mut cycle, 0.0);
+        assert_eq!(
+            toasts.active().len(),
+            1,
+            "first tick fires promptly at startup"
+        );
+
+        maybe_fire_toast(&mut toasts, &mut last_toast_at, &mut cycle, 1.0);
+        assert_eq!(
+            toasts.active().len(),
+            1,
+            "no new toast before the interval elapses"
+        );
+
+        maybe_fire_toast(
+            &mut toasts,
+            &mut last_toast_at,
+            &mut cycle,
+            TOAST_INTERVAL_SECS + 1.1,
+        );
+        assert_eq!(
+            toasts.active().len(),
+            2,
+            "a new toast fires once the interval elapses"
+        );
     }
 
     #[test]

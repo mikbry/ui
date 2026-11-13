@@ -772,6 +772,7 @@ name = "host-embed-wgpu"
 version = "0.10.0"
 dependencies = [
  "bytemuck",
+ "mkui-core",
  "mkui-text",
  "mkui-wgpu",
  "pollster",
