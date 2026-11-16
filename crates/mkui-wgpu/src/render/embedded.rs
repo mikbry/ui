@@ -208,6 +208,7 @@ impl EmbeddedRenderer {
             device,
             target_format,
             color_space.slug_fragment_entry_point(),
+            1,
         );
         Self {
             ui_pipeline,

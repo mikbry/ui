@@ -62,7 +62,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use backdrop::BackdropBlur;
+use backdrop::{BackdropBlur, BackdropCompositeTarget};
 
 use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
 use crate::types::Backdrop;
@@ -178,20 +178,23 @@ mod card_vector_gpu;
 
 /// Preferred MSAA sample count for the UI pass.
 ///
-/// **Pinned to `1` (MSAA off) as the #93 load-bearing fix.** The 4× MSAA
-/// path added in Sprint 5 has no StoneSketch parent (the upstream HUD
-/// pipeline runs at `MultisampleState::default()` = `sample_count=1`) and
-/// is the suspected source of two #93 symptoms on macOS Metal: the gray
-/// backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
-/// despite emitting 9012 valid triangles at the CPU stage — both consistent
-/// with the MSAA-resolve-into-sRGB step double-applying sRGB encoding.
-/// `sample_count=1` is the StoneSketch-proven, visually-correct path; it
-/// writes the swapchain view directly with no resolve step.
+/// **Re-enabled at `4` (#156, closes #95, supersedes #147).** Sprint 6 (#93)
+/// pinned this to `1` on the theory that the MSAA-resolve-into-sRGB step was
+/// double-applying sRGB encoding on macOS Metal. That diagnosis was wrong —
+/// the actual #93 cause was the presentation-layer resize race, independently
+/// closed by #101 (`CAMetalLayer presentsWithTransaction`) — but the fix
+/// stayed deferred until the render pass had a linear intermediate to resolve
+/// into. #135/#155 built that intermediate; #156 flips this constant back on
+/// now that the resolve target is linear (`INTERMEDIATE_FORMAT`), not sRGB, so
+/// a multisample resolve is a plain linear→linear average with no encode step
+/// to double-apply — the double-encode bug is structurally impossible here,
+/// not merely avoided.
 ///
-/// The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
-/// `msaa_color_view` attachment) is retained but dormant so the follow-up
-/// can re-enable it with correct sRGB orchestration — see #95.
-const MSAA_SAMPLE_COUNT_PREF: u32 = 1;
+/// `pick_sample_count` still probes the adapter and degrades to `1` on
+/// hardware that doesn't advertise 4× MSAA on [`INTERMEDIATE_FORMAT`]; the
+/// effective count is logged at [`Renderer::new`] and exposed via
+/// [`Renderer::sample_count`].
+const MSAA_SAMPLE_COUNT_PREF: u32 = 4;
 
 /// Linear-space intermediate color format. Every lane (UI triangles, bitmap
 /// text, Slug curves) renders into a texture of this format, so alpha blending
@@ -199,9 +202,9 @@ const MSAA_SAMPLE_COUNT_PREF: u32 = 1;
 /// encodes it to the (usually sRGB) surface. `Rgba8Unorm` is a plain linear
 /// UNORM — no hardware sRGB encode on write — and matches the offscreen
 /// harness `offscreen::TARGET_FORMAT` so windowed and headless paths blend
-/// identically. See ADR 0006 §"Color space + blending". MSAA (when #134
-/// re-enables it) resolves into this same linear target; the sRGB encode stays
-/// isolated in the present pass.
+/// identically. See ADR 0006 §"Color space + blending". MSAA (#156) resolves
+/// into this same linear target; the sRGB encode stays isolated in the
+/// present pass.
 const INTERMEDIATE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// Outcome of a single `Renderer::render` call. Mirrors the upstream
@@ -363,6 +366,10 @@ impl Renderer {
             .get_texture_format_features(INTERMEDIATE_FORMAT)
             .flags;
         let sample_count = pick_sample_count(color_flags, MSAA_SAMPLE_COUNT_PREF);
+        eprintln!(
+            "mkui-wgpu: MSAA sample_count={sample_count} (preferred={MSAA_SAMPLE_COUNT_PREF}) \
+             on {INTERMEDIATE_FORMAT:?}"
+        );
 
         // UI + Slug lanes target the linear intermediate; the surface format is
         // only seen by the present pass. The standalone path always composites
@@ -379,7 +386,8 @@ impl Renderer {
         );
         let intermediate_view = create_intermediate_view(&device, width, height);
         let msaa_color_view = create_msaa_color_view(&device, width, height, sample_count);
-        let backdrop_blur = BackdropBlur::new(&device, INTERMEDIATE_FORMAT, width, height);
+        let backdrop_blur =
+            BackdropBlur::new(&device, INTERMEDIATE_FORMAT, width, height, sample_count);
 
         let (present_pipeline, present_bind_group_layout) = build_present_pipeline(&device, format);
         let present_sampler = create_present_sampler(&device);
@@ -393,7 +401,7 @@ impl Renderer {
         );
 
         #[cfg(feature = "slug")]
-        let slug_adapter = SlugAdapter::new(&device, INTERMEDIATE_FORMAT);
+        let slug_adapter = SlugAdapter::new(&device, INTERMEDIATE_FORMAT, sample_count);
 
         Ok(Self {
             _window: window,
@@ -698,10 +706,24 @@ impl Renderer {
                 let LaneDraw::Backdrop(backdrop) = draw else {
                     unreachable!("matches! above guarantees this arm")
                 };
+                // Pass 2 must draw into the same attachment the surrounding
+                // UI segments composite into — the live MSAA color
+                // attachment when MSAA is active, resolving back into
+                // `intermediate_view`, never the resolved intermediate
+                // directly (see `backdrop::BackdropBlur`'s "Compositing back
+                // into the live MSAA attachment" doc note — mkui-wgpu#156).
+                let (draw_target, resolve_target) = match self.msaa_color_view.as_ref() {
+                    Some(msaa) => (msaa, Some(&self.intermediate_view)),
+                    None => (&self.intermediate_view, None),
+                };
                 self.backdrop_blur.composite(
                     &self.device,
                     &mut encoder,
-                    &self.intermediate_view,
+                    BackdropCompositeTarget {
+                        source: &self.intermediate_view,
+                        draw_target,
+                        resolve_target,
+                    },
                     backdrop,
                     device_pixel_ratio,
                 );
@@ -1543,13 +1565,21 @@ mod tests {
     }
 
     #[test]
-    fn msaa_pref_is_off_pending_srgb_orchestration() {
-        // #93: MSAA is pinned off (sample_count=1) — the StoneSketch-proven
-        // path — until #95 re-introduces it with correct sRGB resolve.
-        assert_eq!(MSAA_SAMPLE_COUNT_PREF, 1);
+    fn msaa_pref_is_four_with_graceful_degradation() {
+        // #156: MSAA is re-enabled at 4x now that the resolve target is the
+        // linear intermediate (no sRGB double-encode risk). Adapters that
+        // advertise 4x on INTERMEDIATE_FORMAT get it; others degrade to 1x.
+        assert_eq!(MSAA_SAMPLE_COUNT_PREF, 4);
         assert_eq!(
             pick_sample_count(
                 wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4,
+                MSAA_SAMPLE_COUNT_PREF
+            ),
+            4
+        );
+        assert_eq!(
+            pick_sample_count(
+                wgpu::TextureFormatFeatureFlags::empty(),
                 MSAA_SAMPLE_COUNT_PREF
             ),
             1

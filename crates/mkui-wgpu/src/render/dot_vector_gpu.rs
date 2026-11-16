@@ -110,7 +110,7 @@ fn triangulated_scene() -> Scene {
 /// uses) and read back the full RGBA target, cleared to opaque black first.
 fn render_vector(scene: &Scene) -> Vec<u8> {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), INTERMEDIATE_FORMAT);
+    let adapter = SlugAdapter::new(renderer.device(), INTERMEDIATE_FORMAT, 1);
     let paths = scene_vector_paths(&scene.primitives);
     let paints = vector_path_paints(&paths);
     let prepared = adapter
