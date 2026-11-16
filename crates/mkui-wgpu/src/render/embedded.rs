@@ -184,6 +184,25 @@ pub struct EmbeddedRenderer {
     /// warm cache never re-decodes or re-encodes an already-seen glyph.
     #[cfg(feature = "slug")]
     slug_text_cache: SlugBlobCache,
+    /// Sum of the triangle-lane vertex buffer sizes (bytes) [`render_into`](Self::render_into)
+    /// created on its most recent call — one `device.create_buffer_init` per
+    /// contiguous triangle-lane run, re-allocated every frame (see that
+    /// method's `make_triangles` closure). `0` before the first call, or
+    /// after a call that drew nothing. Exposed via
+    /// [`last_frame_ui_vertex_bytes`](Self::last_frame_ui_vertex_bytes) for a
+    /// host building a GPU-memory estimate (#263) — it does not include the
+    /// Slug lane's own GPU resources (glyph atlas / path buffers, owned by
+    /// `mkui-vector2d-wgpu`, `slug` feature only) or any driver-level
+    /// allocator overhead.
+    last_frame_ui_vertex_bytes: usize,
+    /// Sum of [`PreparedSlug::memory_bytes`](mkui_vector2d_wgpu::PreparedSlug::memory_bytes)
+    /// across every Slug-lane draw [`render_into`](Self::render_into) built
+    /// on its most recent call — the Slug-lane counterpart to
+    /// `last_frame_ui_vertex_bytes` above (#263), present only under the
+    /// `slug` feature since that's the only build where `LaneDraw::Slug`
+    /// exists at all.
+    #[cfg(feature = "slug")]
+    last_frame_slug_bytes: usize,
 }
 
 impl EmbeddedRenderer {
@@ -218,12 +237,32 @@ impl EmbeddedRenderer {
             slug_font_id: None,
             #[cfg(feature = "slug")]
             slug_text_cache: SlugBlobCache::new(SlugConfig::new(16, 16, 1)),
+            last_frame_ui_vertex_bytes: 0,
+            #[cfg(feature = "slug")]
+            last_frame_slug_bytes: 0,
         }
     }
 
     /// The host target format this renderer's pipeline was built against.
     pub fn target_format(&self) -> wgpu::TextureFormat {
         self.target_format
+    }
+
+    /// Sum of the triangle-lane vertex buffer bytes [`render_into`](Self::render_into)
+    /// allocated on its most recent call — see the field doc on
+    /// `last_frame_ui_vertex_bytes` for exactly what this does and does not
+    /// cover. `0` before the first `render_into` call.
+    pub fn last_frame_ui_vertex_bytes(&self) -> usize {
+        self.last_frame_ui_vertex_bytes
+    }
+
+    /// Sum of the Slug-lane GPU buffer bytes [`render_into`](Self::render_into)
+    /// allocated on its most recent call — see the field doc on
+    /// `last_frame_slug_bytes` for exactly what this covers. `0` before the
+    /// first call, or on a frame whose scene drew no Slug glyphs/paths.
+    #[cfg(feature = "slug")]
+    pub fn last_frame_slug_bytes(&self) -> usize {
+        self.last_frame_slug_bytes
     }
 
     /// Select the registered [`FontId`] component text (every widget renders
@@ -262,6 +301,10 @@ impl EmbeddedRenderer {
     /// (logical pixels, ADR 0006 §"Viewport units contract") for text/bitmap
     /// device-pixel snapping. The host, not this renderer, owns resize — it
     /// already knows its own target's size every frame.
+    ///
+    /// A thin wrapper over [`render_into_timed`](Self::render_into_timed)
+    /// with no timestamp writes — see that method if the host wants
+    /// `wgpu` GPU-timestamp queries bracketing exactly this pass (#264).
     #[allow(clippy::too_many_arguments)] // every argument is load-bearing, borrowed host state (#234 added `queue`); same escape hatch as `components::dot`/`components::button`.
     pub fn render_into(
         &mut self,
@@ -272,6 +315,50 @@ impl EmbeddedRenderer {
         target_size: (u32, u32),
         scene: &Scene,
         text_system: &dyn TextSystem,
+    ) {
+        self.render_into_timed(
+            device,
+            queue,
+            encoder,
+            view,
+            target_size,
+            scene,
+            text_system,
+            None,
+        );
+    }
+
+    /// Same as [`render_into`](Self::render_into), with one addition:
+    /// `timestamp_writes`, passed straight through to this method's own UI
+    /// render pass — lets a host bracket exactly this pass with `wgpu`
+    /// timestamp queries (`wgpu::Features::TIMESTAMP_QUERY`), rather than
+    /// approximating it indirectly (#264's motivation; see
+    /// `examples/host-embed-wgpu`'s module doc for the marker-pass
+    /// workaround this replaces, and the real-hardware measurement that
+    /// motivated replacing it — a workaround bracketing an *empty* pass
+    /// around this one could sample before/after this pass's own GPU work
+    /// actually retired, misreporting its cost).
+    ///
+    /// When `timestamp_writes` is `Some`, this method records its pass even
+    /// on an empty `scene` (skipping the no-op early return
+    /// [`render_into`](Self::render_into) takes) — a `wgpu::QuerySet` slot
+    /// that's never written stays stale from whatever earlier frame last
+    /// wrote it, which a host polling it every frame (or every *other*
+    /// frame, double-buffered) must not silently accept as this frame's
+    /// value. A zero-draw pass is otherwise a complete no-op
+    /// (`wgpu::LoadOp::Load` / `wgpu::StoreOp::Store`, nothing drawn), so
+    /// this never changes what ends up on screen.
+    #[allow(clippy::too_many_arguments)] // every argument is load-bearing, borrowed host state (#234 added `queue`, #264 added `timestamp_writes`); same escape hatch as `components::dot`/`components::button`.
+    pub fn render_into_timed(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        target_size: (u32, u32),
+        scene: &Scene,
+        text_system: &dyn TextSystem,
+        timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
         // Only the `slug`-gated `SlugAdapter::prepare`/`prepare_path_paints`
         // calls below touch `queue`; an off-feature build never reaches
@@ -306,14 +393,21 @@ impl EmbeddedRenderer {
 
         // Tessellate a contiguous triangle-lane primitive range into one
         // vertex buffer, or `None` when it yields no geometry — mirrors
-        // `Renderer::render`'s own `make_triangles` closure.
-        let make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
+        // `Renderer::render`'s own `make_triangles` closure. Also accumulates
+        // `ui_vertex_bytes` (#263's GPU-memory estimate) into the enclosing
+        // local, committed to `self.last_frame_ui_vertex_bytes` once below —
+        // not written here directly, so this closure stays a plain capture
+        // of locals rather than `self`, next to the `self.slug_adapter`
+        // calls below it in the same loop.
+        let mut ui_vertex_bytes: usize = 0;
+        let mut make_triangles = |range: Range<usize>| -> Option<LaneDraw> {
             let triangles =
                 tessellate_primitives(&primitives[range], text_system, device_pixel_ratio);
             let vertices = gui_vertices(&triangles, scene.viewport.width, scene.viewport.height);
             if vertices.is_empty() {
                 return None;
             }
+            ui_vertex_bytes += vertices.len() * std::mem::size_of::<super::Vertex>();
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("mkui-wgpu Embedded UI Vertices"),
                 contents: bytemuck::cast_slice(&vertices),
@@ -405,8 +499,24 @@ impl EmbeddedRenderer {
         if let Some(open) = pending_triangles.take() {
             lane_draws.extend(make_triangles(open));
         }
+        self.last_frame_ui_vertex_bytes = ui_vertex_bytes;
+        #[cfg(feature = "slug")]
+        {
+            self.last_frame_slug_bytes = lane_draws
+                .iter()
+                .map(|draw| match draw {
+                    LaneDraw::Triangles { .. } => 0,
+                    LaneDraw::Slug(prepared) => prepared.memory_bytes() as usize,
+                })
+                .sum();
+        }
 
-        if lane_draws.is_empty() {
+        // A caller with no `timestamp_writes` keeps the original behavior:
+        // nothing to draw means nothing to record at all. A caller WITH
+        // `timestamp_writes` needs this pass recorded regardless — see this
+        // method's own doc for why an unwritten query slot is worse than a
+        // zero-draw pass.
+        if lane_draws.is_empty() && timestamp_writes.is_none() {
             return;
         }
 
@@ -422,7 +532,7 @@ impl EmbeddedRenderer {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -670,6 +780,134 @@ mod tests {
             );
         }
 
+        // ---- #263: `last_frame_ui_vertex_bytes` — the GPU-memory estimate
+        // a host (e.g. `examples/host-embed-wgpu`) builds its own
+        // `gpu_mem_bytes` figure from.
+
+        #[test]
+        fn last_frame_ui_vertex_bytes_is_zero_before_the_first_render_into_call() {
+            let size = 32u32;
+            let host = host(size, size);
+            let embedded =
+                EmbeddedRenderer::new(host.device(), host.format(), EmbeddedColorSpace::Linear);
+            assert_eq!(embedded.last_frame_ui_vertex_bytes(), 0);
+        }
+
+        #[test]
+        fn last_frame_ui_vertex_bytes_counts_a_nonempty_scenes_triangle_lane_vertices() {
+            let size = 32u32;
+            let host = host(size, size);
+            host.clear(wgpu::Color::BLACK);
+
+            let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+            scene.push(crate::Primitive::Quad(crate::Quad {
+                rect: crate::Rect::new(
+                    crate::Point::new(0.0, 0.0),
+                    crate::Size::new(size as f32, size as f32),
+                ),
+                fill: crate::Color::rgba(0.0, 1.0, 0.0, 1.0),
+                corner_radii: crate::CornerRadii::all(0.0),
+                stroke: None,
+            }));
+
+            let mut embedded = EmbeddedRenderer::new(
+                host.device(),
+                host.format(),
+                EmbeddedColorSpace::EncodedUnorm,
+            );
+            let mut encoder =
+                host.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("host+mkui embedded vertex-bytes test encoder"),
+                    });
+            embedded.render_into(
+                host.device(),
+                host.queue(),
+                &mut encoder,
+                host.view(),
+                (size, size),
+                &scene,
+                &BitmapTextSystem::new(),
+            );
+            host.queue().submit(Some(encoder.finish()));
+
+            let bytes = embedded.last_frame_ui_vertex_bytes();
+            assert!(bytes > 0, "a drawn quad must allocate triangle-lane bytes");
+            assert_eq!(
+                bytes % std::mem::size_of::<crate::render::Vertex>(),
+                0,
+                "the byte count must be a whole number of `Vertex`-sized vertices"
+            );
+        }
+
+        #[test]
+        fn last_frame_ui_vertex_bytes_resets_to_zero_for_an_empty_scene_after_a_nonempty_one() {
+            // `self.last_frame_ui_vertex_bytes = ui_vertex_bytes;` (in
+            // `render_into`) runs before the `lane_draws.is_empty()` early
+            // return, so a call that draws nothing must still clear the
+            // previous call's count, not leave it stale.
+            let size = 32u32;
+            let host = host(size, size);
+            host.clear(wgpu::Color::BLACK);
+
+            let mut nonempty_scene = Scene::new(crate::Size::new(size as f32, size as f32));
+            nonempty_scene.push(crate::Primitive::Quad(crate::Quad {
+                rect: crate::Rect::new(
+                    crate::Point::new(0.0, 0.0),
+                    crate::Size::new(size as f32, size as f32),
+                ),
+                fill: crate::Color::rgba(1.0, 0.0, 0.0, 1.0),
+                corner_radii: crate::CornerRadii::all(0.0),
+                stroke: None,
+            }));
+
+            let mut embedded = EmbeddedRenderer::new(
+                host.device(),
+                host.format(),
+                EmbeddedColorSpace::EncodedUnorm,
+            );
+
+            let mut encoder =
+                host.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("host+mkui embedded vertex-bytes reset test encoder (1)"),
+                    });
+            embedded.render_into(
+                host.device(),
+                host.queue(),
+                &mut encoder,
+                host.view(),
+                (size, size),
+                &nonempty_scene,
+                &BitmapTextSystem::new(),
+            );
+            host.queue().submit(Some(encoder.finish()));
+            assert!(embedded.last_frame_ui_vertex_bytes() > 0);
+
+            let empty_scene = Scene::new(crate::Size::new(size as f32, size as f32));
+            let mut encoder =
+                host.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("host+mkui embedded vertex-bytes reset test encoder (2)"),
+                    });
+            embedded.render_into(
+                host.device(),
+                host.queue(),
+                &mut encoder,
+                host.view(),
+                (size, size),
+                &empty_scene,
+                &BitmapTextSystem::new(),
+            );
+            host.queue().submit(Some(encoder.finish()));
+
+            assert_eq!(
+                embedded.last_frame_ui_vertex_bytes(),
+                0,
+                "an empty-scene call must reset the previous call's byte count to zero"
+            );
+        }
+
         // ---- GPU acceptance tests (#234): the Slug glyph + vector-path
         // lanes, dual-gated on `gpu-tests` + `slug` the same way
         // `render::slug_gpu` / `render::dot_vector_gpu` are. Reuses this
@@ -808,6 +1046,120 @@ mod tests {
                     outside,
                     pixel_at(&before, size, 2, 2),
                     "a pixel outside the Slug glyph must survive untouched"
+                );
+            }
+
+            // ---- #263: `last_frame_slug_bytes` — the Slug-lane half of the
+            // GPU-memory estimate a host (e.g. `examples/host-embed-wgpu`)
+            // builds its own `ui_gpu_mem_bytes` figure from, backed by
+            // `mkui_vector2d_wgpu::PreparedSlug::memory_bytes`.
+
+            #[test]
+            fn last_frame_slug_bytes_counts_a_drawn_glyphs_gpu_buffers() {
+                let size = 64u32;
+                let host = host(size, size);
+                host.clear(wgpu::Color::BLACK);
+
+                let mut scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                scene.slug_glyph(PlacedSlugGlyph {
+                    blob: square_glyph(),
+                    origin_px: [7.0, 57.0],
+                    scale_px_per_unit: 0.5,
+                    color: [0.5, 0.5, 0.5, 1.0],
+                    cap_height_px: f32::INFINITY,
+                });
+
+                let mut embedded = EmbeddedRenderer::new(
+                    host.device(),
+                    host.format(),
+                    EmbeddedColorSpace::EncodedUnorm,
+                );
+                assert_eq!(
+                    embedded.last_frame_slug_bytes(),
+                    0,
+                    "zero before the first render_into call"
+                );
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded slug-bytes test encoder"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    &scene,
+                    &BitmapTextSystem::new(),
+                );
+                host.queue().submit(Some(encoder.finish()));
+
+                assert!(
+                    embedded.last_frame_slug_bytes() > 0,
+                    "a drawn Slug glyph must allocate Slug-lane GPU buffer bytes"
+                );
+            }
+
+            #[test]
+            fn last_frame_slug_bytes_resets_to_zero_for_an_empty_scene_after_a_nonempty_one() {
+                let size = 64u32;
+                let host = host(size, size);
+                host.clear(wgpu::Color::BLACK);
+
+                let mut nonempty_scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                nonempty_scene.slug_glyph(PlacedSlugGlyph {
+                    blob: square_glyph(),
+                    origin_px: [7.0, 57.0],
+                    scale_px_per_unit: 0.5,
+                    color: [0.5, 0.5, 0.5, 1.0],
+                    cap_height_px: f32::INFINITY,
+                });
+
+                let mut embedded = EmbeddedRenderer::new(
+                    host.device(),
+                    host.format(),
+                    EmbeddedColorSpace::EncodedUnorm,
+                );
+
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded slug-bytes reset test encoder (1)"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    &nonempty_scene,
+                    &BitmapTextSystem::new(),
+                );
+                host.queue().submit(Some(encoder.finish()));
+                assert!(embedded.last_frame_slug_bytes() > 0);
+
+                let empty_scene = Scene::new(crate::Size::new(size as f32, size as f32));
+                let mut encoder =
+                    host.device()
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("host+mkui embedded slug-bytes reset test encoder (2)"),
+                        });
+                embedded.render_into(
+                    host.device(),
+                    host.queue(),
+                    &mut encoder,
+                    host.view(),
+                    (size, size),
+                    &empty_scene,
+                    &BitmapTextSystem::new(),
+                );
+                host.queue().submit(Some(encoder.finish()));
+
+                assert_eq!(
+                    embedded.last_frame_slug_bytes(),
+                    0,
+                    "an empty-scene call must reset the previous call's Slug byte count to zero"
                 );
             }
 

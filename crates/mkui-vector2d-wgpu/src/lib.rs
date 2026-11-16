@@ -661,9 +661,21 @@ impl SlugAdapter {
         // signature stays honest and a future staged-upload swap is local.
         let _ = queue;
 
+        // Sum of all five buffers above — a host building a GPU-memory
+        // estimate (mkui-wgpu's #263) has no other way to see these, since
+        // `_buffers` itself stays private to keep this type a simple
+        // draw-ready handle rather than exposing its internal buffer count
+        // and ordering as part of the public contract.
+        let memory_bytes = viewport_buffer.size()
+            + curves.size()
+            + bands.size()
+            + indices.size()
+            + glyph_buffer.size();
+
         Some(PreparedSlug {
             bind_group,
             instance_count: packed.glyphs.len() as u32,
+            memory_bytes,
             _buffers: [viewport_buffer, curves, bands, indices, glyph_buffer],
         })
     }
@@ -684,6 +696,7 @@ impl SlugAdapter {
 pub struct PreparedSlug {
     bind_group: wgpu::BindGroup,
     instance_count: u32,
+    memory_bytes: u64,
     _buffers: [wgpu::Buffer; 5],
 }
 
@@ -691,6 +704,13 @@ impl PreparedSlug {
     /// Number of glyph instances (quads) this frame draws.
     pub fn instance_count(&self) -> u32 {
         self.instance_count
+    }
+
+    /// Total GPU buffer bytes this frame's Slug draw allocated (viewport +
+    /// curves + bands + indices + glyph storage buffers) — for a host
+    /// building a GPU-memory estimate (mkui-wgpu's #263).
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes
     }
 }
 

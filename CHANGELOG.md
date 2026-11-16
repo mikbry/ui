@@ -8,6 +8,41 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`examples/host-embed-wgpu` — always-on CPU/GPU per-frame timing + GPU
+  memory instrumentation (#263, #264).** Builds the measurement harness
+  #230 needs without requiring real hardware to build it: every frame now
+  prints one grep/parse-friendly `frame_stats` line. `cpu_update_ms` (scene
+  build) and `cpu_ui_ms` (`EmbeddedRenderer::render_into`'s own CPU cost —
+  also where its re-tessellate-every-call cost, the embedded-path sibling
+  of #230's `Renderer::render` hotspot, becomes visible) are the pair
+  #230's "UI update + draw ≤1ms" budget is about; `cpu_acquire_ms` and
+  `cpu_render_ms` are logged separately so vsync wait and present's own
+  potential blocking never get mistaken for CPU render cost. GPU
+  cube-pass/HUD-pass/total time in ms comes from `wgpu::Features::
+  TIMESTAMP_QUERY`, each pass bracketed directly via the new
+  `EmbeddedRenderer::render_into_timed` (#264 — no marker-pass
+  approximation), through a double-buffered query set (`gpu_frame_ms=
+  unsupported` on an adapter without the feature, `=pending` for the first
+  frame before double-buffering has anything to resolve yet, `unreliable`
+  as a defensive residual check) — one submission writes a slot, the
+  *next* frame's submission resolves it, deliberately never the same
+  submission that wrote it, because resolving in the same submission
+  occasionally returned the previous frame's stale values on real Apple
+  Silicon hardware even after this binary's own blocking `Device::poll`.
+  `ui_gpu_mem_bytes` (mkui's own per-frame transient allocations — the
+  number #230's 64MB UI-memory ceiling is about, including the Slug lane
+  under this crate's default-on `slug` feature) and `host_gpu_mem_bytes`
+  (this host's own static allocations) are logged separately.
+  `EmbeddedRenderer` gains `last_frame_ui_vertex_bytes()`,
+  `render_into_timed()`, and, under `slug`, `last_frame_slug_bytes()`;
+  `mkui-vector2d-wgpu::PreparedSlug` gains `memory_bytes()` to back the
+  latter. `HEADLESS=1` never reaches any of this (unaffected); additive
+  logging only, no visual change. See the module doc's new "Reading the
+  profiling output" section for the full format and known limitations
+  (neither memory field captures the swapchain/surface textures or
+  driver-level allocator overhead; `gpu_cube_ms`/`gpu_hud_ms` need not sum
+  to `gpu_frame_ms`, since the two passes aren't guaranteed back-to-back
+  with zero gap).
 - **`mkui-wgpu::EmbeddedRenderer::set_slug_font` + `examples/host-embed-wgpu`
   — real anti-aliased text via the Slug lane (#259).** `EmbeddedRenderer`
   gains the same component-text routing `Renderer::set_slug_font` already
