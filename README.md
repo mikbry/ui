@@ -6,6 +6,32 @@
 
 ---
 
+## 🎯 Goal
+
+mkui's goal is the shadcn/ui component catalogue in Rust, on one shared
+contract (`mkui-core` + `mkui-runtime`), rendered by every back end.
+
+**A component is done when it exists in the shared contract and all three
+back ends — `mkui-wgpu`, `mkui-web`, and `mkui-console` — render it.**
+
+Test for whether a feature belongs in mkui, in order:
+
+1. Is it in the shadcn/ui catalogue, or a primitive those components need
+   (layout, styling, focus, layering, text, state)?
+2. Can it be expressed in the shared contract and rendered by every back end?
+3. Does it carry meaning from a specific host's domain (a heading, a world
+   position, a game state)?
+
+**Yes, yes, no** → it belongs in mkui.
+**Yes on question 3** → it belongs in the host, or in a separate,
+host-flavored crate (e.g. `mkui-hud`) built from mkui primitives — not in
+`mkui-core`, `mkui-wgpu`, `mkui-web`, or `mkui-console`.
+
+See [ADR 0013](docs/architecture/0013-mkui-goal-and-three-backend-bar.md)
+for the full decision and its consequences.
+
+---
+
 ## 🚀 Quick Example
 
 ### Rust
