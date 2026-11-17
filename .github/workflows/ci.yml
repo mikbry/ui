@@ -139,12 +139,13 @@ jobs:
       # `compile_error!` guard (#102). They build package-aware (see the
       # `mkui-examples` job + ADR 0006). #105 owns the wider feature matrix.
       - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --all-targets --locked -- -D warnings
-      # `examples/host-embed-wgpu` defaults its own `slug` feature on (#259),
-      # which unifies `mkui-wgpu`'s `slug` feature ON across the whole
-      # `--workspace` build above — so that invocation no longer lints
-      # `mkui-wgpu`'s `cfg(not(feature = "slug"))` path. Pin one default-
-      # features leg here so that path keeps getting linted somewhere.
-      - run: cargo clippy -p mkui-wgpu --all-targets --locked -- -D warnings
+      # `mkui-wgpu`'s own crate default now includes `slug` (2026-11-17
+      # promotion, see its Cargo.toml) — the `--workspace` build above no
+      # longer lints `mkui-wgpu`'s `cfg(not(feature = "slug"))` path at all
+      # (every leg that touches it, including host-embed-wgpu's own
+      # default-on from #259, now agrees). Pin a `--no-default-features` leg
+      # here so that path keeps getting linted somewhere.
+      - run: cargo clippy -p mkui-wgpu --no-default-features --all-targets --locked -- -D warnings
 
   test:
     # Package-aware feature matrix (#105). The default `--workspace` leg runs
@@ -207,14 +208,21 @@ jobs:
           # mkui-wgpu: compile-only `--all-features` (gpu-tests can't run here).
           - name: mkui-wgpu-compile
             args: -p mkui-wgpu --all-features --no-run
-          # mkui-wgpu, default features, actually run: `examples/host-embed-wgpu`
-          # defaults its own `slug` feature on (#259), which unifies
-          # `mkui-wgpu`'s `slug` feature ON across the whole `workspace-default`
-          # leg above — so that leg no longer exercises `mkui-wgpu`'s
-          # `cfg(not(feature = "slug"))` tests (e.g. `dot::tests::
-          # off_slug_dot_is_byte_identical_to_v0_10_0`). Pin that coverage here.
+          # mkui-wgpu, actual crate default (slug ON as of the 2026-11-17
+          # promotion) — sanity check that the real default a consumer gets
+          # actually builds and passes with no flags at all.
           - name: mkui-wgpu-default
             args: -p mkui-wgpu
+          # mkui-wgpu, `--no-default-features`: every other leg (workspace-
+          # default, host-embed-wgpu's own default-on from #259, and
+          # mkui-wgpu-default above) now agrees on slug ON, so nothing
+          # exercises `mkui-wgpu`'s `cfg(not(feature = "slug"))` path (e.g.
+          # `dot::tests::off_slug_dot_is_byte_identical_to_v0_10_0`) unless
+          # pinned explicitly here. Bitmap/triangulated-`Quad` stays the
+          # permanent debug-fallback and visual-regression oracle per ADR
+          # 0002 — this leg is what keeps it from silently rotting.
+          - name: mkui-wgpu-no-slug
+            args: -p mkui-wgpu --no-default-features
           # mkui-c: per-backend (web+console can't coexist — #102).
           - name: mkui-c-console
             args: -p mkui-c --no-default-features --features console
@@ -397,7 +405,12 @@ jobs:
       - name: Run gpu-tests (#106) with wgpu-hal instance-layer logging
         env:
           RUST_LOG: wgpu_hal=debug,wgpu_core=info
-        run: cargo test -p mkui-wgpu --features gpu-tests --locked -- --nocapture
+        # `--no-default-features` (2026-11-17): `slug` is now mkui-wgpu's own
+        # crate default, so without this flag `--features gpu-tests` would
+        # additively enable it too, collapsing this step into a duplicate of
+        # the explicit gpu-tests,slug step below instead of covering the
+        # bitmap-only path.
+        run: cargo test -p mkui-wgpu --no-default-features --features gpu-tests --locked -- --nocapture
       # Slug lane GPU acceptance tests (#66) — hand-authored curve/band records
       # rendered through the same Vulkan/Lavapipe contract. Needs both the #106
       # harness (`gpu-tests`) and the adapter (`slug`).
@@ -407,12 +420,16 @@ jobs:
         run: cargo test -p mkui-wgpu --features "gpu-tests,slug" --locked -- --nocapture
 
   feature-slug:
-    # Package-aware rows for the #66 Slug lane (extends the #105 matrix): the
-    # new adapter crate, the wgpu backend with `slug` on, and the example with
-    # `slug` on. These feature combinations are off by default, so `--workspace`
-    # never exercises them — without this job a Slug-only compile or lint break
-    # slips through. Pure compile + lint (no GPU), so it runs on the default
-    # displayless runner.
+    # Package-aware rows for the #66 Slug lane (extends the #105 matrix).
+    # `slug` is now mkui-wgpu's own crate default (2026-11-17 promotion), so
+    # the `--features slug` lines below are redundant with `--workspace`
+    # (kept explicit anyway — cheap, and resilient if the default ever
+    # reverts). The lines that actually earn their keep now are the
+    # `--no-default-features` ones: nothing else exercises these examples'
+    # bitmap-only/triangulated fallback path once the default flipped to
+    # slug ON, and that path is a permanent oracle per ADR 0002, not a
+    # deprecated one. Pure compile + lint (no GPU), so it runs on the
+    # default displayless runner.
     name: feature-slug
     needs: changes
     if: needs.changes.outputs.code != 'false'
@@ -435,20 +452,35 @@ jobs:
       # The new acyclic adapter crate (default features).
       - run: cargo clippy -p mkui-vector2d-wgpu --all-targets --locked -- -D warnings
       - run: cargo test -p mkui-vector2d-wgpu --locked
-      # The wgpu backend with the Slug lane on.
+      # The wgpu backend with the Slug lane on (now redundant with its own
+      # default — kept explicit for resilience).
       - run: cargo clippy -p mkui-wgpu --features slug --all-targets --locked -- -D warnings
       - run: cargo test -p mkui-wgpu --features slug --locked
-      # The example forwarding `slug` down to the backend.
+      # The example forwarding `slug` down to the backend (redundant with
+      # default; resilience leg).
       - run: cargo clippy -p atoms-on-wgpu --features slug --all-targets --locked -- -D warnings
       - run: cargo build -p atoms-on-wgpu --features slug --locked
-      # #67's text example: the GPU smoke (Abel Slug + bitmap) with `slug` on.
+      # #67's text example: the GPU smoke (Abel Slug + bitmap) with `slug` on
+      # (redundant with default; resilience leg).
       - run: cargo clippy -p text --features slug --all-targets --locked -- -D warnings
       - run: cargo build -p text --features slug --locked
       # #143's vector-primitives showcase: triangulated vs vector columns
-      # with `slug` on (its own test asserts the VectorPath lane fires).
+      # with `slug` on (redundant with default; resilience leg — its own
+      # test asserts the VectorPath lane fires).
       - run: cargo clippy -p vector-showcase --features slug --all-targets --locked -- -D warnings
       - run: cargo test -p vector-showcase --features slug --locked
       - run: cargo build -p vector-showcase --features slug --locked
+      # New coverage (2026-11-17): nothing else exercises these examples'
+      # bitmap-only/triangulated fallback now that the workspace default
+      # includes `slug`. These three lines are what actually earns this
+      # job's keep going forward.
+      - run: cargo clippy -p atoms-on-wgpu --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo build -p atoms-on-wgpu --no-default-features --locked
+      - run: cargo clippy -p text --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo build -p text --no-default-features --locked
+      - run: cargo clippy -p vector-showcase --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo test -p vector-showcase --no-default-features --locked
+      - run: cargo build -p vector-showcase --no-default-features --locked
 
   mkui-backend-matrix:
     # Enforces the `mkui` one-primary-backend invariant (#102). The bridge

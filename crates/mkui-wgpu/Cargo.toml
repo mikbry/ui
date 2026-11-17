@@ -16,15 +16,25 @@ description = "WGPU-oriented scene primitives and declarative builders for mkui"
 # See issue #106.
 gpu-tests = []
 
-# Slug vector-glyph lane (#66). Default OFF: builds without it retain the
-# v0.9.3 bitmap-only behavior and never initialize Slug GPU resources. Enabling
-# it pulls in the native `mkui-vector2d-wgpu` adapter and turns on the ordered
-# Slug render lane. Native only — the adapter is a `cfg(not(wasm32))` dep, so
-# browser/WASM builds ignore the feature (browser WebGPU is out of scope, #66).
-# #67 also pulls in `mkui-vector2d` (the neutral encoder) so the renderer-side
+# Slug vector-glyph + VectorPath lane (#66, #140/#141/#142). Default ON as of
+# the mkui goal/course-correction review (2026-11-17, tracked internally) —
+# promoted per ADR 0007's own anticipated "Sprint 8+ promotion" criteria,
+# which are now met: the chevalier mkui-slug-rewrite mission (2026-07-28 to
+# 2026-07-31) validated the glyph lane against a ratified reference adapter
+# (max Δ ≤ 1/255 across 24 golden-image comparisons on real GPU hardware), and
+# `button`/`card`/`dot` each have a GPU-acceptance-tested VectorPath rendering
+# mode (#140/#141/#142). Builds that pass `--no-default-features` retain the
+# original bitmap-only / triangulated-`Quad` behavior unchanged — that path is
+# the permanent debug-fallback and visual-regression oracle per ADR 0002, not
+# removed by this promotion. Enabling `slug` pulls in the native
+# `mkui-vector2d-wgpu` adapter and turns on the ordered Slug render lane.
+# Native only — the adapter is a `cfg(not(wasm32))` dep, so browser/WASM
+# builds ignore the feature (browser WebGPU is out of scope, #66). #67 also
+# pulls in `mkui-vector2d` (the neutral encoder) so the renderer-side
 # `slug_text::place_slug_run` glue can turn an SFNT outline run into placed GPU
 # glyphs.
 slug = ["dep:mkui-vector2d-wgpu", "dep:mkui-vector2d"]
+default = ["slug"]
 
 [dependencies]
 mkui-core = { path = "../mkui-core" }
