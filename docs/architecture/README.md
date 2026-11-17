@@ -64,6 +64,11 @@ and the records below.
   instance/surface/window of its own, one submission per frame, no extra
   texture copy. Parallel to the winit-owned standalone shell, not a
   replacement for it.
+- [ADR 0013 — mkui's goal and the shared-contract/three-backend bar](0013-mkui-goal-and-three-backend-bar.md)
+  — The shadcn/ui catalogue, in Rust, on one shared contract; a component
+  is done only when `mkui-core` has it and all three back ends render it.
+  Host-shaped work splits three ways: mkui, a second-class `mkui-hud`
+  crate, or the host itself.
 
 ## ADR format conventions
 
