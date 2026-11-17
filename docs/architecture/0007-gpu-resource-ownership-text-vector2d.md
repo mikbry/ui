@@ -91,16 +91,25 @@ to the GPU backend choice.
 
 ### Bitmap default + `slug` feature gate
 
-- Bitmap / retro text remains a **first-class render lane and the production
-  default in v0.10.0**, consistent with [ADR 0002](0002-mkui-text-own-the-stack.md)
-  ("the `BitmapTextSystem` path stays as the permanent debug-fallback and
-  visual-regression oracle"). Sprint 7 adds the native glyph lane; it does not
-  replace the default.
-- Cargo feature **`slug` is default-off**. It gates the Slug-specific WGPU
+- Bitmap / retro text remains a **first-class render lane and the permanent
+  debug-fallback / visual-regression oracle**, consistent with
+  [ADR 0002](0002-mkui-text-own-the-stack.md). It is not removed or
+  deprecated by the promotion below.
+- Cargo feature **`slug` was promoted to `mkui-wgpu`'s crate default on
+  2026-11-17**, per this ADR's own anticipated "Sprint 8+ promotion" criteria
+  (see Alternatives Considered below — those criteria are now met). The
+  chevalier mkui-slug-rewrite mission (2026-07-28 to 2026-07-31) validated the
+  glyph lane against a ratified reference adapter (max Δ ≤ 1/255 across 24
+  golden-image comparisons on real GPU hardware), and `button`/`card`/`dot`
+  (#140/#141/#142) each shipped a GPU-acceptance-tested `VectorPath`
+  rendering mode on top of it. `slug` still gates the Slug-specific WGPU
   integration (`mkui-vector2d-wgpu` pipelines and their `mkui-wgpu` wiring) —
-  **not** the backend-neutral text contract. `mkui-text` and `mkui-vector2d`
-  build and behave identically whether or not `slug` is enabled; the feature
-  toggles only the GPU lane.
+  **not** the backend-neutral text contract; `mkui-text` and `mkui-vector2d`
+  build and behave identically regardless. `--no-default-features` retains
+  the original bitmap-only / triangulated-`Quad` behavior unchanged, and CI
+  (`mkui-wgpu-no-slug`, the `feature-slug` job's new no-default-features
+  lines) keeps that path from silently rotting now that it's no longer the
+  default anyone exercises by accident.
 
 ### Ordered render-command semantics
 
@@ -140,10 +149,11 @@ This ADR fills in the "future Slug / mkui-vector2d integration" seams
   than owning them or depending on `mkui-wgpu` — keeps the graph acyclic and
   makes the GPU-resource crate independently testable against a throwaway wgpu
   context.
-- The `slug` default-off gate means v0.10.0 ships the new lane dormant: the
-  production default stays bitmap, and the Slug path is opt-in until it is
-  promoted (Sprint 8+). No consumer is forced onto the native glyph lane before
-  it is production-ready.
+- The `slug` default-off gate meant v0.10.0 shipped the new lane dormant: the
+  production default stayed bitmap, and the Slug path was opt-in until
+  promoted. **Promoted 2026-11-17** (see "Bitmap default + `slug` feature
+  gate" above) once the Sprint 8+ validation this gate was waiting on
+  actually happened.
 - The "batch adjacent same-lane only, never reorder" rule constrains the
   cross-pipeline submitter: it cannot globally sort primitives by lane for
   fewer pass switches. That is a deliberate cost paid to preserve painter's
@@ -175,11 +185,18 @@ This ADR fills in the "future Slug / mkui-vector2d integration" seams
   outlines/masks; the consumer owns the upload.
 
 - **Make the native glyph lane the v0.10.0 production default and drop the
-  bitmap path.** Rejected. ADR 0002 committed the bitmap path as the permanent
-  debug-fallback and visual-regression oracle. The native lane is new in Sprint
-  7 and unproven; shipping it default-on (and removing the oracle it would be
-  validated against) inverts the risk. Bitmap stays default; `slug` is
-  default-off until Sprint 8+ promotion.
+  bitmap path.** Rejected *at the time* (Sprint 7, 2026-06-11): ADR 0002
+  committed the bitmap path as the permanent debug-fallback and
+  visual-regression oracle, and the native lane was new and unproven —
+  shipping it default-on (and removing the oracle it would be validated
+  against) would have inverted the risk. This was explicitly conditional,
+  not permanent: "`slug` is default-off until Sprint 8+ promotion." The
+  promotion criteria were met by 2026-11-17 (chevalier mission validation,
+  three components shipping `VectorPath` rendering) — see "Bitmap default +
+  `slug` feature gate" above. **The bitmap path itself is not dropped**;
+  only the default flipped. Keeping both halves of this entry (the original
+  rejection and its later resolution) is deliberate — it's the record of why
+  the gate existed and why it was safe to lift, not something to delete.
 
 - **Allow the cross-pipeline submitter to globally reorder primitives by lane
   for fewer pass switches.** Rejected. It would break painter's order — a Slug

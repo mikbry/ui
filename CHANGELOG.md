@@ -7,6 +7,21 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Changed
+- **`mkui-wgpu`'s `slug` Cargo feature is now default-on (2026-11-17).** The
+  Slug vector-glyph/VectorPath lane (#66, #140/#141/#142) was proven via the
+  chevalier mkui-slug-rewrite mission (max Δ ≤ 1/255 across 24 golden-image
+  comparisons on real GPU hardware) and three components (`button`, `card`,
+  `dot`) already ship GPU-acceptance-tested `VectorPath` rendering on top of
+  it — this flips the default per ADR 0007's own anticipated "Sprint 8+
+  promotion" criteria, which are now met. **This changes default rendering
+  output**: a plain `cargo build`/`cargo run` now renders through the Slug
+  lane wherever it's wired (text glyphs, `button`/`card`/`dot` corners +
+  borders) instead of the bitmap/triangulated fallback. `--no-default-
+  features` retains the original v0.10.0 behavior unchanged — that path
+  stays the permanent debug-fallback / visual-regression oracle per ADR
+  0002, not dropped. See ADR 0007 for the full rationale.
+
 ### Added
 - **`mkui-wgpu::EmbeddedRenderer::set_slug_font` + `examples/host-embed-wgpu`
   — real anti-aliased text via the Slug lane (#259).** `EmbeddedRenderer`
