@@ -433,17 +433,24 @@ pub struct SlugAdapter {
 }
 
 impl SlugAdapter {
-    /// Build the Slug pipeline for `target_format`. The device is borrowed —
-    /// the adapter takes no ownership of GPU lifecycle. Draws through
+    /// Build the Slug pipeline for `target_format` at `sample_count`. The
+    /// device is borrowed — the adapter takes no ownership of GPU lifecycle.
+    /// `sample_count` must match the render pass the pipeline is later bound
+    /// into (mkui-wgpu#156): a pipeline built at one sample count cannot draw
+    /// into an attachment multisampled at another. Draws through
     /// `slug.wgsl`'s pass-through `"fs_slug"` entry point; see
     /// [`Self::with_fragment_entry_point`] for the one caller that needs a
     /// different one.
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
-        Self::with_fragment_entry_point(device, target_format, "fs_slug")
+    pub fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        Self::with_fragment_entry_point(device, target_format, "fs_slug", sample_count)
     }
 
-    /// Build the Slug pipeline for `target_format`, drawing through
-    /// `fragment_entry_point` instead of the default pass-through
+    /// Build the Slug pipeline for `target_format` at `sample_count`, drawing
+    /// through `fragment_entry_point` instead of the default pass-through
     /// `"fs_slug"`. Exists for `mkui_wgpu::render::embedded::EmbeddedRenderer`
     /// (#234), which must pick `"fs_slug_encode_srgb"` when the host's draw
     /// target has no automatic sRGB encode on write — see `slug.wgsl` for
@@ -455,6 +462,7 @@ impl SlugAdapter {
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
         fragment_entry_point: &str,
+        sample_count: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mkui-vector2d-wgpu Slug Shader"),
@@ -495,7 +503,11 @@ impl SlugAdapter {
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some(fragment_entry_point),

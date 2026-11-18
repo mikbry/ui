@@ -241,7 +241,7 @@ fn solid_red_pipeline(renderer: &OffscreenRenderer) -> wgpu::RenderPipeline {
 #[test]
 fn slug_pipeline_renders_handauthored_glyph_with_calibrated_changed_pixels() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 
     // Baseline: clear to black, no glyph.
     let baseline = render_pixels(&renderer, &adapter, &[], |_| {}, wgpu::Color::BLACK);
@@ -291,7 +291,7 @@ fn slug_pipeline_renders_handauthored_glyph_with_calibrated_changed_pixels() {
 #[test]
 fn overlapping_ui_and_slug_respect_command_order_both_ways() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let solid = solid_red_pipeline(&renderer);
 
     // Order A: UI (red, fills target) first, then the green Slug glyph → the
@@ -409,7 +409,7 @@ fn vector_path_and_slug_glyph_compose_in_scene_order_through_render_commands() {
     };
 
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 
     let render_scene = |primitives: [Primitive; 2]| -> Vec<u8> {
         let mut scene = Scene::new(Size::new(W as f32, H as f32));
@@ -526,7 +526,7 @@ fn slug_adapter_builds_on_the_vulkan_cpu_contract() {
     // The harness asserts the #106 Vulkan + CPU contract; building the Slug
     // pipeline against that device proves the adapter provisions there.
     let renderer = harness();
-    let _adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let _adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 }
 
 /// Render `placed_square` with `cap_height_px: 12.0` (below
@@ -593,7 +593,7 @@ fn small_text_snap_reaches_real_pixels_at_a_fractional_device_pixel_ratio() {
     // exactly the case Codex flagged (an earlier revision baked a stale DPR
     // into the baseline before the real per-frame value was known).
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let device_pixel_ratio = 1.5f32;
 
     // At 1.5x DPR, snap_to_physical_pixel(v, 1.5) = round(v*1.5)/1.5:

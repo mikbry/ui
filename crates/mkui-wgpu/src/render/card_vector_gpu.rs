@@ -186,7 +186,7 @@ fn render_vector(rect: Rect, style: &CardStyle) -> Vec<u8> {
     let paints = vector_path_paints(&paths);
 
     render_to_offscreen(|renderer, encoder| {
-        let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+        let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
         let prepared = adapter
             .prepare_path_paints(
                 renderer.device(),

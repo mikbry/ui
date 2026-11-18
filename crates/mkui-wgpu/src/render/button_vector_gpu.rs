@@ -149,7 +149,7 @@ fn texel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
 #[test]
 fn button_vector_vs_triangulated() {
     let renderer = harness();
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
 
     let theme = WgpuTheme::default();
     let style = theme.button_style(ButtonVariant::Default, ButtonSize::Default);

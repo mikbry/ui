@@ -19,6 +19,28 @@
 //! sample the same texture that pass was just writing to) and before
 //! reopening a fresh one with `LoadOp::Load`.
 //!
+//! ## Compositing back into the live MSAA attachment (#156)
+//!
+//! Pass 1 (the horizontal blur) always *samples* the single-sample resolved
+//! intermediate — a multisampled texture cannot be bound as a regular
+//! `texture_2d` for reading. Pass 2 (vertical blur + tint), however, must
+//! *draw* into whichever attachment the surrounding UI pass segments are
+//! compositing into: with MSAA active that is the live multisample color
+//! attachment, with a `resolve_target` pointing back at the resolved
+//! intermediate, never the resolved intermediate directly. Drawing pass 2
+//! straight into the single-sample intermediate while MSAA is on would make
+//! it invisible one segment later — the next UI segment reopens the
+//! multisample attachment with `LoadOp::Load` (loading samples from
+//! *before* this composite ran) and its own end-of-pass resolve then
+//! overwrites the resolved intermediate with that stale average, erasing
+//! the backdrop. This resolve happens even for an all-empty trailing
+//! segment, so a `Backdrop` as the very last primitive in the scene is hit
+//! on every frame, not just when something is drawn after it. Routing pass
+//! 2 through the same multisample attachment (built at the pipeline's own
+//! `sample_count`, via [`Self::new`]) keeps the attachment the single
+//! source of truth for "what the scene currently looks like," exactly as
+//! it is without MSAA.
+//!
 //! ## Why two passes, not three
 //!
 //! A naive separable Gaussian blur is horizontal-pass-then-vertical-pass,
@@ -94,6 +116,27 @@ impl CompositeVertex {
     }
 }
 
+/// The views [`BackdropBlur::composite`] reads from and draws into,
+/// bundled so the method stays under clippy's argument-count lint (mirrors
+/// `render::mod::UiPassTarget`, the same bundling for the same reason).
+///
+/// - `source`: the resolved single-sample intermediate pass 1 samples —
+///   never the live multisample attachment, which cannot be bound as a
+///   plain `texture_2d`.
+/// - `draw_target`: what pass 2 draws into. With MSAA active this must be
+///   the live multisample color attachment (built at [`BackdropBlur::new`]'s
+///   own `sample_count`); with no MSAA it is `source` itself.
+/// - `resolve_target`: `Some(source)` when `draw_target` is the multisample
+///   attachment (so pass 2 keeps the resolved intermediate in sync the same
+///   way every UI pass segment does), `None` when `draw_target` already is
+///   `source`.
+#[derive(Debug, Clone, Copy)]
+pub struct BackdropCompositeTarget<'a> {
+    pub source: &'a wgpu::TextureView,
+    pub draw_target: &'a wgpu::TextureView,
+    pub resolve_target: Option<&'a wgpu::TextureView>,
+}
+
 /// Real backdrop-blur GPU resources (#187). See the module docs.
 #[derive(Debug)]
 pub struct BackdropBlur {
@@ -113,11 +156,17 @@ impl BackdropBlur {
     /// intermediate, or — in a GPU test — `OffscreenRenderer::format()`).
     /// `width`/`height` are the target's physical-pixel size; the scratch
     /// texture is sized to match and recreated by [`Self::resize`].
+    /// `sample_count` must match the pass 2 draw target [`Self::composite`]
+    /// is later called with (mkui-wgpu#156): the windowed renderer's live
+    /// MSAA color attachment when MSAA is active, or `1` for the resolved
+    /// single-sample intermediate (and every GPU test's offscreen target,
+    /// which has no MSAA attachment of its own).
     pub fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         width: u32,
         height: u32,
+        sample_count: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mkui-wgpu Backdrop Shader"),
@@ -203,7 +252,16 @@ impl BackdropBlur {
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            // Pass 2 draws into the *live* compositing attachment (the MSAA
+            // color attachment when MSAA is active) — see the module docs'
+            // "Compositing back into the live MSAA attachment" note. Pass 1
+            // above always targets the single-sample scratch texture, so it
+            // keeps the default (1x).
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_composite"),
@@ -252,30 +310,43 @@ impl BackdropBlur {
         self.height = height;
     }
 
-    /// Blur whatever `target` already holds behind `backdrop.rect` and
-    /// composite `backdrop.tint` over the blurred result, clipped to
-    /// `backdrop.corner_radii`. `device_pixel_ratio` is the frame's
-    /// physical-pixels-per-logical-pixel ratio (ADR 0006 §"Viewport units
-    /// contract") — `backdrop.blur_radius` is authored in logical px like
-    /// every other geometry value in the scene, so it scales with DPI here,
-    /// at draw time, the same way a `Stroke` or corner radius does.
+    /// Blur whatever `target.source` already holds behind `backdrop.rect`
+    /// and composite `backdrop.tint` over the blurred result into
+    /// `target.draw_target`, clipped to `backdrop.corner_radii`.
+    /// `device_pixel_ratio` is the frame's physical-pixels-per-logical-pixel
+    /// ratio (ADR 0006 §"Viewport units contract") — `backdrop.blur_radius`
+    /// is authored in logical px like every other geometry value in the
+    /// scene, so it scales with DPI here, at draw time, the same way a
+    /// `Stroke` or corner radius does.
     ///
-    /// The caller must not hold an open render pass on `target` when this is
-    /// called — pass 1 samples it, which a still-open pass targeting the
-    /// same texture cannot do. See the module docs.
+    /// See [`BackdropCompositeTarget`] for what each of its three fields
+    /// must be and why; see the module docs' "Compositing back into the
+    /// live MSAA attachment" note for why passing the resolved intermediate
+    /// as `draw_target` under MSAA would make this composite vanish one UI
+    /// pass segment later.
+    ///
+    /// The caller must not hold an open render pass on `target.source` or
+    /// `target.draw_target` when this is called — pass 1 samples `source`,
+    /// which a still-open pass targeting the same texture cannot do. See
+    /// the module docs.
     pub fn composite(
         &self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
+        target: BackdropCompositeTarget<'_>,
         backdrop: &Backdrop,
         device_pixel_ratio: f32,
     ) {
+        let BackdropCompositeTarget {
+            source,
+            draw_target,
+            resolve_target,
+        } = target;
         let texel = [1.0 / self.width as f32, 1.0 / self.height as f32];
         let sigma = (backdrop.blur_radius.max(0.0) * device_pixel_ratio * 0.5).max(0.0001);
         let step = (sigma / TAPS).max(1.0);
 
-        // Pass 1: horizontal blur, `target` -> `self.scratch_view`.
+        // Pass 1: horizontal blur, `source` -> `self.scratch_view`.
         let blur_params = BlurParams { texel, sigma, step };
         let blur_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mkui-wgpu Backdrop Blur Params"),
@@ -288,7 +359,7 @@ impl BackdropBlur {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(target),
+                    resource: wgpu::BindingResource::TextureView(source),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -328,7 +399,7 @@ impl BackdropBlur {
         }
 
         // Pass 2: vertical blur + tint composite, `self.scratch_view` ->
-        // `target`, clipped to the rounded-rect polygon. An empty vertex
+        // `draw_target`, clipped to the rounded-rect polygon. An empty vertex
         // list (a degenerate zero-size rect) draws nothing — pass 1's cost
         // above is the only one a degenerate rect still pays.
         let vertices = composite_vertices(
@@ -379,9 +450,9 @@ impl BackdropBlur {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mkui-wgpu Backdrop Composite Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
+                    view: draw_target,
                     depth_slice: None,
-                    resolve_target: None,
+                    resolve_target,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
@@ -635,7 +706,7 @@ mod tests {
         fn interior_tracks_the_live_backdrop_not_a_static_texture() {
             let size = 64u32;
             let host = host(size, size);
-            let blur = BackdropBlur::new(host.device(), host.format(), size, size);
+            let blur = BackdropBlur::new(host.device(), host.format(), size, size, 1);
             let backdrop = panel(size);
             let center = size / 2;
 
@@ -651,7 +722,17 @@ mod tests {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("backdrop red test encoder"),
                         });
-                blur.composite(host.device(), &mut encoder, host.view(), &backdrop, 1.0);
+                blur.composite(
+                    host.device(),
+                    &mut encoder,
+                    BackdropCompositeTarget {
+                        source: host.view(),
+                        draw_target: host.view(),
+                        resolve_target: None,
+                    },
+                    &backdrop,
+                    1.0,
+                );
                 host.queue().submit(Some(encoder.finish()));
             }
             let red_interior = pixel_at(
@@ -673,7 +754,17 @@ mod tests {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("backdrop blue test encoder"),
                         });
-                blur.composite(host.device(), &mut encoder, host.view(), &backdrop, 1.0);
+                blur.composite(
+                    host.device(),
+                    &mut encoder,
+                    BackdropCompositeTarget {
+                        source: host.view(),
+                        draw_target: host.view(),
+                        resolve_target: None,
+                    },
+                    &backdrop,
+                    1.0,
+                );
                 host.queue().submit(Some(encoder.finish()));
             }
             let blue_interior = pixel_at(
@@ -699,7 +790,7 @@ mod tests {
         fn a_sharp_edge_behind_the_panel_blurs_into_a_gradient() {
             let size = 64u32;
             let host = host(size, size);
-            let blur = BackdropBlur::new(host.device(), host.format(), size, size);
+            let blur = BackdropBlur::new(host.device(), host.format(), size, size, 1);
             let backdrop = panel(size);
 
             // Clear red, then overwrite the right half with blue via a raw
@@ -779,7 +870,17 @@ mod tests {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("backdrop edge-blur encoder"),
                         });
-                blur.composite(host.device(), &mut encoder, host.view(), &backdrop, 1.0);
+                blur.composite(
+                    host.device(),
+                    &mut encoder,
+                    BackdropCompositeTarget {
+                        source: host.view(),
+                        draw_target: host.view(),
+                        resolve_target: None,
+                    },
+                    &backdrop,
+                    1.0,
+                );
                 host.queue().submit(Some(encoder.finish()));
             }
 
@@ -804,7 +905,7 @@ mod tests {
         fn pixels_outside_the_rounded_rect_are_left_untouched() {
             let size = 64u32;
             let host = host(size, size);
-            let blur = BackdropBlur::new(host.device(), host.format(), size, size);
+            let blur = BackdropBlur::new(host.device(), host.format(), size, size, 1);
             // A fully rounded panel (radius = half the shorter side) so its
             // extreme corner pixel sits well outside the rounded polygon
             // while still inside the bounding rect.
@@ -839,7 +940,17 @@ mod tests {
                     .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("rounded-corner test encoder"),
                     });
-            blur.composite(host.device(), &mut encoder, host.view(), &backdrop, 1.0);
+            blur.composite(
+                host.device(),
+                &mut encoder,
+                BackdropCompositeTarget {
+                    source: host.view(),
+                    draw_target: host.view(),
+                    resolve_target: None,
+                },
+                &backdrop,
+                1.0,
+            );
             host.queue().submit(Some(encoder.finish()));
 
             let after = host.read_rgba().expect("rounded-corner readback");
@@ -848,6 +959,216 @@ mod tests {
                 after_corner, before_corner,
                 "a pixel just inside the bounding rect but outside the rounded \
                  polygon must be untouched by the backdrop draw"
+            );
+        }
+
+        /// Regression for mkui-wgpu#156: a `BackdropCompositeTarget` that
+        /// routes pass 2 into the live MSAA attachment (not the resolved
+        /// intermediate) must survive a later UI pass segment's
+        /// `LoadOp::Load` + resolve — including the all-empty trailing
+        /// segment `Renderer::render` always opens after the last
+        /// `Backdrop`. Before the mkui-wgpu#156 fix, `composite` always drew
+        /// into the resolved single-sample intermediate directly; the next
+        /// segment's multisample attachment never saw the edit, and its own
+        /// end-of-pass resolve stamped the stale pre-backdrop average back
+        /// over it, erasing the backdrop every frame.
+        ///
+        /// Builds its own multisample attachment + resolve target directly
+        /// (rather than reusing `host`'s own single-sample backing texture,
+        /// which has no MSAA attachment of its own) to exercise exactly the
+        /// attachment/resolve pairing `Renderer::render` uses.
+        #[test]
+        fn composite_into_the_live_msaa_attachment_survives_a_later_segments_resolve() {
+            let size = 64u32;
+            let sample_count = 4;
+            let host = host(size, size);
+            let device = host.device();
+            let queue = host.queue();
+            let format = host.format();
+
+            let intermediate = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("backdrop-msaa-regression intermediate"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let intermediate_view =
+                intermediate.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let msaa = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("backdrop-msaa-regression multisampled color"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let msaa_view = msaa.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let blur = BackdropBlur::new(device, format, size, size, sample_count);
+            let backdrop = Backdrop {
+                rect: Rect::new(
+                    Point::new(size as f32 * 0.25, size as f32 * 0.25),
+                    Size::new(size as f32 * 0.5, size as f32 * 0.5),
+                ),
+                corner_radii: CornerRadii::all(0.0),
+                blur_radius: 16.0,
+                // An opaque tint guarantees the composite visibly changes
+                // the (otherwise-uniform, nothing-to-blur) clear color.
+                tint: Color::rgba(0.0, 0.0, 1.0, 1.0),
+            };
+            let center = (size / 2) as usize;
+
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("backdrop-msaa-regression encoder"),
+            });
+
+            // "Segment A": the UI lane clears+resolves solid red into the
+            // intermediate, exactly as `draw_pass_segment` does for the
+            // segment before a `Backdrop`.
+            {
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("segment A"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &msaa_view,
+                        depth_slice: None,
+                        resolve_target: Some(&intermediate_view),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 1.0,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+
+            // The `Backdrop` itself: routed through the live MSAA
+            // attachment, resolving back into the intermediate — the
+            // mkui-wgpu#156 fix under test.
+            blur.composite(
+                device,
+                &mut encoder,
+                BackdropCompositeTarget {
+                    source: &intermediate_view,
+                    draw_target: &msaa_view,
+                    resolve_target: Some(&intermediate_view),
+                },
+                &backdrop,
+                1.0,
+            );
+
+            // The always-opened trailing segment after the last `Backdrop`
+            // (`Renderer::render`'s "Always opens a pass, even for an empty
+            // `draws` slice" segment): `LoadOp::Load` on the *same*
+            // multisample texture, no draws, then resolve again.
+            {
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("trailing empty segment B"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &msaa_view,
+                        depth_slice: None,
+                        resolve_target: Some(&intermediate_view),
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+
+            queue.submit(Some(encoder.finish()));
+
+            let bytes_per_row = size * 4;
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("backdrop-msaa-regression readback"),
+                size: (bytes_per_row * size) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut copy_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            copy_encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &intermediate,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(size),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit(Some(copy_encoder.finish()));
+
+            let slice = readback.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+            slice.map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll must drive the map callback to completion");
+            rx.recv()
+                .expect("map callback channel must not drop")
+                .expect("readback buffer must map");
+            let data = slice
+                .get_mapped_range()
+                .expect("mapped readback buffer must yield a view");
+            let offset = center * bytes_per_row as usize + center * 4;
+            let pixel = [
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ];
+            drop(data);
+            readback.unmap();
+
+            assert_ne!(
+                [pixel[0], pixel[1], pixel[2]],
+                [255, 0, 0],
+                "the backdrop's blue tint over the center pixel must survive the \
+                 trailing empty segment's load+resolve — got pure red back, meaning \
+                 that segment's resolve overwrote the backdrop with stale \
+                 pre-composite MSAA samples (the mkui-wgpu#156 regression)"
             );
         }
     }

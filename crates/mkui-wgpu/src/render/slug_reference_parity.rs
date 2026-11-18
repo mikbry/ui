@@ -135,7 +135,7 @@ fn render_mkui(glyph: &SlugGlyph, dpi: f32) -> (u32, Vec<u8>) {
 
     let renderer = OffscreenRenderer::new(canvas, canvas)
         .expect("offscreen adapter/device must be available on the CI Vulkan/Lavapipe runner");
-    let adapter = SlugAdapter::new(renderer.device(), renderer.format());
+    let adapter = SlugAdapter::new(renderer.device(), renderer.format(), 1);
     let placed = PlacedSlugGlyph {
         blob: Arc::new(glyph.clone()),
         origin_px: [padding, canvas as f32 - padding],

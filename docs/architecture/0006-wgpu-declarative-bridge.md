@@ -595,13 +595,12 @@ darkening on `M`/`g` diagonals gone) is the deferred operator visual-verify
 (the windowed present pass has no offscreen surface to assert against; its
 shader is naga-validated in the default test job).
 
-**Interaction with MSAA (#134).** MSAA now belongs *inside* the linear
-intermediate: the multisampled attachment resolves into the linear
-intermediate (a correct linear→linear average) and the present pass performs
-the sole sRGB encode afterward — so the resolve step can never double-encode.
-The machinery is shaped for that today (the resolve target is already the
-intermediate view) but MSAA stays pinned off here; re-enabling it is #134's
-scope, not this change's.
+**Interaction with MSAA (#156).** MSAA lives *inside* the linear intermediate:
+the multisampled attachment resolves into the linear intermediate (a correct
+linear→linear average) and the present pass performs the sole sRGB encode
+afterward — so the resolve step can never double-encode. #156 flips this on
+(`MSAA_SAMPLE_COUNT_PREF = 4`); see §"MSAA re-enabled on the linear
+intermediate" below.
 
 **Sprint 6 double-encode, closed by construction.** The v0.9.1 CHANGELOG noted
 an MSAA-resolve-into-sRGB step double-applying encoding
@@ -609,33 +608,71 @@ an MSAA-resolve-into-sRGB step double-applying encoding
 there is no sRGB texture in the compositing path to decode/re-encode, so the
 double-encode is structurally impossible — not merely patched.
 
-### MSAA disabled pending correct sRGB orchestration
+### MSAA re-enabled on the linear intermediate (#156)
 
-The UI pass currently runs at `sample_count = 1` (`MSAA_SAMPLE_COUNT_PREF = 1`
-in `render/mod.rs`). This is a **deliberate temporary policy**, not the target
-state:
+The UI pass runs at `sample_count = 4` (`MSAA_SAMPLE_COUNT_PREF = 4` in
+`render/mod.rs`), degrading to `1` on adapters that don't advertise 4× MSAA on
+[`INTERMEDIATE_FORMAT`] (`pick_sample_count`, probed against
+`adapter.get_texture_format_features` at `Renderer::new`; the effective count
+is logged on init and exposed via `Renderer::sample_count`).
 
-- The Sprint 5 4× MSAA path has **no StoneSketch upstream parent** — the
-  reference HUD pipeline runs at `MultisampleState::default()` (`sample_count
-  = 1`). MSAA was a mkui-wgpu-local addition.
-- It is the suspected source of two #93 symptoms on macOS Metal: the gray
-  backdrop darkening on every resize, and `atoms-on-wgpu` rendering empty
-  despite emitting thousands of valid triangles at the CPU stage — both
-  consistent with the MSAA-resolve-into-sRGB step double-applying sRGB
-  encoding (`srgb_encode(srgb_to_linear(c))`).
-- `sample_count = 1` writes the swapchain view directly with no resolve step,
-  which is the StoneSketch-proven, visually-correct path.
+**History.** Sprint 5 added 4× MSAA with no StoneSketch upstream parent (the
+reference HUD pipeline runs at `sample_count = 1`). Sprint 6 (#93) pinned it
+back to `1`, suspecting the MSAA-resolve-into-sRGB step of double-applying sRGB
+encoding — the resolve target was the sRGB swapchain at the time, so a
+multisampled sRGB texture resolving into it *would* decode/average/re-encode,
+a real (if not the actual #93) risk. The actual #93 cause turned out to be the
+presentation-layer resize race, independently closed by #101
+(`CAMetalLayer presentsWithTransaction`). #147 attempted the re-enable directly
+against the sRGB swapchain (matching-format resolve — legal under wgpu, since
+`wgpu-core` requires the multisampled view and its resolve target to share a
+format) but was superseded before landing when #135/#155 replaced the
+compositing target with the **linear** intermediate described above.
 
-The MSAA machinery (`pick_sample_count`, `create_msaa_color_view`, the
-`msaa_color_view` attachment) is retained but dormant so the policy can be
-reversed cleanly. Since #135 (see §"Color space + blending") the render pass
-composites into a **linear intermediate**, which is exactly the correct home
-for MSAA: the multisampled attachment resolves into that linear target (a
-linear→linear average) and the separate present pass performs the sole sRGB
-encode — no resolve-into-sRGB double-encode is possible. The `msaa_color_view`
-resolve target is already wired to the intermediate view; re-enabling
-anti-aliasing is now just flipping `MSAA_SAMPLE_COUNT_PREF`, tracked in **#134**
-(closer of **#95**). Until that lands, anti-aliasing is intentionally off.
+**Why it's safe now.** With every lane compositing into `Rgba8Unorm`
+(non-sRGB) and the sole sRGB encode isolated in the present pass, the MSAA
+resolve is a **plain linear→linear average** — there is no sRGB texture in the
+compositing path to decode or re-encode, so the double-encode failure mode
+Sprint 6 fixed by disabling MSAA is now structurally impossible, not merely
+avoided. `crates/mkui-wgpu/tests/msaa_no_regression.rs` (Lavapipe `gpu-tests`
+lane) proves this on a real GPU: a 4×-MSAA-resolved clear matches its
+single-sample reference byte-for-byte (MSAA changes coverage, not color), the
+#149/#155 authored-sRGB-0.5→byte-~55 linear-intermediate invariant survives
+the resolve, and running the resolved result through the real `present.wgsl`
+re-encodes it back to ~byte 128 (sRGB 0.5 round-trips to itself across the full
+MSAA-resolve-then-present chain).
+
+**Slug pipeline.** `SlugAdapter::new` takes a `sample_count` parameter and
+builds its `MultisampleState` at the pass's effective count, matching the UI
+pipeline — a pipeline built at one sample count cannot draw into an attachment
+multisampled at another.
+
+**Backdrop blur (#187) interaction, discovered landing #156.** #187's
+backdrop-blur lane composites directly into the resolved single-sample
+intermediate, between two UI pass segments that the renderer splits at every
+`Primitive::Backdrop` boundary (so the blur pass can legally sample what the
+segment before it just painted). #187 shipped on `main` after this branch's
+original (July) MSAA work and was never exercised against `sample_count > 1`
+until this PR actually flipped `MSAA_SAMPLE_COUNT_PREF` to `4` — at which
+point it surfaced a real bug: the *next* UI segment reopens the live
+multisample attachment with `LoadOp::Load`, loading samples from *before*
+the backdrop composite ran, and that segment's own end-of-pass resolve then
+overwrites the resolved intermediate with that stale average — erasing the
+backdrop. This fires even when nothing is drawn after the backdrop, because
+`Renderer::render` always opens one more (possibly empty) segment after the
+last `Backdrop` so a pass boundary exists for it to have sampled. The fix:
+`BackdropBlur::new` also takes `sample_count` and builds its pass-2
+("vertical blur + tint composite") pipeline at that count;
+`BackdropBlur::composite` takes a `BackdropCompositeTarget` naming the
+resolved intermediate as the pass-1 sample `source` separately from pass 2's
+`draw_target`/`resolve_target` pair, so pass 2 draws into the *live*
+multisample attachment (resolving back into the intermediate) exactly like
+every surrounding UI segment, instead of writing a value the next segment's
+resolve immediately discards. No example currently exercises this lane
+through the real windowed `Renderer` (`examples/host-embed-wgpu` uses
+`GlassMode::Solid` specifically because `EmbeddedRenderer` doesn't wire up
+`Backdrop` at all) — the only coverage is the targeted GPU regression test
+`backdrop::tests::gpu::composite_into_the_live_msaa_attachment_survives_a_later_segments_resolve`.
 
 ### Layout v1
 

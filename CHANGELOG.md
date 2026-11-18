@@ -1310,6 +1310,55 @@ breaking changes can land on minor bumps).
     this bump establishes: `mkui-wgpu` tracks the host ecosystem's `wgpu`
     major as a point dependency, not a range, so this kind of bump is the
     expected, reviewed way a future `wgpu` skew gets resolved.
+- **4× MSAA re-enabled on the linear intermediate framebuffer (#156, closes
+  #95, supersedes #147).** Builds on #155's linear-intermediate + present-pass
+  architecture (prerequisite) and #157's completed Slug algorithm — #156 was
+  closed in July pending #157 because an early smoke test on the then-current
+  half-finished Slug implementation showed MSAA made no visible difference;
+  with #157's dual-ray coverage + `fwidth()` AA now landed, MSAA is back to
+  mattering for UI-triangle and rounded-component edges (Slug's own
+  antialiasing is analytic, so its marginal gain from MSAA is smaller). The
+  UI/bitmap/Slug pipelines now render into a **multisample** `Rgba8Unorm`
+  intermediate texture (`sample_count = 4` by default), which resolves — a
+  plain linear→linear average, since the target is not sRGB — into the
+  existing single-sample linear intermediate before the present pass encodes
+  linear→sRGB at the surface boundary exactly as before. `pick_sample_count`
+  probes the adapter's `Rgba8Unorm` sample-count support and degrades to `1`
+  where 4× isn't available (logged at `Renderer::new`). `SlugAdapter::new`
+  gains a `sample_count` parameter so the Slug pipeline's `MultisampleState`
+  matches the pass it draws into. New Lavapipe regression test
+  (`crates/mkui-wgpu/tests/msaa_no_regression.rs`, `gpu-tests` feature) proves
+  the resolve is byte-identical to the single-sample reference and that the
+  #149/#155 authored-sRGB-0.5→byte-~55 invariant survives MSAA end-to-end
+  through the real `present.wgsl`. Because the intermediate is linear, this
+  re-enable cannot reintroduce the Sprint 6 v0.9.1 MSAA-resolve-into-sRGB
+  double-encode that motivated pinning MSAA off in the first place — see ADR
+  0006 §"MSAA re-enabled on the linear intermediate". Supersedes #147, whose
+  pre-#155 design resolved MSAA directly into the sRGB swapchain.
+  - **Fixes a latent #187 backdrop-blur bug this re-enable would otherwise
+    have shipped.** `BackdropBlur` composited its blur+tint pass directly
+    into the resolved single-sample intermediate; with MSAA active, the next
+    UI pass segment's `LoadOp::Load` on the live multisample attachment loads
+    pre-composite samples, and that segment's own resolve then overwrites the
+    intermediate with the stale average — erasing the backdrop every frame,
+    including via the always-open trailing segment after the last
+    `Backdrop` even with nothing drawn after it. `BackdropBlur::new` now
+    takes `sample_count` and `BackdropBlur::composite` takes a
+    `BackdropCompositeTarget` so its pass 2 draws into the live multisample
+    attachment (resolving back into the intermediate) like every other UI
+    segment. New GPU test:
+    `backdrop::tests::gpu::composite_into_the_live_msaa_attachment_survives_a_later_segments_resolve`.
+    No example currently exercises the `Backdrop` lane through the real
+    windowed `Renderer`, so this had no other test coverage. See ADR 0006
+    §"Backdrop blur (#187) interaction, discovered landing #156".
+  - **Scope decision: visual "crisp edges at 48px" acceptance not captured.**
+    `text --features slug`, `atoms-on-wgpu --features slug`, and
+    `native-showcase` all ran on this Mac with no panic, and each logged
+    `MSAA sample_count=4` from the real adapter probe (none of the three use
+    the `Backdrop` lane). Screenshot capture of the actual windows was not
+    possible in the agent's sandboxed session (macOS Screen Recording
+    permission); the before/after visual crispness comparison the issue
+    asked for is deferred to a human operator with real screenshot access.
 - **Bridge `Mkui` rustdoc — audit round-7 Phase 1 (#144).** Added `///`
   rustdoc with `# Examples` sections to the bridge `Mkui::new`, `Mkui::child`,
   and `Mkui::run` methods in `crates/mkui/src/lib.rs`, so adopters landing on
