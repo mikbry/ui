@@ -136,8 +136,9 @@ compare `ResolvedStyle`, not the raw forwarding.
 
 The parser is a strict three-tier model:
 
-- **Tier 1** — 43 utility classes (the showcase set; issue body's text
-  says 39, the enumerated list contains 43 — we ship the enumerated list).
+- **Tier 1** — 44 utility classes (the showcase set plus `justify-center`,
+  added by #63 so the README's own example parses; issue body's text
+  says 39, the enumerated list contains 44 — we ship the enumerated list).
 - **Tier 2** — `hover:*`, `sm:*`, `transition-colors` parse as documented
   no-ops. A `tier2_count` field surfaces in `ResolvedStyle` so parity
   tests can assert tolerance.
