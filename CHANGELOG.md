@@ -46,6 +46,33 @@ breaking changes can land on minor bumps).
   `ClassParseError` — worse, silently dropped every other token on the
   same class string via `mkui-c`/`mkui-py`'s unchecked FFI construction
   path.
+- **`mkui-wgpu::components::panel`/`glass_panel`/`toast_stack` — the
+  `VectorPath` lane now extends to `Shadow`, fixing #219/#212's
+  corner-radii bug class at its source for the vector lane (#279).**
+  `tessellate_shadow` (`tessellation.rs`) never reads `Shadow::corner_radii`
+  — it always emits a plain expanded rectangle — so a shadow paired with a
+  rounded `Quad` (every real `Shadow` producer in this crate: `panel`,
+  `glass_panel`, and `toast_stack`'s row chrome; `button`/`card`/`dot`
+  never emit one at all, despite #279's own text suggesting otherwise) has
+  always rendered with square corners poking out past the fill's rounded
+  ones. Under `slug`, those three call sites now push a fill-only
+  `Primitive::VectorPath` rounded rect instead (`components::shadow::
+  emit_shadow`, the same compile-time chrome fork #140/#141/#142 already
+  use for `button`/`card`/`dot`): the shadow's rect expands by the same
+  `spread + blur_radius * 0.35` approximation `tessellate_shadow` already
+  uses, and its `corner_radii` grows by that same amount too (CSS
+  `box-shadow`'s own spread semantics), which keeps every corner arc
+  centered on the exact same point as the paired `Quad`'s own arc — only
+  the radius differs, by exactly the expansion. **Off `slug`, nothing
+  changes**: `tessellate_shadow` stays byte-identical, same scope #140 set
+  for `Button`'s own triangulated lane. No new blur treatment — the vector
+  lane matches `tessellate_shadow`'s existing flat-alpha approximation
+  exactly (`color.multiply_alpha(0.6)`), since neither lane has real
+  Gaussian blur today. A new cross-consumer GPU acceptance test
+  (`render::shadow_vector_gpu`, same dual gate as `card_vector_gpu`) renders
+  `panel()`'s real shadow chrome on both lanes through #106's Lavapipe
+  harness, proving the vector lane's corner is genuinely excluded where the
+  triangulated lane's unfixed square corner still paints.
 - **`examples/host-embed-wgpu` — always-on CPU/GPU per-frame timing + GPU
   memory instrumentation (#263, #264).** Builds the measurement harness
   #230 needs without requiring real hardware to build it: every frame now

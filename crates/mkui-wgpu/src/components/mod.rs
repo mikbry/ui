@@ -66,6 +66,7 @@ mod progress_bar;
 mod scroll_area;
 mod scrollbar;
 mod segmented_select;
+mod shadow;
 mod slider;
 mod swatch;
 mod text;

@@ -16,6 +16,7 @@ use crate::types::{
     TextAlign, TextStyle,
 };
 
+use super::shadow::emit_shadow;
 use super::{label, titled_panel};
 
 /// Full-form toast row height (message line + the dismiss/minimise
@@ -102,13 +103,16 @@ pub fn toast_stack<T>(
             Size::new(region.size.width, height),
         );
 
-        scene.shadow(Shadow {
-            rect,
-            blur_radius: style.shadow.blur_radius,
-            spread: style.shadow.spread,
-            color: style.shadow.color,
-            corner_radii: CornerRadii::all(style.corner_radius),
-        });
+        emit_shadow(
+            scene,
+            Shadow {
+                rect,
+                blur_radius: style.shadow.blur_radius,
+                spread: style.shadow.spread,
+                color: style.shadow.color,
+                corner_radii: CornerRadii::all(style.corner_radius),
+            },
+        );
         scene.quad(Quad {
             rect,
             fill: style.fill,

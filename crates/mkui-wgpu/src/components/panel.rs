@@ -11,17 +11,21 @@ use crate::types::{
 };
 
 use super::label;
+use super::shadow::emit_shadow;
 
 /// Panel chrome (shadow + rounded fill + stroke). Returns the padded inner
 /// content rect. This is the low-level primitive `card` is built from.
 pub fn panel(scene: &mut Scene, rect: Rect, style: PanelStyle) -> Rect {
-    scene.shadow(Shadow {
-        rect,
-        blur_radius: style.shadow.blur_radius,
-        spread: style.shadow.spread,
-        color: style.shadow.color,
-        corner_radii: CornerRadii::all(style.corner_radius),
-    });
+    emit_shadow(
+        scene,
+        Shadow {
+            rect,
+            blur_radius: style.shadow.blur_radius,
+            spread: style.shadow.spread,
+            color: style.shadow.color,
+            corner_radii: CornerRadii::all(style.corner_radius),
+        },
+    );
     scene.quad(Quad {
         rect,
         fill: style.fill,
@@ -70,13 +74,16 @@ pub fn titled_panel(
 /// construction (#187 acceptance: "no blur cost" in the fallback).
 pub fn glass_panel(scene: &mut Scene, rect: Rect, style: GlassStyle, mode: GlassMode) -> Rect {
     let corner_radii = CornerRadii::all(style.corner_radius);
-    scene.shadow(Shadow {
-        rect,
-        blur_radius: style.shadow.blur_radius,
-        spread: style.shadow.spread,
-        color: style.shadow.color,
-        corner_radii,
-    });
+    emit_shadow(
+        scene,
+        Shadow {
+            rect,
+            blur_radius: style.shadow.blur_radius,
+            spread: style.shadow.spread,
+            color: style.shadow.color,
+            corner_radii,
+        },
+    );
     match mode {
         GlassMode::Blur => {
             scene.backdrop(Backdrop {
@@ -110,6 +117,25 @@ mod tests {
     use crate::theme::WgpuTheme;
     use crate::types::{Primitive, Size};
 
+    /// Whether `scene` carries the shadow's chrome primitive — a
+    /// `Primitive::Shadow` off `slug` (`emit_shadow`'s unchanged path) or a
+    /// `Primitive::VectorPath` on `slug` (#279's fill-only rounded rect).
+    #[cfg(not(feature = "slug"))]
+    fn shadow_emitted(scene: &Scene) -> bool {
+        scene
+            .primitives
+            .iter()
+            .any(|p| matches!(p, Primitive::Shadow(_)))
+    }
+
+    #[cfg(feature = "slug")]
+    fn shadow_emitted(scene: &Scene) -> bool {
+        scene
+            .primitives
+            .iter()
+            .any(|p| matches!(p, Primitive::VectorPath(_)))
+    }
+
     #[test]
     fn titled_panel_returns_content_below_title() {
         let mut scene = Scene::new(Size::new(400.0, 400.0));
@@ -141,10 +167,10 @@ mod tests {
         let content = glass_panel(&mut scene, rect, style, GlassMode::Blur);
 
         assert_eq!(content, rect.inset(style.padding));
-        assert!(scene
-            .primitives
-            .iter()
-            .any(|p| matches!(p, Primitive::Shadow(_))));
+        assert!(
+            shadow_emitted(&scene),
+            "glass_panel must emit the shadow's chrome"
+        );
         assert_eq!(
             scene
                 .primitives
