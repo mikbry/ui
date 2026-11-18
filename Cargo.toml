@@ -4,6 +4,7 @@ members = [
     "crates/mkui-runtime",     # Portable AppTree substrate (Sprint 4)
     "crates/mkui-core",        # Core types, traits, and headless logic
     "crates/mkui-text",        # Text-system trait + from-scratch bitmap prototype
+    "crates/mkui-layout",      # Backend-neutral flex layout engine over AppTree (#63)
     "crates/mkui-vector2d",    # Backend-neutral 2D paths/curves + Slug glyph encoder (Sprint 7)
     "crates/mkui-vector2d-wgpu", # Native WGPU adapter for Slug glyph blobs (Sprint 7, #66)
     "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
@@ -42,6 +43,7 @@ default-members = [
     "crates/mkui-runtime",
     "crates/mkui-core",
     "crates/mkui-text",
+    "crates/mkui-layout",
     "crates/mkui-vector2d",
     "crates/mkui-wgpu",
     "crates/mkui-web",

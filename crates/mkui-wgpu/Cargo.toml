@@ -71,6 +71,13 @@ pollster = { workspace = true }
 # #67's font-backed ones).
 
 [dev-dependencies]
+# Proves the `mkui-layout` (#63) acceptance criterion "wgpu walker can
+# consume computed rects instead of owning permanent layout logic" — a
+# dev-dependency so the claim is checked without making the walker's own
+# render path depend on it yet. See `tests/mkui_layout_interop.rs` and
+# `walker.rs`'s module docs' "Layout model" section.
+mkui-layout = { path = "../mkui-layout" }
+
 # PNG decoding for the `gpu-tests,slug` reference-parity self-check (#157
 # Phase 1): reads the ratified reference-harness's committed known-good
 # goldens for a byte-level comparison. Same pin as

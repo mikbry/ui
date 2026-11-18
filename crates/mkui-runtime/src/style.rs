@@ -99,6 +99,12 @@ pub struct ResolvedStyle {
     pub items_center: bool,
     /// `justify-between`. Main-axis space-between distribution.
     pub justify_between: bool,
+    /// `justify-center`. Main-axis centering (added for #63 — the README's
+    /// own `justify-center` example previously hit `ClassParseError`, which
+    /// `push_view_unchecked`'s FFI path (`alloc_node`'s
+    /// `unwrap_or_default()`) swallows silently, dropping every other class
+    /// on the same string with no panic and no error).
+    pub justify_center: bool,
     /// `container` / `mx-auto`. Layout-container hints.
     pub container: bool,
     pub mx_auto: bool,
@@ -207,6 +213,7 @@ fn apply_token(token: &str, out: &mut ResolvedStyle) -> Result<(), ClassParseErr
         "flex-wrap" => out.flex_wrap = true,
         "items-center" => out.items_center = true,
         "justify-between" => out.justify_between = true,
+        "justify-center" => out.justify_center = true,
         "container" => out.container = true,
         "mx-auto" => out.mx_auto = true,
         "mt-auto" => out.mt_auto = true,
@@ -261,6 +268,7 @@ mod tests {
         "flex-wrap",
         "items-center",
         "justify-between",
+        "justify-center",
         "container",
         "mx-auto",
         "mt-auto",
@@ -307,8 +315,9 @@ mod tests {
         // or we lost coverage (regression).
         assert_eq!(
             T1_TOKENS.len(),
-            43,
-            "T1_TOKENS list above contains the 43 utility classes used in the showcase"
+            44,
+            "T1_TOKENS list above contains the 44 utility classes used in the showcase \
+             (43 pre-#63, plus `justify-center` — the README's own example)"
         );
     }
 
@@ -353,6 +362,19 @@ mod tests {
         assert_eq!(r.text_size, Some(TextSize::Xl4));
         assert!(r.font_bold);
         assert_eq!(r.foreground, Some(ColorRole::Foreground));
+    }
+
+    #[test]
+    fn readme_justify_center_example_parses_with_every_token_resolved() {
+        // Regression for #63 acceptance criterion #7: the README's own
+        // `"flex-1 items-center justify-center"` example (README.md's Rust /
+        // C++ / C / Python quickstarts) must parse cleanly, and every token
+        // on the string must resolve — not just the last one checked.
+        let s = StyleClass::from_str("flex-1 items-center justify-center");
+        let r = s.parse().unwrap();
+        assert!(r.flex_grow);
+        assert!(r.items_center);
+        assert!(r.justify_center);
     }
 
     #[test]

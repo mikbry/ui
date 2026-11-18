@@ -1052,6 +1052,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-layout"
+version = "0.10.0"
+dependencies = [
+ "mkui-runtime",
+ "mkui-text",
+ "serde_json",
+]
+
+[[package]]
 name = "mkui-py"
 version = "0.10.0"
 dependencies = [
@@ -1117,6 +1126,7 @@ version = "0.10.0"
 dependencies = [
  "bytemuck",
  "mkui-core",
+ "mkui-layout",
  "mkui-runtime",
  "mkui-text",
  "mkui-vector2d",

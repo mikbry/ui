@@ -69,6 +69,13 @@ and the records below.
   is done only when `mkui-core` has it and all three back ends render it.
   Host-shaped work splits three ways: mkui, a second-class `mkui-hud`
   crate, or the host itself.
+- [ADR 0014 — `mkui-layout`: a backend-neutral flex layout engine over `AppTree`](0014-mkui-layout-backend-neutral-flex-engine.md)
+  — A new crate, written from scratch (no external layout crate), consumes
+  `AppTree` + `ResolvedStyle` directly and measures leaves through a
+  caller-supplied callback instead of depending on `mkui-text`. Turns the
+  Sprint 5 wgpu-local layout seam into the permanent, backend-neutral
+  substrate; wiring `mkui-wgpu`'s walker to actually consume it is tracked
+  separately (issue #287).
 
 ## ADR format conventions
 

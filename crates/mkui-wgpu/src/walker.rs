@@ -25,15 +25,34 @@
 //! tests, future tooling) consume the result without threading mut
 //! refs through their event-loop code.
 //!
-//! ## Layout model
+//! ## Layout model — transitional (#63, #287)
 //!
 //! v0.6.0 implements a deliberately small layout: top-down vertical
 //! flow with class-driven padding + gap + text/button sizing. This is
 //! enough to render `examples/showcase-common::create_showcase_ui`
-//! recognisably on wgpu. Full flex / grid layout is deferred (Sprint
-//! 7+); a future `mkui-layout` shared module is the reserved seam
-//! (ADR 0006 §"Out of scope"). The eager-rebuild model lets a richer
-//! layout drop in without re-architecting the walker.
+//! recognisably on wgpu, **but it is the Sprint 5 bridge move, not the
+//! permanent architecture** (ADR 0006 §"Out of scope").
+//!
+//! The reserved seam this comment used to call "a future `mkui-layout`
+//! shared module" now exists: `mkui-layout` (issue #63) is a real,
+//! from-scratch flex engine (row/column, wrap, grow/shrink, justify/align,
+//! gap, min/max) over `mkui_runtime::AppTree`, tested against the canonical
+//! showcase tree. `crates/mkui-wgpu/tests/mkui_layout_interop.rs` proves
+//! this walker's output shape is *compatible* with its rects (a dev-only
+//! test — see `mkui-layout`'s own crate docs' "Status" section), but
+//! this file still computes its own layout below; it has not been
+//! rewritten to call `mkui_layout::compute_layout` yet. That rewrite is
+//! real surgery — `WalkCache` keys subtree reuse on
+//! `cursor_y`/`content_x`/`content_width` threaded through this same
+//! render-and-measure pass, so swapping in a separate layout pass means
+//! redesigning that cache, not just the layout math — and is tracked as
+//! issue #287, not bundled into #63's blast radius.
+//!
+//! Falsifiable check: `grep -n "mkui_layout" crates/mkui-wgpu/src/walker.rs`
+//! returns nothing below this doc comment as of 2026-11-18; it should
+//! return a real call site once #287 lands. The eager-rebuild model this
+//! file uses today lets a richer layout drop in without re-architecting
+//! the walker's caller-facing API.
 //!
 //! ## Anti-patterns avoided (issue #56 + Codex round 10)
 //!

@@ -578,6 +578,27 @@ mod tests {
     }
 
     #[test]
+    fn readme_justify_center_example_survives_the_unchecked_ffi_path() {
+        // Regression for #63 acceptance criterion #7. `mkui-c` / `mkui-py`
+        // call `push_view_unchecked` (they validate nothing themselves), and
+        // `alloc_node` falls back to `ResolvedStyle::default()` on *any*
+        // parse error via `unwrap_or_default()` — silently, no panic. Before
+        // `justify-center` was a known token, the README's own
+        // `"flex-1 items-center justify-center"` example would hit exactly
+        // that path and come out with every field unset, including
+        // `flex_grow` and `items_center`, which the string's own other
+        // tokens set just fine on their own.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let style = StyleClass::from_str("flex-1 items-center justify-center");
+        let view = tree.push_view_unchecked(root, style);
+        let node = tree.get(view).unwrap();
+        assert!(node.resolved.flex_grow);
+        assert!(node.resolved.items_center);
+        assert!(node.resolved.justify_center);
+    }
+
+    #[test]
     fn push_view_rejects_unknown_class() {
         let mut tree = AppTree::new();
         let root = tree.root();

@@ -23,6 +23,29 @@ breaking changes can land on minor bumps).
   0002, not dropped. See ADR 0007 for the full rationale.
 
 ### Added
+- **New crate `mkui-layout` — a backend-neutral flex layout engine over
+  `mkui_runtime::AppTree` (#63, ADR 0014).** F1 of the mkui goal/course-
+  correction foundations (2026-11-16): turns the Sprint 5 wgpu-local
+  layout seam (`mkui-wgpu::walker`'s top-down vertical flow) into a
+  permanent, from-scratch flex algorithm — row/column direction,
+  `flex-wrap`, `flex-grow`/`flex-shrink`, `justify-content`/`align-items`,
+  `gap`, and a generic min/max clamp (`max-w-4xl`'s 896px today) — written
+  without any external layout crate, consistent with ADR 0002's "own the
+  stack" precedent. `Text`/`Button`/`Custom` leaves are measured through a
+  caller-supplied `LeafMeasure` callback rather than a hard dependency on
+  `mkui-text`, so the crate carries zero renderer/device/text-stack types.
+  Output is absolute border-box rects keyed by `NodeId`
+  (`mkui_layout::LayoutResult`). Tested against the canonical showcase
+  tree with both a deterministic fake measurer and `mkui-text`'s real
+  `BitmapTextSystem`; `mkui-wgpu` gains a dev-dependency interop test
+  (`tests/mkui_layout_interop.rs`) proving its own walker *can* consume
+  this crate's rects, though `walker.rs` itself has not been rewritten to
+  call it yet — that's tracked as issue #287. Also adds `justify-center`
+  to `mkui-runtime`'s Tier 1 class tokens (44 now, was 43): the README's
+  own quickstart example used it, and it previously hit
+  `ClassParseError` — worse, silently dropped every other token on the
+  same class string via `mkui-c`/`mkui-py`'s unchecked FFI construction
+  path.
 - **`examples/host-embed-wgpu` — always-on CPU/GPU per-frame timing + GPU
   memory instrumentation (#263, #264).** Builds the measurement harness
   #230 needs without requiring real hardware to build it: every frame now
