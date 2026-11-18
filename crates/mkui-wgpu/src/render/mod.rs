@@ -176,6 +176,14 @@ mod linear_blend_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod card_vector_gpu;
 
+/// Cross-consumer GPU acceptance test for `Shadow` (#279): renders
+/// `panel()`'s real shadow chrome on both lanes through #106's Lavapipe
+/// harness and reads back pixels, proving the vector lane's corner actually
+/// rounds — unlike the triangulated lane, whose `tessellate_shadow` stays
+/// unfixed by design (#279's scope). Same dual gate as [`card_vector_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod shadow_vector_gpu;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Re-enabled at `4` (#156, closes #95, supersedes #147).** Sprint 6 (#93)

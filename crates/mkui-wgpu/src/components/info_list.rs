@@ -67,7 +67,14 @@ mod tests {
         );
 
         assert!(scene.primitives.len() >= 4);
+        // The panel's shadow is the first primitive pushed — a
+        // `Primitive::Shadow` off `slug`, or `Primitive::VectorPath` on
+        // `slug` (#279's fill-only rounded rect, in place of the
+        // triangulated `Shadow`).
+        #[cfg(not(feature = "slug"))]
         assert!(matches!(scene.primitives[0], Primitive::Shadow(_)));
+        #[cfg(feature = "slug")]
+        assert!(matches!(scene.primitives[0], Primitive::VectorPath(_)));
         assert!(scene
             .primitives
             .iter()

@@ -667,12 +667,23 @@ mod tests {
         }
         assert_eq!(layout.panel_rect, Some(rect));
         // Panel chrome emits at least a shadow + a quad with the panel fill.
+        // The shadow is a `Primitive::Shadow` off `slug`, or a
+        // `Primitive::VectorPath` on `slug` (#279's fill-only rounded rect).
+        #[cfg(not(feature = "slug"))]
         assert!(
             scene
                 .primitives
                 .iter()
                 .any(|p| matches!(p, Primitive::Shadow(_))),
             "panel chrome should emit a shadow primitive"
+        );
+        #[cfg(feature = "slug")]
+        assert!(
+            scene
+                .primitives
+                .iter()
+                .any(|p| matches!(p, Primitive::VectorPath(_))),
+            "panel chrome should emit the shadow's vector path"
         );
     }
 
