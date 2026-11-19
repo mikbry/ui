@@ -23,6 +23,21 @@ breaking changes can land on minor bumps).
   0002, not dropped. See ADR 0007 for the full rationale.
 
 ### Added
+- **New crate `mkui-hud` — second-class, host-reusable HUD plumbing
+  scaffold (#290, ADR 0013).** Adds `crates/mkui-hud` as an empty workspace
+  member (library crate, standard package metadata, one smoke test) so
+  future HUD-host work (#230, #250, #262, and beyond) has a real crate to
+  land in instead of accumulating inside `examples/host-embed-wgpu`
+  indefinitely. `mkui-hud` is never a dependency of `mkui-core` or any
+  backend crate, and is not held to ADR 0013's three-backend "done" bar.
+  ADR 0013 gains an appendix stating the concrete boundary test (what
+  needs `mkui-wgpu`'s host-embedding mode, isn't a cross-backend primitive,
+  would work unchanged for a second host, and doesn't carry a specific
+  host's own look) plus one-line dispositions for #230 (stays in the
+  example for now), #250 (stays in `mkui-wgpu` — it extends a type that
+  crate already owns), and #262 (stays in the example — host-specific font
+  choice). No existing `examples/host-embed-wgpu` code moved; this is
+  scaffolding + boundary definition only.
 - **New crate `mkui-layout` — a backend-neutral flex layout engine over
   `mkui_runtime::AppTree` (#63, ADR 0014).** F1 of the mkui goal/course-
   correction foundations (2026-11-16): turns the Sprint 5 wgpu-local

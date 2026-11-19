@@ -77,6 +77,78 @@ crate.
   close outright (they turned out to need no bespoke mkui component at
   all once the underlying generic primitive exists).
 
+## Appendix: the `mkui-hud` boundary test (2026-11-19, #290)
+
+`crates/mkui-hud` was scaffolded (#290) as an empty workspace member before
+any code moved into it. This section states the concrete test for what
+belongs there, since "what a second, different embedding host could reuse
+unchanged" (above) is not yet sharp enough to settle real cases on sight.
+
+**The test, in order:**
+
+0. **Does it extend a type `mkui-core`/`mkui-wgpu` already owns** (a method
+   on `EmbeddedRenderer`, a new `Primitive` variant, a pass inside
+   `mkui-wgpu`'s own render pipeline)? If yes, it lands in that crate, full
+   stop — `mkui-hud` can never be a dependency of `mkui-core` or any backend
+   crate (see Consequences), so ownership alone rules it out regardless of
+   how reusable the feature sounds.
+1. **Does it need `mkui-wgpu`'s host-embedding mode (#173/#175) to mean
+   anything?** If it's a general CPU/GPU primitive with no dependency on
+   being embedded inside a host's own frame/device, it is not HUD-host
+   plumbing at all — question 2 below decides where it actually goes.
+2. **Is it a true cross-backend primitive** — something `mkui-core` could
+   contract and all three back ends (`mkui-wgpu`, `mkui-web`,
+   `mkui-console`) could eventually render, per the three-question test
+   above? If yes, it belongs in `mkui-core`/`mkui-wgpu`, not `mkui-hud`,
+   even if the only consumer today is a HUD-shaped host.
+3. **Would it work unchanged for a second, different embedding host** doing
+   its own game-style HUD on top of `mkui-wgpu`'s host-embedding mode — same
+   code, no edits, just different content/config? If yes, it belongs in
+   `mkui-hud`.
+4. **Does it carry a specific host's own look or meaning** (a game's
+   specific counter, a dialogue bubble's skin, a particular indicator's
+   styling/thresholds)? If yes, it belongs in that host's own repository —
+   not `mkui-core`, not `mkui-hud`, not this repository at all.
+
+`mkui-hud` is the answer only when (0) doesn't apply, (1) is yes, (2) is no,
+and (3) is yes; (4) is a standing exclusion that overrides all of the above.
+
+**First candidate dispositions**, settling the crate target each should
+build against without implementing their scope (none move today):
+
+- **#230** (CPU/GPU/memory measurement harness) — **stays in
+  `examples/host-embed-wgpu`, for now.** #263 already shipped the
+  generic capture primitives this needs — `EmbeddedRenderer::render_into_timed`,
+  `last_frame_ui_vertex_bytes`, `last_frame_slug_bytes` — and per test
+  question 0 those land in `mkui-wgpu` itself
+  (`crates/mkui-wgpu/src/render/embedded.rs`), not `mkui-hud`, since they
+  extend a type `mkui-wgpu` already owns. What #230 still needs beyond
+  that — the real-hardware runs, the budget check against *this* scene's
+  "full HUD at 1080p" numbers, and profiling `Renderer::render`'s
+  re-tessellation cost — is example-scene-specific today: the
+  `frame_stats` formatting and field set live inline in
+  `examples/host-embed-wgpu/src/main.rs`, not as a standalone module. This
+  narrows the Decision section's and Consequences' "profiling harness" bullets
+  above to: *if* that formatting/aggregation is later factored out of
+  `main.rs` into something scene-independent, *that* module is the
+  `mkui-hud` candidate — the capture primitives it would wrap already live
+  in `mkui-wgpu`, and the real-hardware measurement runs themselves stay an
+  example/CI concern regardless.
+- **#250** (host-embedded blur support + large-radius perf tier) — **stays
+  in `mkui-core`/`mkui-wgpu`.** `BackdropBlur` and `EmbeddedRenderer` are
+  both `mkui-wgpu`'s own types (`crates/mkui-wgpu/src/render/backdrop.rs`,
+  `embedded.rs`); wiring `BackdropBlur` into `EmbeddedRenderer::render_into`
+  and adding a downsample/upsample perf tier both extend `mkui-wgpu`'s
+  existing render pipeline. Test question 0 resolves this one before
+  question 3 (which would otherwise point toward `mkui-hud`, since the
+  *behavior* is reusable across embedding hosts) is even reached —
+  `mkui-hud` cannot depend on `mkui-wgpu`, so a change to `mkui-wgpu`'s own
+  type cannot live there no matter how reusable it sounds.
+- **#262** (HUD typeface swap) — **stays in `examples/host-embed-wgpu`.**
+  A specific font choice for that example's specific HUD labels carries that
+  host's own look (test question 4); a different host embedding mkui would
+  pick its own typeface, not inherit this one.
+
 ## Alternatives considered
 
 - **Leave #173 as the roadmap and let host-shaped work keep going under

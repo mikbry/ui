@@ -1052,6 +1052,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "mkui-hud"
+version = "0.10.0"
+
+[[package]]
 name = "mkui-layout"
 version = "0.10.0"
 dependencies = [
