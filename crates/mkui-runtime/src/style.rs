@@ -18,7 +18,7 @@
 //!   *any* non-negative integer suffix, not just the handful of literals the
 //!   showcase happened to use. `justify-*` is valid for any value in a
 //!   defined set (`start`/`center`/`between`/`end`/`around`/`evenly`), not
-//!   just the two the showcase used — see [`JUSTIFY_VALUES`].
+//!   just the two the showcase used.
 //! - **State variants** — `hover:`/`focus:`/`disabled:`/`active:` prefix a
 //!   normal color utility and resolve into a per-state override (cva-style
 //!   composition) rather than being tolerated as an inert no-op. See
