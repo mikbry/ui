@@ -115,6 +115,121 @@ fn update_frame_allocates_nothing_on_an_unchanged_frame() {
     );
 }
 
+/// #268's new `AppTree` operations are exercised directly against a bare
+/// `AppTree` (no `WgpuApp`/`update_frame` involved) — the counting
+/// allocator is process-wide, so it still sees everything `AppTree`
+/// itself does; these tests just skip the unrelated scene/layout
+/// machinery `build_app`'s warm-up pays for.
+fn assert_no_op_allocates_nothing(label: &str, mut call: impl FnMut() -> bool) {
+    let before = alloc_count();
+    for _ in 0..1_000 {
+        assert!(!call(), "{label}: must not report a 'change'");
+    }
+    let after = alloc_count();
+    assert_eq!(
+        before,
+        after,
+        "{label}: 1000 no-op calls allocated {} time(s); the no-op path must be allocation-free",
+        after - before
+    );
+}
+
+#[test]
+fn reorder_children_to_the_same_order_allocates_nothing() {
+    // #268 acceptance criterion 4: a `reorder_children` call that turns
+    // out to be a no-op (the order already matches) must take the same
+    // zero-allocation early-return path as `set_text`'s unchanged-value
+    // case above.
+    let mut tree = mkui_runtime::AppTree::new();
+    let root = tree.root();
+    tree.push_view(root, "").unwrap();
+    tree.push_view(root, "").unwrap();
+    let order = tree.get(root).unwrap().children.clone();
+
+    assert_no_op_allocates_nothing("reorder_children", || tree.reorder_children(root, &order));
+}
+
+#[test]
+fn set_class_with_unchanged_value_allocates_nothing() {
+    // #268 acceptance criterion 4: same contract as `set_text` — writing
+    // the class a node already has must not allocate.
+    let mut tree = mkui_runtime::AppTree::new();
+    let view = tree.push_view(tree.root(), "flex items-center").unwrap();
+
+    assert_no_op_allocates_nothing("set_class", || {
+        tree.set_class(view, "flex items-center").unwrap()
+    });
+}
+
+#[test]
+fn set_text_props_with_unchanged_values_allocates_nothing() {
+    let mut tree = mkui_runtime::AppTree::new();
+    let text = tree
+        .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+        .unwrap();
+
+    assert_no_op_allocates_nothing("set_text_props", || {
+        tree.set_text_props(text, "hp: 100", TextVariant::Body)
+    });
+}
+
+#[test]
+fn set_button_props_with_unchanged_values_allocates_nothing() {
+    let mut tree = mkui_runtime::AppTree::new();
+    let button = tree
+        .push_button(
+            tree.root(),
+            "Pause",
+            mkui_runtime::ButtonVariant::Primary,
+            "",
+            None,
+        )
+        .unwrap();
+
+    assert_no_op_allocates_nothing("set_button_props", || {
+        tree.set_button_props(button, "Pause", mkui_runtime::ButtonVariant::Primary, None)
+    });
+}
+
+#[test]
+fn set_custom_props_with_unchanged_value_allocates_nothing() {
+    let mut tree = mkui_runtime::AppTree::new();
+    let props = serde_json::json!({"count": 1});
+    let custom = tree
+        .push_custom(tree.root(), "badge", props.clone(), "")
+        .unwrap();
+
+    assert_no_op_allocates_nothing("set_custom_props", || tree.set_custom_props(custom, &props));
+}
+
+#[test]
+fn diff_keyed_on_an_unchanged_keyed_list_allocates_nothing() {
+    // #268 acceptance criterion 4, for the diff algorithm itself: a
+    // caller re-diffing the same keyed list every frame (nothing
+    // inserted/removed/moved/changed) must not pay for the general
+    // path's `HashMap`/`HashSet`.
+    let old = [
+        ("a", mkui_runtime::NodeId::from_raw(0, 0)),
+        ("b", mkui_runtime::NodeId::from_raw(1, 0)),
+        ("c", mkui_runtime::NodeId::from_raw(2, 0)),
+    ];
+    let new = ["a", "b", "c"];
+
+    let before = alloc_count();
+    for _ in 0..1_000 {
+        let ops = mkui_runtime::diff_keyed(&old, &new, |_, _| false);
+        assert!(ops.is_empty(), "nothing changed; diff must produce no ops");
+    }
+    let after = alloc_count();
+
+    assert_eq!(
+        before,
+        after,
+        "1000 no-op diffs allocated {} time(s); the unchanged-list path must be allocation-free",
+        after - before
+    );
+}
+
 #[test]
 fn update_frame_allocates_when_the_tree_actually_changes() {
     // Positive control: without this, a broken counter (or a dead-code

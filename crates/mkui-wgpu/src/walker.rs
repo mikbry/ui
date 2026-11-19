@@ -2303,4 +2303,141 @@ mod tests {
             "a subtree containing a Custom node must always re-walk: {stats:?}"
         );
     }
+
+    /// #268: `AppTree::reorder_children` only touches the parent, not the
+    /// moved children themselves, so a naive cache keyed on
+    /// `subtree_revision` alone could splice a moved child's *old*
+    /// cached primitives back in at its *new* position. The redesigned
+    /// [`CacheKey`] also carries the node's own computed `rect`, which
+    /// changes when a reorder shifts a node's position — guarding exactly
+    /// this case. Prove it: a cached walk after a reorder must match a
+    /// fresh, uncached walk of the same (reordered) tree exactly.
+    #[test]
+    fn cached_walk_after_a_reorder_matches_a_fresh_walk() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree
+            .push_text(root, "row a", TextVariant::Body, "")
+            .unwrap();
+        let b = tree
+            .push_text(root, "row b", TextVariant::Body, "")
+            .unwrap();
+        let c = tree
+            .push_text(root, "row c", TextVariant::Body, "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+
+        assert!(tree.reorder_children(root, &[c, a, b]));
+
+        let (incremental_out, _stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+
+        assert_eq!(
+            incremental_out, fresh,
+            "a cached walk after reordering children must exactly match an uncached walk — \
+             never serve a moved child's primitives at its old position"
+        );
+    }
+
+    /// Complements the correctness proof above with an efficiency proof:
+    /// a reorder that only actually moves *some* children must still
+    /// serve the untouched ones from the cache. All three rows above
+    /// change rect (full shuffle), so that test alone can't distinguish
+    /// "the cache is doing its job" from "the cache safety net just
+    /// happens to miss on everything, correctly but uselessly."
+    #[test]
+    fn cached_walk_after_a_partial_reorder_reuses_the_rows_that_did_not_move() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree
+            .push_text(root, "row a", TextVariant::Body, "")
+            .unwrap();
+        let b = tree
+            .push_text(root, "row b", TextVariant::Body, "")
+            .unwrap();
+        let c = tree
+            .push_text(root, "row c", TextVariant::Body, "")
+            .unwrap();
+        let d = tree
+            .push_text(root, "row d", TextVariant::Body, "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+
+        // Only swap the last two rows — "row a" and "row b" keep their
+        // exact previous rect.
+        assert!(tree.reorder_children(root, &[a, b, d, c]));
+
+        let (incremental_out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+
+        assert_eq!(
+            stats.reused, 2,
+            "the two rows that did not move must be served from the cache: {stats:?}"
+        );
+        assert_eq!(
+            stats.walked, 2,
+            "only the two swapped rows should re-walk: {stats:?}"
+        );
+
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+        assert_eq!(incremental_out, fresh);
+    }
+
+    /// Same hazard as above, but for [`AppTree::set_class`]: changing a
+    /// sibling's class (and therefore its size) must not leave a later
+    /// sibling's cached-but-now-wrong position in the output.
+    #[test]
+    fn cached_walk_after_set_class_resizes_a_sibling_matches_a_fresh_walk() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let resized = tree.push_view(root, "").unwrap();
+        tree.push_text(resized, "hi", TextVariant::Body, "")
+            .unwrap();
+        tree.push_text(root, "after", TextVariant::Body, "")
+            .unwrap();
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+
+        let (first_out, _first_stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+        let first_y = y_of(&text_primitives(&first_out.scene), "after");
+
+        assert!(tree.set_class(resized, "p-4").unwrap());
+
+        let (incremental_out, _stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+
+        assert_eq!(
+            incremental_out, fresh,
+            "a cached walk after a sibling's class/size change must exactly match an \
+             uncached walk"
+        );
+        // Positive control: `p-4` must have actually grown `resized`'s
+        // box and shifted "after" down — otherwise the equality assertion
+        // above would trivially pass even if `set_class` silently did
+        // nothing at all.
+        let second_y = y_of(&text_primitives(&incremental_out.scene), "after");
+        assert!(
+            second_y > first_y,
+            "set_class(\"p-4\") must grow the sibling's box and push \"after\" down: \
+             before={first_y}, after={second_y}"
+        );
+    }
 }

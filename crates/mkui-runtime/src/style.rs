@@ -68,6 +68,17 @@ impl StyleClass {
         self.raw.trim().is_empty()
     }
 
+    /// Overwrite the raw class string in place, reusing the existing
+    /// buffer's capacity (`clear` + `push_str`) instead of allocating a
+    /// fresh `String` — mirrors `AppTree::set_text`'s no-alloc-on-write
+    /// discipline. Used by [`crate::tree::AppTree::set_class`], which
+    /// compares against [`Self::raw`] *before* calling this, so this
+    /// method itself never needs to check for a no-op.
+    pub(crate) fn set_raw(&mut self, s: &str) {
+        self.raw.clear();
+        self.raw.push_str(s);
+    }
+
     /// Parse every whitespace-separated token into a [`ResolvedStyle`].
     ///
     /// This never fails (#269): a token that matches nothing recognised is
