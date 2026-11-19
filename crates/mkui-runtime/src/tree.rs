@@ -599,12 +599,18 @@ mod tests {
     }
 
     #[test]
-    fn push_view_rejects_unknown_class() {
+    fn push_view_accepts_unknown_class_and_drops_it() {
+        // #269: an unrecognized class token no longer fails `push_view` — it
+        // is dropped (and counted) while the node still gets created.
         let mut tree = AppTree::new();
         let root = tree.root();
-        let err = tree.push_view(root, "not-a-known-token").unwrap_err();
-        let ClassParseError::UnknownToken(t) = err;
-        assert_eq!(t, "not-a-known-token");
+        let view = tree
+            .push_view(root, "flex not-a-known-token items-center")
+            .expect("unknown token must not fail construction");
+        let node = tree.get(view).unwrap();
+        assert!(node.resolved.flex);
+        assert!(node.resolved.items_center);
+        assert_eq!(node.resolved.unknown_count, 1);
     }
 
     #[test]

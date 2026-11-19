@@ -7,22 +7,31 @@
 //! every binding sees the same `ResolvedStyle`, and parity tests can compare
 //! the resolved structure across Rust / C / Python construction.
 //!
-//! ## Tiered support
+//! ## From an allowlist to scales (#269)
 //!
-//! Three tiers, all surfaced through [`StyleClass::parse`]:
+//! The parser used to accept exactly 39 (then 44) literal tokens and reject
+//! everything else — including the README's own `justify-center` example,
+//! and any typo, with a hard panic at `Mkui::child`. #269 replaces that with:
 //!
-//! - **Tier 1 (T1)** — fully supported. 39 tokens covering the showcase set.
-//!   The runtime emits a typed `ResolvedStyle` field for each.
-//! - **Tier 2 (T2)** — documented no-op. `hover:*`, `sm:*`, `transition-colors`
-//!   parse cleanly but contribute nothing to `ResolvedStyle` — the renderer
-//!   may still forward the raw class string (web does), but parity tests
-//!   compare structure, not raw strings, so a T2 token never breaks parity.
-//! - **Tier 3 (T3)** — parse error. Anything else is rejected loudly so we
-//!   catch typos and silent divergence between bindings.
+//! - **Scale-based matching** — a numeric utility (`gap-*`, `p-*`, `px-*`,
+//!   `py-*`, `mb-*`, `mt-*`, `h-*`, `space-x-*`, `space-y-*`) is valid for
+//!   *any* non-negative integer suffix, not just the handful of literals the
+//!   showcase happened to use. `justify-*` is valid for any value in a
+//!   defined set (`start`/`center`/`between`/`end`/`around`/`evenly`), not
+//!   just the two the showcase used — see [`JUSTIFY_VALUES`].
+//! - **State variants** — `hover:`/`focus:`/`disabled:`/`active:` prefix a
+//!   normal color utility and resolve into a per-state override (cva-style
+//!   composition) rather than being tolerated as an inert no-op. See
+//!   [`StateStyle`] and [`ResolvedStyle::hover_colors`].
+//! - **Non-panicking fallback** — a token that still matches nothing is
+//!   dropped (logged, and counted in [`ResolvedStyle::unknown_count`])
+//!   instead of failing the parse. Every *other* token on the same class
+//!   string still resolves normally — `StyleClass::parse` no longer
+//!   fails-fast on the first typo.
 //!
-//! The 39 T1 tokens were extracted from `examples/showcase-common/src/lib.rs`
-//! — the cross-binding showcase. Adding a token to the showcase without
-//! adding it here will surface as a `ClassParseError::UnknownToken`.
+//! `sm:*` (a responsive breakpoint, not a component state) and
+//! `transition-colors` remain documented no-ops: they parse cleanly and
+//! contribute nothing to `ResolvedStyle`, same as before #269.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -59,14 +68,19 @@ impl StyleClass {
         self.raw.trim().is_empty()
     }
 
-    /// Parse every whitespace-separated token. Returns the first
-    /// `ClassParseError` encountered — parsing is fail-fast so typos surface
-    /// loudly. Unknown tokens are Tier 3 (parse error); Tier 2 tokens parse
-    /// cleanly but contribute nothing to the resolved structure.
+    /// Parse every whitespace-separated token into a [`ResolvedStyle`].
+    ///
+    /// This never fails (#269): a token that matches nothing recognised is
+    /// dropped — logged, and counted in [`ResolvedStyle::unknown_count`] —
+    /// rather than aborting the parse, so one typo on a class string can no
+    /// longer swallow every other utility on the same element. The `Result`
+    /// return type is kept for source compatibility with callers that
+    /// propagate `ClassParseError` from elsewhere (e.g. an unregistered
+    /// component type).
     pub fn parse(&self) -> Result<ResolvedStyle, ClassParseError> {
         let mut resolved = ResolvedStyle::default();
         for token in self.raw.split_whitespace() {
-            apply_token(token, &mut resolved)?;
+            apply_token(token, &mut resolved);
         }
         Ok(resolved)
     }
@@ -76,6 +90,18 @@ impl fmt::Display for StyleClass {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.raw)
     }
+}
+
+/// Background/foreground delta applied by a state variant (`hover:`,
+/// `focus:`, `disabled:`, `active:`) on top of a node's base colors.
+///
+/// Kept deliberately small — the showcase's state variants only ever swap
+/// `bg-*`/`text-*` roles — rather than a full nested `ResolvedStyle`, so a
+/// state override can't recursively carry its own state overrides.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct StateStyle {
+    pub background: Option<ColorRole>,
+    pub foreground: Option<ColorRole>,
 }
 
 /// Parsed structural view of a class string.
@@ -111,7 +137,9 @@ pub struct ResolvedStyle {
     pub mt_auto: bool,
     /// `hidden`. Element is removed from layout.
     pub hidden: bool,
-    /// gap-* / space-x-* / space-y-* in tailwind half-rem units.
+    /// gap-* / space-x-* / space-y-* in tailwind half-rem units. Any
+    /// non-negative integer scale value is accepted (#269), not just the
+    /// literals the showcase happens to use.
     pub gap: Option<u32>,
     pub space_x: Option<u32>,
     pub space_y: Option<u32>,
@@ -145,9 +173,38 @@ pub struct ResolvedStyle {
     /// values, not raw hex.
     pub background: Option<ColorRole>,
     pub foreground: Option<ColorRole>,
-    /// Raw count of Tier 2 (no-op) tokens encountered. Lets parity tests
-    /// assert that T2 was tolerated, not silently dropped.
+    /// Raw count of Tier 2 (no-op) tokens encountered — `sm:*` and
+    /// `transition-colors`. Lets parity tests assert that T2 was tolerated,
+    /// not silently dropped.
     pub tier2_count: u32,
+    /// Count of tokens that matched neither a literal, a scale pattern, nor
+    /// a state-variant color — dropped rather than panicking (#269). A
+    /// backend or test can check this to notice a typo without parsing
+    /// stderr.
+    pub unknown_count: u32,
+    /// `hover:*` state-variant color override. `None` unless the class
+    /// string carried at least one recognised `hover:` token.
+    pub hover: Option<StateStyle>,
+    /// `focus:*` state-variant color override.
+    pub focus: Option<StateStyle>,
+    /// `disabled:*` state-variant color override.
+    pub disabled: Option<StateStyle>,
+    /// `active:*` state-variant color override.
+    pub active: Option<StateStyle>,
+}
+
+impl ResolvedStyle {
+    /// Background/foreground override declared by a `hover:` state variant,
+    /// if the class string carried one. `None` when no `hover:` token was
+    /// present.
+    ///
+    /// A backend with no pointer device (e.g. `mkui-console`, a terminal)
+    /// may treat its own equivalent interaction state — the current
+    /// keyboard selection — as "hovered" and apply this override only while
+    /// that state holds, rather than needing real mouse-hover tracking.
+    pub fn hover_colors(&self) -> Option<(Option<ColorRole>, Option<ColorRole>)> {
+        self.hover.as_ref().map(|h| (h.background, h.foreground))
+    }
 }
 
 /// Subset of Tailwind text-size scale used in the showcase.
@@ -172,10 +229,17 @@ pub enum ColorRole {
     MutedForeground,
 }
 
-/// Parse failure surfaced by [`StyleClass::parse`].
+/// Parse failure surfaced by [`StyleClass::parse`]'s `Result` signature.
+///
+/// Since #269, an unrecognised *class* token no longer produces this error —
+/// it is dropped instead (see [`ResolvedStyle::unknown_count`]). The one
+/// remaining source is [`crate`]-external: `mkui-core`'s `LoweringRegistry`
+/// reuses this type for "no handler registered for this component type",
+/// an unrelated, genuinely fatal construction error.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ClassParseError {
-    /// Token is not in T1, T2, or any recognised pattern.
+    /// No `LowerToTree` handler is registered for a component type. Carries
+    /// a debug-formatted description of the offending type.
     UnknownToken(String),
 }
 
@@ -184,10 +248,8 @@ impl fmt::Display for ClassParseError {
         match self {
             Self::UnknownToken(t) => write!(
                 f,
-                "unknown class token `{t}` — not in T1 (39 known utility classes), \
-                 not in T2 (hover:*/sm:*/transition-colors no-ops), and not a recognised \
-                 pattern. If this is intentional, add it to mkui-runtime's class parser \
-                 (Tier 1 if it has runtime semantics, Tier 2 if it's a documented no-op).",
+                "no LowerToTree handler registered for component type {t} — register it via \
+                 `Mkui::register::<T>()` before calling `.child()`",
             ),
         }
     }
@@ -195,42 +257,54 @@ impl fmt::Display for ClassParseError {
 
 impl std::error::Error for ClassParseError {}
 
-fn apply_token(token: &str, out: &mut ResolvedStyle) -> Result<(), ClassParseError> {
-    // Tier 2 — documented no-op tokens. Recognised so the parser does not
-    // reject them; renderers (notably web) may still emit them as raw CSS
-    // classes via `StyleClass::raw`.
-    if token.starts_with("hover:") || token.starts_with("sm:") || token == "transition-colors" {
-        out.tier2_count += 1;
-        return Ok(());
+/// Defined value set for `justify-*` (#269 acceptance criterion: a scale
+/// example). Only `center`/`between` currently resolve to a `ResolvedStyle`
+/// field — `mkui-layout`'s flex engine implements start/center/between —
+/// but every value here is accepted as a *valid* utility rather than an
+/// unknown token, which is the generalization the issue asks for.
+const JUSTIFY_VALUES: &[&str] = &["start", "center", "between", "end", "around", "evenly"];
+
+fn apply_token(token: &str, out: &mut ResolvedStyle) {
+    // State variants — cva-style composition (#269). The suffix after the
+    // prefix is itself a normal color utility; it resolves into a per-state
+    // override rather than the base `ResolvedStyle`.
+    if let Some(rest) = token.strip_prefix("hover:") {
+        apply_state_variant(token, rest, &mut out.hover, &mut out.unknown_count);
+        return;
+    }
+    if let Some(rest) = token.strip_prefix("focus:") {
+        apply_state_variant(token, rest, &mut out.focus, &mut out.unknown_count);
+        return;
+    }
+    if let Some(rest) = token.strip_prefix("disabled:") {
+        apply_state_variant(token, rest, &mut out.disabled, &mut out.unknown_count);
+        return;
+    }
+    if let Some(rest) = token.strip_prefix("active:") {
+        apply_state_variant(token, rest, &mut out.active, &mut out.unknown_count);
+        return;
     }
 
-    // Tier 1 — 39 tokens. Match in exact source order from the issue body's
-    // acceptance criterion #5 so any regression is grep-locatable.
+    // Tier 2 — documented no-op tokens. Recognised so the parser does not
+    // drop them as unknown; renderers (notably web) may still emit them as
+    // raw CSS classes via `StyleClass::raw`. `sm:*` is a responsive
+    // breakpoint, not a component state, so it stays a plain no-op rather
+    // than growing a variant slot like `hover:`/`focus:`/etc above.
+    if token.starts_with("sm:") || token == "transition-colors" {
+        out.tier2_count += 1;
+        return;
+    }
+
     match token {
         "flex" => out.flex = true,
         "flex-1" => out.flex_grow = true,
         "flex-col" => out.flex_column = true,
         "flex-wrap" => out.flex_wrap = true,
         "items-center" => out.items_center = true,
-        "justify-between" => out.justify_between = true,
-        "justify-center" => out.justify_center = true,
         "container" => out.container = true,
         "mx-auto" => out.mx_auto = true,
         "mt-auto" => out.mt_auto = true,
         "hidden" => out.hidden = true,
-        "gap-4" => out.gap = Some(4),
-        "space-x-4" => out.space_x = Some(4),
-        "space-y-8" => out.space_y = Some(8),
-        "mb-4" => out.margin_bottom = Some(4),
-        "mb-6" => out.margin_bottom = Some(6),
-        "mb-12" => out.margin_bottom = Some(12),
-        "mt-2" => out.margin_top = Some(2),
-        "p-0" => out.padding = Some(0),
-        "p-6" => out.padding = Some(6),
-        "px-4" => out.padding_x = Some(4),
-        "py-6" => out.padding_y = Some(6),
-        "py-8" => out.padding_y = Some(8),
-        "h-16" => out.height = Some(16),
         "h-auto" => out.height_auto = true,
         "max-w-4xl" => out.max_w_4xl = true,
         "text-sm" => out.text_size = Some(TextSize::Sm),
@@ -251,10 +325,128 @@ fn apply_token(token: &str, out: &mut ResolvedStyle) -> Result<(), ClassParseErr
         "text-foreground" => out.foreground = Some(ColorRole::Foreground),
         "text-muted-foreground" => out.foreground = Some(ColorRole::MutedForeground),
         "shadow-sm" => out.shadow_sm = true,
-        // Tier 3 — unknown.
-        other => return Err(ClassParseError::UnknownToken(other.to_string())),
+        other => {
+            if !try_apply_scale(other, out) {
+                out.unknown_count += 1;
+                eprintln!(
+                    "mkui-runtime: unrecognized class token `{other}` — dropped; the \
+                     element's other classes still apply (#269)"
+                );
+            }
+        }
     }
-    Ok(())
+}
+
+/// Resolve the suffix of a `hover:`/`focus:`/`disabled:`/`active:` token
+/// into the given state slot. Unrecognised suffixes fall back to the same
+/// non-panicking drop-and-log policy as a top-level unknown token.
+fn apply_state_variant(
+    full_token: &str,
+    rest: &str,
+    slot: &mut Option<StateStyle>,
+    unknown_count: &mut u32,
+) {
+    let delta = match rest {
+        "bg-card" => StateStyle {
+            background: Some(ColorRole::Card),
+            foreground: None,
+        },
+        "text-card-foreground" => StateStyle {
+            background: None,
+            foreground: Some(ColorRole::CardForeground),
+        },
+        "text-foreground" => StateStyle {
+            background: None,
+            foreground: Some(ColorRole::Foreground),
+        },
+        "text-muted-foreground" => StateStyle {
+            background: None,
+            foreground: Some(ColorRole::MutedForeground),
+        },
+        _ => {
+            *unknown_count += 1;
+            eprintln!(
+                "mkui-runtime: unrecognized class token `{full_token}` — dropped; the \
+                 element's other classes still apply (#269)"
+            );
+            return;
+        }
+    };
+    let state = slot.get_or_insert_with(StateStyle::default);
+    if delta.background.is_some() {
+        state.background = delta.background;
+    }
+    if delta.foreground.is_some() {
+        state.foreground = delta.foreground;
+    }
+}
+
+/// Scale-based matching (#269): a token is valid if it matches a known
+/// *pattern* rather than an exact string in a fixed list. Returns `false`
+/// when nothing matches, so the caller can fall back to the unknown-token
+/// policy.
+fn try_apply_scale(token: &str, out: &mut ResolvedStyle) -> bool {
+    if let Some(value) = token.strip_prefix("justify-") {
+        return if JUSTIFY_VALUES.contains(&value) {
+            match value {
+                "center" => out.justify_center = true,
+                "between" => out.justify_between = true,
+                // start/end/around/evenly: a recognised scale value with no
+                // resolved-field effect yet (mkui-layout's flex engine only
+                // implements start/center/between, and start is already the
+                // default) — valid, not unknown.
+                _ => {}
+            }
+            true
+        } else {
+            false
+        };
+    }
+
+    if let Some(n) = scale_suffix(token, "gap-") {
+        out.gap = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "space-x-") {
+        out.space_x = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "space-y-") {
+        out.space_y = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "mb-") {
+        out.margin_bottom = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "mt-") {
+        out.margin_top = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "px-") {
+        out.padding_x = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "py-") {
+        out.padding_y = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "p-") {
+        out.padding = Some(n);
+        return true;
+    }
+    if let Some(n) = scale_suffix(token, "h-") {
+        out.height = Some(n);
+        return true;
+    }
+
+    false
+}
+
+/// `token.strip_prefix(prefix)` followed by a non-negative-integer parse —
+/// the common shape behind every numeric scale (`gap-*`, `p-*`, `h-*`, …).
+fn scale_suffix(token: &str, prefix: &str) -> Option<u32> {
+    token.strip_prefix(prefix)?.parse::<u32>().ok()
 }
 
 #[cfg(test)]
@@ -312,7 +504,10 @@ mod tests {
     fn t1_token_count_matches_acceptance_criterion() {
         // Acceptance criterion #5 names 39 Tier 1 tokens. Drifting from that
         // count means either the showcase grew a new token (add it to T1)
-        // or we lost coverage (regression).
+        // or we lost coverage (regression). #269 generalized *how* several
+        // of these resolve (scale patterns instead of literal match arms),
+        // but every one of them must still parse and still resolve — this
+        // list, and the behavioral guarantee below, are unchanged.
         assert_eq!(
             T1_TOKENS.len(),
             44,
@@ -334,6 +529,10 @@ mod tests {
                 resolved,
                 ResolvedStyle::default(),
                 "T1 token {token:?} parsed as default — it must set at least one field",
+            );
+            assert_eq!(
+                resolved.unknown_count, 0,
+                "T1 token {token:?} must not be counted as unknown",
             );
         }
     }
@@ -378,21 +577,54 @@ mod tests {
     }
 
     #[test]
+    fn gap_and_padding_scales_accept_any_integer_not_just_the_showcase_literals() {
+        // #269: `gap-4` isn't special-cased anymore — any `gap-{n}` is.
+        let s = StyleClass::from_str("gap-7 p-13 mb-100 h-42 space-x-9 space-y-3");
+        let r = s.parse().unwrap();
+        assert_eq!(r.gap, Some(7));
+        assert_eq!(r.padding, Some(13));
+        assert_eq!(r.margin_bottom, Some(100));
+        assert_eq!(r.height, Some(42));
+        assert_eq!(r.space_x, Some(9));
+        assert_eq!(r.space_y, Some(3));
+        assert_eq!(r.unknown_count, 0);
+    }
+
+    #[test]
+    fn justify_value_set_accepts_values_beyond_center_and_between() {
+        // #269's scale example: `justify-*` is valid for any value in a
+        // defined set, not just the two literals the showcase used.
+        // start/end/around/evenly are accepted (not unknown) even though
+        // `mkui-layout` doesn't resolve them to a distinct field yet.
+        for value in ["start", "end", "around", "evenly"] {
+            let s = StyleClass::from_str(format!("justify-{value}"));
+            let r = s.parse().unwrap();
+            assert_eq!(
+                r.unknown_count, 0,
+                "justify-{value} must be a recognised scale value, not unknown",
+            );
+        }
+
+        let r = StyleClass::from_str("justify-nonsense").parse().unwrap();
+        assert_eq!(
+            r.unknown_count, 1,
+            "a value outside the defined set must still be dropped as unknown",
+        );
+    }
+
+    #[test]
     fn t2_tokens_parse_but_do_not_change_resolved() {
         // Tier 2 — documented no-ops. Must parse cleanly and bump the
         // tier2_count counter so parity tests can assert tolerance.
-        let cases = [
-            "hover:bg-accent",
-            "hover:text-accent-foreground",
-            "hover:text-foreground",
-            "sm:block",
-            "sm:flex-row",
-            "transition-colors",
-        ];
+        // `hover:*` moved off this list in #269 — it now resolves
+        // structurally (see `hover_state_variant_resolves_to_a_color_override`
+        // below) rather than being tolerated as inert.
+        let cases = ["sm:block", "sm:flex-row", "transition-colors"];
         for token in cases {
             let style = StyleClass::from_str(token);
             let resolved = style.parse().expect("T2 token must parse");
             assert_eq!(resolved.tier2_count, 1, "T2 token {token:?} not counted");
+            assert_eq!(resolved.unknown_count, 0);
             // After zeroing the counter, the rest of ResolvedStyle must be
             // default — T2 contributes nothing to resolved structure.
             let mut zeroed = resolved.clone();
@@ -406,28 +638,85 @@ mod tests {
     }
 
     #[test]
-    fn t3_token_returns_parse_error_with_helpful_message() {
-        let style = StyleClass::from_str("definitely-not-a-known-utility");
-        let err = style.parse().expect_err("T3 token must be rejected");
-        let ClassParseError::UnknownToken(token) = &err;
-        assert_eq!(token, "definitely-not-a-known-utility");
-        let rendered = err.to_string();
-        assert!(
-            rendered.contains("definitely-not-a-known-utility")
-                && rendered.contains("Tier 1")
-                && rendered.contains("Tier 2"),
-            "error message must name the bad token and the tier system: {rendered}"
+    fn hover_state_variant_resolves_to_a_color_override() {
+        // #269 acceptance criterion: at least one state variant is parsed
+        // into structure a backend can apply conditionally (see
+        // `mkui-console`'s selected-row rendering).
+        let s = StyleClass::from_str("flex hover:bg-card hover:text-foreground");
+        let r = s.parse().unwrap();
+        assert!(r.flex, "a hover: token must not block its sibling tokens");
+        assert_eq!(
+            r.hover_colors(),
+            Some((Some(ColorRole::Card), Some(ColorRole::Foreground))),
         );
+        // The base (non-hover) colors are untouched by the state variant.
+        assert_eq!(r.background, None);
+        assert_eq!(r.foreground, None);
+        assert_eq!(r.unknown_count, 0);
     }
 
     #[test]
-    fn parsing_stops_at_first_unknown_token() {
-        // Order-independence: an unknown token must fail even when T1 tokens
-        // surround it.
-        let style = StyleClass::from_str("flex unknown-token items-center");
-        let err = style.parse().expect_err("must fail");
-        let ClassParseError::UnknownToken(token) = err;
-        assert_eq!(token, "unknown-token");
+    fn focus_disabled_active_variants_also_parse_structurally() {
+        let s = StyleClass::from_str(
+            "focus:text-foreground disabled:text-muted-foreground active:bg-card",
+        );
+        let r = s.parse().unwrap();
+        assert_eq!(
+            r.focus,
+            Some(StateStyle {
+                background: None,
+                foreground: Some(ColorRole::Foreground),
+            })
+        );
+        assert_eq!(
+            r.disabled,
+            Some(StateStyle {
+                background: None,
+                foreground: Some(ColorRole::MutedForeground),
+            })
+        );
+        assert_eq!(
+            r.active,
+            Some(StateStyle {
+                background: Some(ColorRole::Card),
+                foreground: None,
+            })
+        );
+        assert_eq!(r.unknown_count, 0);
+    }
+
+    #[test]
+    fn state_variant_with_unrecognised_suffix_is_dropped_not_panicking() {
+        let s = StyleClass::from_str("hover:not-a-real-utility");
+        let r = s.parse().unwrap();
+        assert_eq!(r.hover, None);
+        assert_eq!(r.unknown_count, 1);
+    }
+
+    #[test]
+    fn unknown_token_is_dropped_with_other_tokens_still_resolved() {
+        // #269: the single highest-priority change. An unrecognized token
+        // no longer fails the parse — it's dropped (counted), and every
+        // other token on the same string still resolves, regardless of
+        // whether it comes before or after the unknown one.
+        let s = StyleClass::from_str("flex definitely-not-a-known-utility items-center");
+        let r = s
+            .parse()
+            .expect("parse must never fail on an unknown token");
+        assert!(r.flex, "token before the unknown one must still resolve");
+        assert!(
+            r.items_center,
+            "token after the unknown one must still resolve"
+        );
+        assert_eq!(r.unknown_count, 1);
+    }
+
+    #[test]
+    fn multiple_unknown_tokens_are_each_counted() {
+        let s = StyleClass::from_str("nope-one flex nope-two nope-three");
+        let r = s.parse().unwrap();
+        assert!(r.flex);
+        assert_eq!(r.unknown_count, 3);
     }
 
     #[test]
