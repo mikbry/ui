@@ -7,6 +7,29 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Fixed
+- **`mkui-runtime`'s class parser no longer panics on an unrecognized
+  utility — it's dropped (logged, and counted on
+  `ResolvedStyle::unknown_count`) instead, and every other class on the
+  same string still resolves (#269).** F3 of the mkui goal/course-
+  correction foundations: the parser used to accept exactly 44 literal
+  tokens and fail-fast on the first one that didn't match, which
+  `Mkui::child` turned into a hard panic — a typo in one Tailwind-like
+  class could take down construction entirely. The exact-literal
+  allowlist is also generalized into scale-based matching: numeric
+  utilities (`gap-*`, `p-*`/`px-*`/`py-*`, `mb-*`/`mt-*`, `h-*`,
+  `space-x-*`/`space-y-*`) now accept any non-negative integer, not just
+  the handful the showcase happened to use, and `justify-*` validates
+  against a defined value set (`start`/`center`/`between`/`end`/`around`/
+  `evenly`) instead of two hardcoded literals. `hover:`/`focus:`/
+  `disabled:`/`active:` state-variant prefixes (cva-style composition) now
+  resolve into a per-state `ResolvedStyle::hover`/`focus`/`disabled`/
+  `active` color override rather than being tolerated as an inert no-op;
+  `mkui-console` applies the `hover:` override to a `Button`'s current
+  keyboard selection — its terminal-native equivalent of mouse hover — as
+  the first conditional consumer. `sm:*` and `transition-colors` remain
+  plain no-ops (a responsive breakpoint, not a component state).
+
 ### Changed
 - **`mkui-wgpu`'s `slug` Cargo feature is now default-on (2026-11-17).** The
   Slug vector-glyph/VectorPath lane (#66, #140/#141/#142) was proven via the

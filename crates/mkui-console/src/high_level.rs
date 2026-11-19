@@ -8,10 +8,10 @@
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
-    style::Stylize,
+    style::{Color, StyledContent, Stylize},
 };
 use mkui_core::components::Component;
-use mkui_runtime::ButtonVariant;
+use mkui_runtime::{ButtonVariant, ColorRole};
 
 use crate::app::ConsoleApp;
 use crate::components::{walk_tree, Line, Selectable};
@@ -180,64 +180,11 @@ impl Mkui {
                 Line::Button(index) => {
                     if let Some(Selectable::Button(button)) = self.selectables.get(*index) {
                         let is_selected = self.app.selected_index() == *index;
-                        let text = format!("[ {} ]", button.label);
-                        match (is_selected, button.variant) {
-                            (true, ButtonVariant::Primary) => renderer.print_styled(
-                                4,
-                                current_row,
-                                text.white().on_blue().bold(),
-                            )?,
-                            (true, ButtonVariant::Secondary) => renderer.print_styled(
-                                4,
-                                current_row,
-                                text.black().on_grey().bold(),
-                            )?,
-                            (true, ButtonVariant::Destructive) => renderer.print_styled(
-                                4,
-                                current_row,
-                                text.white().on_red().bold(),
-                            )?,
-                            (true, ButtonVariant::Outline) => {
-                                renderer.print_styled(4, current_row, text.blue().bold())?
-                            }
-                            (true, ButtonVariant::Ghost) => {
-                                renderer.print_styled(4, current_row, text.blue().bold())?
-                            }
-                            (true, ButtonVariant::Link) => renderer.print_styled(
-                                4,
-                                current_row,
-                                text.blue().bold().underlined(),
-                            )?,
-                            (false, ButtonVariant::Primary) => {
-                                renderer.print_styled(4, current_row, text.white().on_blue())?
-                            }
-                            (false, ButtonVariant::Secondary) => {
-                                renderer.print_styled(4, current_row, text.dark_grey())?
-                            }
-                            (false, ButtonVariant::Destructive) => {
-                                renderer.print_styled(4, current_row, text.white().on_dark_red())?
-                            }
-                            (false, ButtonVariant::Outline) => {
-                                renderer.print_styled(4, current_row, text.white())?
-                            }
-                            (false, ButtonVariant::Ghost) => {
-                                renderer.print_styled(4, current_row, text.dark_grey())?
-                            }
-                            (false, ButtonVariant::Link) => {
-                                renderer.print_styled(4, current_row, text.white().underlined())?
-                            }
-                            // `ButtonVariant` is `#[non_exhaustive]` — future
-                            // variants fall back to the Primary style until
-                            // their own arm lands.
-                            (true, _) => renderer.print_styled(
-                                4,
-                                current_row,
-                                text.white().on_blue().bold(),
-                            )?,
-                            (false, _) => {
-                                renderer.print_styled(4, current_row, text.white().on_blue())?
-                            }
-                        }
+                        renderer.print_styled(
+                            4,
+                            current_row,
+                            button_styled_content(button, is_selected),
+                        )?;
                         current_row += 1;
                     }
                 }
@@ -279,6 +226,80 @@ impl Mkui {
 
         renderer.flush()?;
         Ok(())
+    }
+}
+
+/// Decide the styled text for one `Button` row.
+///
+/// Pulled out of `render()` so the `hover:` state-variant branch (#269) is
+/// unit-testable without a real terminal. When `button`'s class string
+/// carried a `hover:` color override and the row is currently selected —
+/// the console's keyboard-focus equivalent of mouse hover — that override
+/// wins; otherwise styling falls back to the existing variant-based look,
+/// unchanged from before #269.
+fn button_styled_content(
+    button: &crate::components::ConsoleButton,
+    is_selected: bool,
+) -> StyledContent<String> {
+    let text = format!("[ {} ]", button.label);
+
+    if is_selected {
+        if let Some((bg, fg)) = button.style.hover_colors() {
+            if bg.is_some() || fg.is_some() {
+                return hover_styled(text, bg, fg);
+            }
+        }
+    }
+
+    match (is_selected, button.variant) {
+        (true, ButtonVariant::Primary) => text.white().on_blue().bold(),
+        (true, ButtonVariant::Secondary) => text.black().on_grey().bold(),
+        (true, ButtonVariant::Destructive) => text.white().on_red().bold(),
+        (true, ButtonVariant::Outline) => text.blue().bold(),
+        (true, ButtonVariant::Ghost) => text.blue().bold(),
+        (true, ButtonVariant::Link) => text.blue().bold().underlined(),
+        (false, ButtonVariant::Primary) => text.white().on_blue(),
+        (false, ButtonVariant::Secondary) => text.dark_grey(),
+        (false, ButtonVariant::Destructive) => text.white().on_dark_red(),
+        (false, ButtonVariant::Outline) => text.white(),
+        (false, ButtonVariant::Ghost) => text.dark_grey(),
+        (false, ButtonVariant::Link) => text.white().underlined(),
+        // `ButtonVariant` is `#[non_exhaustive]` — future variants fall back
+        // to the Primary style until their own arm lands.
+        (true, _) => text.white().on_blue().bold(),
+        (false, _) => text.white().on_blue(),
+    }
+}
+
+/// Apply a `hover:` state-variant's `(background, foreground)` `ColorRole`
+/// override to `text`. `None` roles fall back to the terminal default for
+/// that channel (no explicit color set).
+fn hover_styled(
+    text: String,
+    bg: Option<ColorRole>,
+    fg: Option<ColorRole>,
+) -> StyledContent<String> {
+    let mut styled = text.bold();
+    if let Some(role) = fg {
+        styled = styled.with(color_role_to_crossterm(role));
+    }
+    if let Some(role) = bg {
+        styled = styled.on(color_role_to_crossterm(role));
+    }
+    styled
+}
+
+/// Map a themed [`ColorRole`] to a concrete terminal color. `mkui-console`
+/// has no theme system (see the module doc), so this is a small fixed
+/// palette rather than a lookup into one — good enough to make a `hover:`
+/// override visually distinct from the row's non-hovered state.
+fn color_role_to_crossterm(role: ColorRole) -> Color {
+    match role {
+        ColorRole::Card => Color::Grey,
+        ColorRole::CardForeground | ColorRole::Foreground => Color::White,
+        ColorRole::MutedForeground => Color::DarkGrey,
+        // `ColorRole` is `#[non_exhaustive]`.
+        _ => Color::White,
     }
 }
 
@@ -454,5 +475,61 @@ mod tests {
             .position(|s| matches!(s, Selectable::MenuItem(item) if item.initial))
             .unwrap_or(0);
         assert_eq!(seed, 1, "the seed must land on \"Continue\", not row 0");
+    }
+
+    /// #269 acceptance criterion: at least one state variant (`hover:`) is
+    /// parsed and applied conditionally in at least one backend. Here,
+    /// "applied conditionally" means the override only wins while the
+    /// button is the current keyboard selection — console's hover
+    /// equivalent — never when some other row is selected.
+    #[test]
+    fn hover_state_variant_overrides_color_only_while_selected() {
+        let mut app = Mkui::new().expect("init mkui-console");
+        app = app.child(
+            CoreButton::new("Save")
+                .variant(ButtonVariant::Primary)
+                .class("hover:bg-card hover:text-foreground"),
+        );
+        app.build_layout();
+
+        let Selectable::Button(button) = &app.selectables[0] else {
+            panic!("expected a Button selectable")
+        };
+
+        let selected = button_styled_content(button, true);
+        assert_eq!(
+            selected.style().foreground_color,
+            Some(color_role_to_crossterm(ColorRole::Foreground)),
+            "hover: override must win while the row is selected"
+        );
+        assert_eq!(
+            selected.style().background_color,
+            Some(color_role_to_crossterm(ColorRole::Card)),
+        );
+
+        let not_selected = button_styled_content(button, false);
+        assert_ne!(
+            not_selected.style().background_color,
+            Some(color_role_to_crossterm(ColorRole::Card)),
+            "hover: override must not apply while a different row is selected"
+        );
+    }
+
+    /// A button with no `hover:` class keeps today's variant-based look —
+    /// the new branch in `button_styled_content` must be a pure addition,
+    /// never a behavior change for existing showcase trees.
+    #[test]
+    fn button_without_hover_class_keeps_existing_variant_styling() {
+        let mut app = Mkui::new().expect("init mkui-console");
+        app = app.child(CoreButton::new("Primary").variant(ButtonVariant::Primary));
+        app.build_layout();
+
+        let Selectable::Button(button) = &app.selectables[0] else {
+            panic!("expected a Button selectable")
+        };
+
+        assert_eq!(button.style.hover_colors(), None);
+        let selected = button_styled_content(button, true);
+        assert_eq!(selected.style().background_color, Some(Color::Blue));
     }
 }

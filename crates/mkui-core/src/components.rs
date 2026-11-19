@@ -147,7 +147,10 @@ impl LoweringRegistry {
     ///   surface as a class-parse-shaped error so callers have a single
     ///   error type to handle. Future sprints may add a richer `LowerError`
     ///   if extension volume grows.
-    /// - The component's class string contains an unknown utility.
+    ///
+    /// An unrecognized utility in the component's class string is *not* an
+    /// error (#269) — it is dropped (and logged) by `StyleClass::parse`,
+    /// which never fails on it.
     pub fn lower_boxed(
         &self,
         mut boxed: Box<dyn Component>,
@@ -204,16 +207,20 @@ impl Mkui {
     /// Append a child to this UI tree.
     ///
     /// `.child()` keeps the user-facing builder API infallible (matching the
-    /// v0.4.1 surface), so a class-parse error is a panic rather than a
-    /// `Result`. The panic is `#[track_caller]`, so the blame points at your
-    /// `.child(...)` call site instead of mkui-core internals.
+    /// v0.4.1 surface). Since #269, an unrecognized utility class in the
+    /// child's class string is *not* a reason to panic — `StyleClass::parse`
+    /// drops it (logging a warning) and every other class on the string
+    /// still applies. The panic below is `#[track_caller]`, so on the rare
+    /// genuine error it still blames your `.child(...)` call site instead of
+    /// mkui-core internals.
     ///
     /// # Panics
     ///
-    /// Panics on a class-parse error (e.g. a typo in a Tailwind-like utility
-    /// class). The panic message carries the offending token so the typo is
-    /// obvious from the backtrace. For the fallible variant that surfaces
-    /// [`ClassParseError`] instead of panicking, use [`Mkui::try_child`].
+    /// Panics only if `child`'s concrete type was never registered with this
+    /// `Mkui`'s [`LoweringRegistry`] (see [`Mkui::register`]) — a
+    /// programming error, not a class-string typo. For the fallible variant
+    /// that surfaces [`ClassParseError`] instead of panicking, use
+    /// [`Mkui::try_child`].
     ///
     /// # Examples
     ///
@@ -233,9 +240,10 @@ impl Mkui {
         self
     }
 
-    /// Falliblevariant of [`Mkui::child`] that returns the parse error
-    /// instead of panicking. Tests and FFI bridges that want to surface
-    /// the error use this; the showcase API stays panic-on-bad-class.
+    /// Fallible variant of [`Mkui::child`] that returns an error instead of
+    /// panicking. Since #269 the only remaining error source is
+    /// `child`'s type not being registered with this `Mkui` — an
+    /// unrecognized utility class is never an error (see [`Mkui::child`]).
     pub fn try_child(mut self, child: impl Component + 'static) -> Result<Self, ClassParseError> {
         let boxed: Box<dyn Component> = Box::new(child);
         let root = self.tree.root();
@@ -718,37 +726,33 @@ mod tests {
     }
 
     #[test]
-    fn try_child_surfaces_a_class_parse_error() {
-        let result = Mkui::new().try_child(View::new().class("totally-bogus-utility"));
-        let Err(err) = result else {
-            panic!("try_child must reject unknown class")
-        };
-        assert!(matches!(err, ClassParseError::UnknownToken(_)));
+    fn try_child_succeeds_on_an_unknown_class() {
+        // #269: an unrecognized utility class is dropped, not an error.
+        let app = Mkui::new()
+            .try_child(View::new().class("totally-bogus-utility"))
+            .expect("try_child must not reject an unknown class");
+        assert_eq!(app.children_len(), 1);
     }
 
     #[test]
-    #[should_panic(expected = "failed to append child")]
-    fn child_panics_on_unknown_class() {
-        Mkui::new().child(View::new().class("totally-bogus-utility"));
+    fn child_does_not_panic_on_unknown_class() {
+        // #269 acceptance criterion: an unrecognized token does not panic —
+        // the component still gets appended.
+        let app = Mkui::new().child(View::new().class("totally-bogus-utility"));
+        assert_eq!(app.children_len(), 1);
     }
 
     #[test]
-    fn child_panic_message_names_the_offending_token() {
-        // The sharpened diagnostic must surface the bogus class string itself,
-        // not just a generic "lowering failed" line (issue #69).
-        let result = std::panic::catch_unwind(|| {
-            Mkui::new().child(View::new().class("flex-col totally-bogus-utility gap-4"));
-        });
-        let err = result.expect_err("child must panic on an unknown class token");
-        let msg = err
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| err.downcast_ref::<&str>().copied())
-            .expect("panic payload must be a string");
-        assert!(
-            msg.contains("totally-bogus-utility"),
-            "panic message must name the offending token, got: {msg}"
-        );
+    fn child_still_applies_every_other_class_around_an_unknown_token() {
+        // #269 acceptance criterion: the component still renders with its
+        // other classes applied, regardless of where the unknown token sits
+        // in the string.
+        let app = Mkui::new().child(View::new().class("flex-col totally-bogus-utility gap-4"));
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let view = app.tree().get(root.children[0]).unwrap();
+        assert!(view.resolved.flex_column);
+        assert_eq!(view.resolved.gap, Some(4));
+        assert_eq!(view.resolved.unknown_count, 1);
     }
 
     #[test]

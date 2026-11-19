@@ -132,11 +132,17 @@ fn action_id_has_generation_counter() {
 }
 
 #[test]
-fn class_parser_rejects_unknown_tier_3_token() {
+fn unknown_class_token_is_dropped_not_rejected() {
+    // #269: an unrecognized class token no longer fails the parse — it's
+    // dropped (and counted), while its siblings on the same string still
+    // resolve.
     let style = StyleClass::from_str("flex unknown-token items-center");
-    let err = style.parse().expect_err("T3 token must reject");
-    let mkui_runtime::ClassParseError::UnknownToken(t) = err;
-    assert_eq!(t, "unknown-token");
+    let resolved = style
+        .parse()
+        .expect("parse must never fail on an unknown token");
+    assert!(resolved.flex);
+    assert!(resolved.items_center);
+    assert_eq!(resolved.unknown_count, 1);
 }
 
 #[test]

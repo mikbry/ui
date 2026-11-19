@@ -733,17 +733,19 @@ mod tests {
     }
 
     #[test]
-    fn invalid_class_string_returns_invalid_node() {
+    fn unknown_class_string_still_creates_a_valid_node() {
+        // #269: an unrecognized utility class no longer fails the parse —
+        // it's dropped (and logged) rather than rejecting the whole node.
         // SAFETY: single-threaded test.
         unsafe {
             let app = mkui_app_new();
             let root = mkui_app_root(app);
             let bogus = CString::new("not-a-utility").unwrap();
             let id = mkui_app_view_child(app, root, bogus.as_ptr());
-            assert_eq!(
+            assert_ne!(
                 id,
                 invalid_node(),
-                "unknown utility must surface as invalid"
+                "an unknown utility must not block node creation"
             );
             mkui_app_free(app);
         }

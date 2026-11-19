@@ -7,8 +7,12 @@
 //! navigates and renders.
 //!
 //! Styling decisions come from the *typed* [`TextVariant`] /
-//! [`ButtonVariant`] values on each node — never from sniffing
-//! showcase-specific class strings.
+//! [`ButtonVariant`] values on each node — never from sniffing raw class
+//! strings. The one exception (#269) is the `hover:` state variant: a
+//! [`ConsoleButton`] carries its node's already-*parsed* `ResolvedStyle`
+//! (never the raw string) purely so `high_level::Mkui::render` can apply a
+//! `hover:` color override while that button is the current keyboard
+//! selection — a terminal's closest equivalent to mouse hover.
 //!
 //! ## One cursor across every control (#189 round 3)
 //!
@@ -23,18 +27,21 @@
 //! row selected" is decided once, at render time, from that one cursor —
 //! never baked into a `Line` at walk time.
 
-use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeKind, TextVariant};
+use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeKind, ResolvedStyle, TextVariant};
 
 /// Console-side projection of a runtime `Button` node.
 ///
-/// Holds the label, the variant the styling needs, and the action id so
-/// the navigation loop can fire the registered closure via the tree's
-/// `ActionRegistry`.
+/// Holds the label, the variant the styling needs, the action id so the
+/// navigation loop can fire the registered closure via the tree's
+/// `ActionRegistry`, and the node's parsed `style` so `render()` can apply
+/// a `hover:` state-variant color override while this button is selected
+/// (#269).
 #[derive(Clone, Debug)]
 pub struct ConsoleButton {
     pub label: String,
     pub variant: ButtonVariant,
     pub on_press: Option<ActionId>,
+    pub style: ResolvedStyle,
 }
 
 /// Console-side projection of one row of a `"menu_list"` `NodeKind::Custom`
@@ -143,6 +150,7 @@ fn walk_children(
                     label: b.label.clone(),
                     variant: b.variant,
                     on_press: b.on_press,
+                    style: node.resolved.clone(),
                 }));
                 layout.push(Line::Button(index));
             }
