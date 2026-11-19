@@ -68,7 +68,8 @@ and the records below.
   — The shadcn/ui catalogue, in Rust, on one shared contract; a component
   is done only when `mkui-core` has it and all three back ends render it.
   Host-shaped work splits three ways: mkui, a second-class `mkui-hud`
-  crate, or the host itself.
+  crate, or the host itself. Appended 2026-11-19 (#290): the concrete
+  `mkui-hud` boundary test, plus #230/#250/#262's dispositions.
 - [ADR 0014 — `mkui-layout`: a backend-neutral flex layout engine over `AppTree`](0014-mkui-layout-backend-neutral-flex-engine.md)
   — A new crate, written from scratch (no external layout crate), consumes
   `AppTree` + `ResolvedStyle` directly and measures leaves through a

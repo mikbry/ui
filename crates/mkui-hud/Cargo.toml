@@ -1,0 +1,11 @@
+[package]
+name = "mkui-hud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Second-class, host-reusable HUD plumbing (ADR 0013): not a dependency of mkui-core or any backend crate, not held to the three-backend bar."
+
+[dependencies]
