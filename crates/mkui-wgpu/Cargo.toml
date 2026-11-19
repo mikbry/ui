@@ -40,6 +40,10 @@ default = ["slug"]
 mkui-core = { path = "../mkui-core" }
 mkui-runtime = { path = "../mkui-runtime" }
 mkui-text = { path = "../mkui-text" }
+# `walker.rs` calls `mkui_layout::compute_layout` for its layout pass (#287);
+# this was a dev-only dependency (see the removed comment below) while the
+# walker still owned its own hand-rolled layout math.
+mkui-layout = { path = "../mkui-layout" }
 serde_json = { workspace = true }
 
 # Native Slug adapter (#66), pulled in only by the `slug` feature. Kept out of
@@ -71,13 +75,6 @@ pollster = { workspace = true }
 # #67's font-backed ones).
 
 [dev-dependencies]
-# Proves the `mkui-layout` (#63) acceptance criterion "wgpu walker can
-# consume computed rects instead of owning permanent layout logic" — a
-# dev-dependency so the claim is checked without making the walker's own
-# render path depend on it yet. See `tests/mkui_layout_interop.rs` and
-# `walker.rs`'s module docs' "Layout model" section.
-mkui-layout = { path = "../mkui-layout" }
-
 # PNG decoding for the `gpu-tests,slug` reference-parity self-check (#157
 # Phase 1): reads the ratified reference-harness's committed known-good
 # goldens for a byte-level comparison. Same pin as

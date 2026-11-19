@@ -184,6 +184,15 @@ pub struct SpacingTokens {
     /// Default backdrop-blur strength (logical px) for
     /// [`WgpuTheme::glass_panel_style`] (#187).
     pub blur_radius_glass: f32,
+    /// Fixed button height (#287) — previously a `walker.rs`-local
+    /// `BUTTON_HEIGHT_PX` constant the `mkui_layout::LeafMeasure`
+    /// implementation had no way to read; now the single source of truth
+    /// for both `walker::render_button` and `walker::WgpuLeafMeasure`.
+    pub button_height: f32,
+    /// Horizontal padding added on each side of a button's label to get
+    /// its final width (#287) — previously `walker.rs`-local
+    /// `BUTTON_PADDING_X_PX`.
+    pub button_padding_x: f32,
 }
 
 /// Two-state marker for interactive widgets. `Active` means "currently
@@ -542,6 +551,8 @@ impl Default for WgpuTheme {
             radius_panel_roomy: 16.0,
             padding_panel_roomy: 16.0,
             blur_radius_glass: 24.0,
+            button_height: 36.0,
+            button_padding_x: 16.0,
         };
         let tokens = ThemeTokens {
             primary: Color::rgba(0.94, 0.79, 0.48, 0.92),
@@ -1233,6 +1244,8 @@ mod tests {
             radius_panel_roomy: 11.0,
             padding_panel_roomy: 13.0,
             blur_radius_glass: 17.0,
+            button_height: 40.0,
+            button_padding_x: 20.0,
         };
         let tokens = ThemeTokens {
             primary: Color::rgba(0.10, 0.50, 0.90, 1.0),

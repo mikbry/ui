@@ -106,12 +106,24 @@ pub struct WgpuRenderCtx<'a> {
     /// Viewport width in logical pixels — extension renderers can use
     /// this to size full-width primitives.
     pub viewport_width: f32,
-    /// Next y-coordinate the walker will emit at. Custom renderers may
-    /// update this after they emit so the next sibling stacks
-    /// underneath.
+    /// This node's position, as [`crate::walker`] set it just before
+    /// dispatching to the registry (#287): the node's own
+    /// `mkui_layout::compute_layout`-computed rect origin when it has one,
+    /// or a flow-position fallback (the containing `View`'s content edge /
+    /// the previous in-flow sibling's bottom) for an overlay `Custom` node
+    /// that `mkui_layout` dropped from layout entirely (see
+    /// `crate::walker::WgpuLeafMeasure`'s `is_overlay` method). Pre-#287, a custom
+    /// renderer could mutate this to push the *next* sibling's position;
+    /// that write is now inert — every node's position comes from the
+    /// precomputed layout (or the fallback above), not from whatever the
+    /// previous renderer left behind. `BadgeRenderer`'s own non-overlay
+    /// `cursor_y` advance (below) is kept only because standalone
+    /// unit tests in this module construct a `WgpuRenderCtx` by hand and
+    /// assert on it directly; going through the real walker, it has no
+    /// effect.
     pub cursor_y: f32,
-    /// Left content edge (after any ancestor's left padding has been
-    /// applied).
+    /// This node's left position — see [`Self::cursor_y`]'s docs, which
+    /// this field mirrors on the horizontal axis.
     pub content_x: f32,
     /// Text color inherited from the nearest ancestor `View` whose class
     /// set a `ResolvedStyle::foreground` role (`text-foreground`,

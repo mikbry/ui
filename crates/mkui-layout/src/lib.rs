@@ -29,24 +29,24 @@
 //! stay empty) — a consuming backend converts this crate's own
 //! [`Point`]/[`Size`]/[`Rect`] into its own geometry at the call site.
 //!
-//! ## Status: the `mkui-wgpu` walker does not call this crate yet
+//! ## Status: the `mkui-wgpu` walker calls this crate (#287)
 //!
 //! "The wgpu walker can consume computed rects instead of owning permanent
-//! layout logic" (issue #63 acceptance criterion) is a claim about
-//! *compatibility*, proven by `mkui-wgpu`'s own
-//! `tests/mkui_layout_interop.rs` (a dev-dependency test: this crate laying
-//! out the canonical showcase tree with a measurer that wraps the walker's
-//! own `&dyn mkui_text::TextSystem`, then converting the resulting rects
-//! into `mkui_wgpu::types::Rect`) — not a claim that `walker.rs` has been
-//! rewritten to call it. That rewrite is real surgery: `walker.rs`'s
-//! `WalkCache` keys subtree reuse on `cursor_y`/`content_x`/`content_width`
-//! threaded through a single render-and-measure pass, and swapping in a
-//! separate layout pass means redesigning that cache, not just the layout
-//! math. It is tracked as its own follow-up, issue #287, rather than
-//! bundled into this PR's blast radius. Falsifiable check:
-//! `grep -n "mkui_layout" crates/mkui-wgpu/src/walker.rs` returns nothing
-//! as of this writing (2026-11-18); it should return the walker's own call
-//! into [`compute_layout`] once #287 lands.
+//! layout logic" (issue #63 acceptance criterion) started as a claim about
+//! *compatibility* only, proven by `mkui-wgpu`'s own
+//! `tests/mkui_layout_interop.rs` (originally a dev-dependency test: this
+//! crate laying out the canonical showcase tree with a measurer that wraps
+//! the walker's own `&dyn mkui_text::TextSystem`, then converting the
+//! resulting rects into `mkui_wgpu::types::Rect`). Issue #287 did the real
+//! surgery that claim deferred: `mkui-wgpu`'s `walker.rs` now calls
+//! [`compute_layout`] directly via its own `WgpuLeafMeasure` (promoted from
+//! that interop test's sketch), and its `WalkCache` was redesigned to key
+//! subtree reuse on each node's own computed rect instead of the
+//! `cursor_y`/`content_x`/`content_width` triple a combined render-and-
+//! measure pass used to produce. Falsifiable check:
+//! `grep -n "mkui_layout" crates/mkui-wgpu/src/walker.rs` returns the
+//! walker's own call into [`compute_layout`] (in `walk_app_tree_inner`), not
+//! just this module doc comment's own mentions.
 
 pub mod flex;
 pub mod geometry;

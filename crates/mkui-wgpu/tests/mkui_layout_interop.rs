@@ -1,96 +1,23 @@
 //! Proves issue #63's acceptance criterion "wgpu walker can consume
-//! computed rects instead of owning permanent layout logic" — a
-//! **compatibility** claim, not a rewrite of `walker.rs` yet (see that
-//! module's "Layout model" docs and `mkui-layout`'s crate-level "Status"
-//! section for why the actual swap is its own follow-up).
-//!
-//! This test runs `mkui_layout::compute_layout` over the same tree the
-//! walker itself renders, using a [`mkui_layout::LeafMeasure`] that wraps
-//! the identical `&dyn mkui_text::TextSystem` `WalkOptions::text_system`
-//! already carries, then converts every resulting rect into
-//! `mkui_wgpu::types::Rect` — the exact type `WalkOutput::layouts` uses
-//! today. If `mkui-layout`'s output shape were ever incompatible with what
-//! the walker needs (origin/size semantics, `NodeId` keying), this
-//! conversion would not compile or the sanity assertions below would fail.
+//! computed rects instead of owning permanent layout logic". Issue #287
+//! did the real swap this test originally only proved *compatible*: the
+//! walker's `walk_app_tree` now calls `mkui_layout::compute_layout` itself,
+//! via the same `mkui_wgpu::walker::WgpuLeafMeasure` this test builds below
+//! (promoted from this file's own one-off `WgpuTextMeasure` sketch once
+//! that was proven compatible — see `walker.rs`'s "Layout model" docs and
+//! `mkui-layout`'s crate-level "Status" section). This test now exists to
+//! guard the conversion from `mkui_layout`'s own rects into
+//! `mkui_wgpu::types::Rect` — the exact type `WalkOutput::layouts` uses —
+//! independently of the full walk, using the walker's real measurer rather
+//! than a parallel copy that could drift from it.
 
 use mkui_core::components::{Button, Mkui as CoreMkui, Text as CoreText, View};
 use mkui_core::headless::{ButtonVariant, TextVariant};
-use mkui_layout::{
-    compute_layout, LeafMeasure, Measured, Point as LayoutPoint, Rect as LayoutRect,
-    Size as LayoutSize,
-};
-use mkui_runtime::ResolvedStyle;
-use mkui_text::{BitmapTextSystem, FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
+use mkui_layout::{compute_layout, Point as LayoutPoint, Rect as LayoutRect, Size as LayoutSize};
+use mkui_text::BitmapTextSystem;
+use mkui_wgpu::theme::WgpuTheme;
 use mkui_wgpu::types::{Point as WgpuPoint, Rect as WgpuRect, Size as WgpuSize};
-
-/// Wraps a `&dyn TextSystem` — the same text system `WalkOptions` carries —
-/// as a `mkui_layout::LeafMeasure`. A real backend would keep one of these
-/// alongside its `WalkOptions` once the walker actually calls into
-/// `mkui-layout`.
-struct WgpuTextMeasure<'a> {
-    text_system: &'a dyn TextSystem,
-}
-
-impl WgpuTextMeasure<'_> {
-    fn font_size_px(variant: TextVariant) -> f32 {
-        match variant {
-            TextVariant::Heading1 => 32.0,
-            TextVariant::Heading2 => 24.0,
-            TextVariant::Heading3 => 20.0,
-            TextVariant::Body | TextVariant::Code => 16.0,
-            TextVariant::Caption | TextVariant::Label => 14.0,
-            _ => 16.0,
-        }
-    }
-}
-
-impl LeafMeasure for WgpuTextMeasure<'_> {
-    fn measure_text(
-        &self,
-        content: &str,
-        variant: TextVariant,
-        _style: &ResolvedStyle,
-        max_width_px: Option<f32>,
-    ) -> Measured {
-        let font_size_px = Self::font_size_px(variant);
-        let line_height_px = (font_size_px * 1.25).max(font_size_px + 2.0);
-        let spec = LayoutSpec {
-            font_id: FontId::BITMAP,
-            font_generation: 0,
-            font_size_px,
-            line_height_px,
-            align: mkui_text::TextAlign::Start,
-            max_lines: None,
-            hinting: HintingMode::None,
-            variations: VariationSettings::empty(),
-            synthesis_flags: 0,
-        };
-        let runs = self
-            .text_system
-            .layout(content, &spec, max_width_px.map(|w| w.max(1.0)));
-        let width = runs
-            .iter()
-            .flat_map(|r| r.glyphs.iter())
-            .map(|g| g.x_px + g.x_advance_px)
-            .fold(0.0_f32, f32::max);
-        let height = line_height_px * (runs.len().max(1) as f32);
-        Measured::new(width, height)
-    }
-
-    fn measure_button(
-        &self,
-        label: &str,
-        _variant: ButtonVariant,
-        style: &ResolvedStyle,
-        _max_width_px: Option<f32>,
-    ) -> Measured {
-        let label_width = self
-            .measure_text(label, TextVariant::Label, style, None)
-            .size
-            .width;
-        Measured::new(label_width + 32.0, 36.0)
-    }
-}
+use mkui_wgpu::walker::WgpuLeafMeasure;
 
 fn layout_point_to_wgpu(p: LayoutPoint) -> WgpuPoint {
     WgpuPoint { x: p.x, y: p.y }
@@ -120,7 +47,9 @@ fn mkui_layout_rects_convert_cleanly_into_wgpu_types_and_cover_every_visible_nod
     );
 
     let text_system = BitmapTextSystem::new();
-    let measure = WgpuTextMeasure {
+    let theme = WgpuTheme::default();
+    let measure = WgpuLeafMeasure {
+        theme: &theme,
         text_system: &text_system,
     };
     let result = compute_layout(core.tree(), LayoutSize::new(800.0, 600.0), &measure);
