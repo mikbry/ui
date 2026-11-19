@@ -25,34 +25,53 @@
 //! tests, future tooling) consume the result without threading mut
 //! refs through their event-loop code.
 //!
-//! ## Layout model — transitional (#63, #287)
+//! ## Layout model (#287)
 //!
-//! v0.6.0 implements a deliberately small layout: top-down vertical
-//! flow with class-driven padding + gap + text/button sizing. This is
-//! enough to render `examples/showcase-common::create_showcase_ui`
-//! recognisably on wgpu, **but it is the Sprint 5 bridge move, not the
-//! permanent architecture** (ADR 0006 §"Out of scope").
+//! The walker calls [`mkui_layout::compute_layout`] once per
+//! [`walk_app_tree`]/[`walk_app_tree_cached`] pass, over the same
+//! `mkui_runtime::AppTree` it paints, via [`WgpuLeafMeasure`] — this
+//! module's [`mkui_layout::LeafMeasure`] implementation (promoted from the
+//! sketch `crates/mkui-wgpu/tests/mkui_layout_interop.rs` proved compatible
+//! for issue #63). That single [`mkui_layout::LayoutResult`] is threaded
+//! through the whole walk; `render_view`/`render_text`/`render_button` each
+//! just look up their node's already-computed [`crate::types::Rect`]
+//! instead of threading `cursor_y`/`content_x`/`content_width` through a
+//! combined measure-and-paint pass the way v0.6.0 did.
 //!
-//! The reserved seam this comment used to call "a future `mkui-layout`
-//! shared module" now exists: `mkui-layout` (issue #63) is a real,
-//! from-scratch flex engine (row/column, wrap, grow/shrink, justify/align,
-//! gap, min/max) over `mkui_runtime::AppTree`, tested against the canonical
-//! showcase tree. `crates/mkui-wgpu/tests/mkui_layout_interop.rs` proves
-//! this walker's output shape is *compatible* with its rects (a dev-only
-//! test — see `mkui-layout`'s own crate docs' "Status" section), but
-//! this file still computes its own layout below; it has not been
-//! rewritten to call `mkui_layout::compute_layout` yet. That rewrite is
-//! real surgery — `WalkCache` keys subtree reuse on
-//! `cursor_y`/`content_x`/`content_width` threaded through this same
-//! render-and-measure pass, so swapping in a separate layout pass means
-//! redesigning that cache, not just the layout math — and is tracked as
-//! issue #287, not bundled into #63's blast radius.
+//! Layout and leaf measurement run for the **whole** tree on every call —
+//! there is no per-subtree layout memoization yet (`mkui_layout::LayoutResult`
+//! has no incremental/subtree-scoped entry point today; that's a
+//! `mkui-layout` API gap, not a `walker.rs` one, and is deferred to a
+//! follow-up rather than bundled into this surgery). [`WalkCache`] (#229)
+//! still reuses cached *primitives/hit-entries/layouts* for an unchanged
+//! subtree at an unchanged position — see "Per-subtree dirty tracking"
+//! below — it just no longer saves the layout math itself.
+//!
+//! `mkui_layout::compute_layout` has no notion of the walker's old
+//! `VIEWPORT_OUTER_MARGIN_PX` (a v0.6.0-only stylistic choice, not a real
+//! layout concern — the canonical showcase tree gets its margins from
+//! explicit `px-4`/`py-8` classes, same as real Tailwind): the root now
+//! lays out flush against the full viewport, like any other backend
+//! `mkui_layout` drives. A tree that wants an outer margin asks for one with
+//! a class, the same way it asks for any other spacing.
+//!
+//! `Custom` nodes are measured as ordinary flex leaves via
+//! [`WgpuLeafMeasure::measure_custom`]/[`WgpuLeafMeasure::is_overlay`] (the
+//! `badge`/`dot`/`tooltip` atoms in `bridge.rs::builtins` mirror their own
+//! prop defaults there), so they now participate in real flex
+//! gap/justify/align instead of the old fixed vertical stacking. One gap
+//! this leaves: `mkui_layout` always treats `Custom` as a leaf, so a
+//! renderer returning [`crate::bridge::WgpuRenderOutcome::RecurseChildren`]
+//! gets children with no entry in the `LayoutResult` at all — `walk_node`
+//! falls back to a zero-size rect at the renderer's own cursor position
+//! rather than panicking. No registered renderer (`BadgeRenderer` /
+//! `DotRenderer` / `TooltipRenderer`) returns `RecurseChildren` today, so
+//! this is a documented, currently-unexercised limitation, not a live bug;
+//! giving `mkui-layout` a real "lay out this Custom node's children" path is
+//! its own follow-up.
 //!
 //! Falsifiable check: `grep -n "mkui_layout" crates/mkui-wgpu/src/walker.rs`
-//! returns nothing below this doc comment as of 2026-11-18; it should
-//! return a real call site once #287 lands. The eager-rebuild model this
-//! file uses today lets a richer layout drop in without re-architecting
-//! the walker's caller-facing API.
+//! returns a real call site in `walk_app_tree_inner` as of #287.
 //!
 //! ## Anti-patterns avoided (issue #56 + Codex round 10)
 //!
@@ -87,17 +106,23 @@
 //! `crate::bridge::WgpuRenderable` — so their output is not a pure function
 //! of `subtree_revision` and must never be treated as cacheable.
 //!
-//! The cache key also requires the entry's `content_x` / `cursor_y` /
-//! `content_width` / inherited foreground color to match exactly — no
-//! translation is attempted. This means a changed node still invalidates
-//! every later sibling whose *height* changed (the common "same text, same
-//! line count" tick does not), but it can never reuse a stale position: a
+//! The cache key also requires the entry's final [`crate::types::Rect`] (as
+//! [`mkui_layout::compute_layout`] computed it this call) and inherited
+//! foreground color to match exactly — no translation is attempted (#287
+//! redesigned this key from the pre-#287 `content_x`/`cursor_y`/
+//! `content_width` triple to the node's own computed rect, now that layout
+//! is a separate upfront pass rather than something threaded through the
+//! same walk that builds the cache). This means a changed node still
+//! invalidates every later sibling whose *rect* moved as a result (the
+//! common "same text, same wrapped height" tick does not change any later
+//! sibling's rect at all), but it can never reuse a stale position: a
 //! near-miss just falls back to a normal re-walk of that one subtree,
 //! identical to the stateless path.
 
 use std::collections::HashMap;
 
 use mkui_core::error::MkuiError;
+use mkui_layout::{LeafMeasure, Measured};
 use mkui_runtime::{
     ActionId, AppTree, ButtonVariant, ColorRole, NodeId, NodeKind, ResolvedStyle, TextVariant,
 };
@@ -204,24 +229,26 @@ pub struct WalkStats {
 /// intentional: both sides of the comparison are the literal result of
 /// the same deterministic arithmetic run twice, never an independently
 /// measured or rounded quantity, so there is no NaN/epsilon concern here.
+///
+/// `rect` replaced the pre-#287 `content_x`/`cursor_y`/`content_width`
+/// triple: now that [`mkui_layout::compute_layout`] computes every node's
+/// absolute rect in its own upfront pass, the node's own final rect is the
+/// one piece of layout context a cache hit needs to reproduce — it already
+/// subsumes position *and* the width the node was laid out against.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CacheKey {
     subtree_revision: u64,
-    content_x: f32,
-    cursor_y: f32,
-    content_width: f32,
+    rect: Rect,
     foreground: Color,
 }
 
-/// One cached subtree: the exact context it was built under (`CacheKey`),
-/// the `cursor_y` the walk had advanced to by the time the subtree's walk
-/// finished, and the primitives/hit-entries/layouts it appended — captured
-/// as the slice appended between entering and leaving the subtree, so
-/// splicing them back in reproduces the exact paint/hit-test order a real
-/// re-walk would have produced.
+/// One cached subtree: the exact context it was built under (`CacheKey`)
+/// and the primitives/hit-entries/layouts it appended — captured as the
+/// slice appended between entering and leaving the subtree, so splicing
+/// them back in reproduces the exact paint/hit-test order a real re-walk
+/// would have produced.
 struct CacheEntry {
     key: CacheKey,
-    exit_cursor_y: f32,
     primitives: Vec<Primitive>,
     hits: Vec<HitTestEntry>,
     layouts: Vec<NodeLayout>,
@@ -265,17 +292,181 @@ impl WalkCache {
     }
 }
 
-/// Tailwind half-rem unit: every numeric resolved-style field
-/// (padding, gap, …) multiplies by this to land in screen pixels. The
-/// runtime parser stores raw Tailwind ticks (p-6 → 6); the bridge
-/// scales them here once so atom code can keep using `f32` pixel rects.
-const TAILWIND_UNIT_PX: f32 = 4.0;
-const DEFAULT_GAP_PX: f32 = 8.0;
-const BUTTON_HEIGHT_PX: f32 = 36.0;
-const BUTTON_PADDING_X_PX: f32 = 16.0;
-const APPROX_CHAR_WIDTH_PX: f32 = 8.0;
-const BUTTON_GAP_PX: f32 = 8.0;
-const VIEWPORT_OUTER_MARGIN_PX: f32 = 24.0;
+/// Floor under a button's measured-label width (label + theme padding)
+/// so a one-character label (or an empty one) still paints a tappable
+/// button rather than collapsing to the label's own tiny width.
+const BUTTON_MIN_WIDTH_PX: f32 = 64.0;
+
+/// [`mkui_layout::LeafMeasure`] implementation wrapping the same
+/// `&dyn TextSystem` [`WalkOptions::text_system`] carries, plus the
+/// theme button height/padding it needs for [`Self::measure_button`] —
+/// promoted from the sketch `crates/mkui-wgpu/tests/mkui_layout_interop.rs`
+/// proved compatible for issue #63 (that test now builds this same type
+/// instead of its own copy), now the walker's real leaf measurer (#287).
+/// `pub` so the interop test (and any other caller that wants the exact
+/// measurer `walk_app_tree` itself uses) can build one directly.
+pub struct WgpuLeafMeasure<'a> {
+    pub theme: &'a WgpuTheme,
+    pub text_system: &'a dyn TextSystem,
+}
+
+impl WgpuLeafMeasure<'_> {
+    /// Measures `content` the same way [`wrapped_line_count`]'s pre-#287
+    /// call site did: identical [`LayoutSpec`] (bitmap-only `font_id`,
+    /// `max_lines: None` so this call learns the *unclamped* line count),
+    /// identical width constraint. `max_width_px: Some(w)` (this node is
+    /// being sized within a known box, the common case for a block `Text`)
+    /// reports `w` itself as the width — matching the pre-#287 walker's
+    /// "a `Text` rect always spans its full available width" behavior,
+    /// which is what lets `text-center` center glyphs within that box.
+    /// `max_width_px: None` (a Row container's flex-basis query, per the
+    /// trait's own docs) reports the real max-content (never-wrapped)
+    /// width instead, since a basis query needs the leaf's *intrinsic*
+    /// size, not an available-space echo.
+    fn measure_text_inner(
+        &self,
+        content: &str,
+        variant: TextVariant,
+        style: &ResolvedStyle,
+        max_width_px: Option<f32>,
+    ) -> Measured {
+        let font_size = text_font_size_px(variant, style);
+        let line_height = (font_size * 1.25).max(font_size + 2.0);
+        let align = if style.text_center {
+            TextAlign::Center
+        } else {
+            TextAlign::Start
+        };
+        let spec = LayoutSpec {
+            font_id: FontId::BITMAP,
+            font_generation: 0,
+            font_size_px: font_size,
+            line_height_px: line_height,
+            align: map_align(align),
+            max_lines: None,
+            hinting: HintingMode::None,
+            variations: VariationSettings::empty(),
+            synthesis_flags: 0,
+        };
+        let runs = self
+            .text_system
+            .layout(content, &spec, max_width_px.map(|w| w.max(1.0)));
+        let natural_width = runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter())
+            .map(|g| g.x_px + g.x_advance_px)
+            .fold(0.0_f32, f32::max);
+        let width = max_width_px.map(|w| w.max(0.0)).unwrap_or(natural_width);
+        let height = line_height * (runs.len().max(1) as f32);
+        Measured::new(width, height)
+    }
+}
+
+impl LeafMeasure for WgpuLeafMeasure<'_> {
+    fn measure_text(
+        &self,
+        content: &str,
+        variant: TextVariant,
+        style: &ResolvedStyle,
+        max_width_px: Option<f32>,
+    ) -> Measured {
+        self.measure_text_inner(content, variant, style, max_width_px)
+    }
+
+    /// Button width is always content-driven (label width + theme
+    /// horizontal padding, floored at `BUTTON_MIN_WIDTH_PX`) regardless
+    /// of `max_width_px` — a button never stretches to fill its container,
+    /// matching the pre-#287 walker's `render_button`. Height/padding come
+    /// from `self.theme` rather than a hardcoded placeholder (#287
+    /// acceptance criterion), so `walk_app_tree`'s painted button and this
+    /// measurer's reserved layout box can never disagree.
+    fn measure_button(
+        &self,
+        label: &str,
+        _variant: ButtonVariant,
+        style: &ResolvedStyle,
+        _max_width_px: Option<f32>,
+    ) -> Measured {
+        let label_width = self
+            .measure_text_inner(label, TextVariant::Label, style, None)
+            .size
+            .width;
+        let spacing = &self.theme.tokens.spacing;
+        let width = (label_width + spacing.button_padding_x * 2.0).max(BUTTON_MIN_WIDTH_PX);
+        Measured::new(width, spacing.button_height)
+    }
+
+    /// Mirrors `bridge.rs::builtins::BadgeRenderer`'s own `width`/`height`
+    /// prop defaults (80×22) so a `badge` custom node reserves the same
+    /// box in the flex layout that `BadgeRenderer::render` actually paints
+    /// into. Every other `Custom` type (including `dot`, which has no
+    /// width/height props and painted zero cursor advance pre-#287)
+    /// contributes no size, matching the trait's own default.
+    fn measure_custom(
+        &self,
+        type_name: &str,
+        props: &serde_json::Value,
+        _style: &ResolvedStyle,
+        _max_width_px: Option<f32>,
+    ) -> Measured {
+        if type_name != "badge" {
+            return Measured::default();
+        }
+        let width = props
+            .get("width")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(80.0);
+        let height = props
+            .get("height")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(22.0);
+        Measured::new(width, height)
+    }
+
+    /// Delegates to `custom_is_overlay` — the same tooltip-always /
+    /// badge-opt-in rule the pre-#287 walker's `is_flow_excluded` enforced
+    /// by hand in `walk_children`. `mkui_layout` now owns dropping an
+    /// overlay node (and its descendants) from flow entirely.
+    fn is_overlay(&self, type_name: &str, props: &serde_json::Value) -> bool {
+        custom_is_overlay(type_name, props)
+    }
+}
+
+/// Whether a `Custom` node type floats over the flow entirely rather than
+/// participating in it — see [`WgpuLeafMeasure::is_overlay`]'s docs.
+/// `Tooltip` floats unconditionally — there is no non-overlay tooltip.
+/// `Badge` floats only when its `overlay` prop is `true`; the default
+/// (`false`, or the prop absent) keeps ordinary flow behavior.
+fn custom_is_overlay(type_name: &str, props: &serde_json::Value) -> bool {
+    match type_name {
+        "tooltip" => true,
+        "badge" => props
+            .get("overlay")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Converts a backend-neutral [`mkui_layout::Rect`] into this crate's own
+/// [`crate::types::Rect`] — the exact conversion
+/// `crates/mkui-wgpu/tests/mkui_layout_interop.rs` proved compatible for
+/// issue #63, now the walker's real per-node lookup (#287).
+fn layout_rect_to_wgpu(r: mkui_layout::Rect) -> Rect {
+    Rect::new(
+        Point::new(r.origin.x, r.origin.y),
+        Size::new(r.size.width, r.size.height),
+    )
+}
+
+/// `layout.get(id)`, converted to this crate's [`crate::types::Rect`].
+/// `None` for a hidden node or a dropped overlay subtree — see
+/// [`mkui_layout::LayoutResult::get`].
+fn node_rect(layout: &mkui_layout::LayoutResult, id: NodeId) -> Option<Rect> {
+    layout.get(id).map(layout_rect_to_wgpu)
+}
 
 /// Walk `tree` from the root and return a fresh [`WalkOutput`] (scene,
 /// hit-tests, per-node layouts).
@@ -339,7 +530,19 @@ fn walk_app_tree_inner(
     let mut layouts: Vec<NodeLayout> = Vec::new();
     let mut stats = WalkStats::default();
 
-    let content_width = (options.viewport.width - VIEWPORT_OUTER_MARGIN_PX * 2.0).max(0.0);
+    // The real layout pass (#287): one upfront `mkui_layout::compute_layout`
+    // call over the whole tree, before any painting — see the module docs'
+    // "Layout model" section. `render_view`/`render_text`/`render_button`
+    // below each just look up their own already-computed rect.
+    let measure = WgpuLeafMeasure {
+        theme: &options.theme,
+        text_system: options.text_system,
+    };
+    let layout_result = mkui_layout::compute_layout(
+        tree,
+        mkui_layout::Size::new(options.viewport.width, options.viewport.height),
+        &measure,
+    );
 
     {
         let mut ctx = WgpuRenderCtx {
@@ -349,8 +552,8 @@ fn walk_app_tree_inner(
             theme: &options.theme,
             hits: &mut hit_tests,
             viewport_width: options.viewport.width,
-            cursor_y: VIEWPORT_OUTER_MARGIN_PX,
-            content_x: VIEWPORT_OUTER_MARGIN_PX,
+            cursor_y: 0.0,
+            content_x: 0.0,
             current_foreground: options.theme.body_style().color,
             text_system: options.text_system,
         };
@@ -360,7 +563,8 @@ fn walk_app_tree_inner(
                 tree,
                 &root.children,
                 &mut ctx,
-                content_width,
+                &layout_result,
+                0.0,
                 &mut layouts,
                 cache,
                 &mut stats,
@@ -378,16 +582,25 @@ fn walk_app_tree_inner(
     ))
 }
 
+/// Walks `children` in document order. `container_content_x` and
+/// `ctx.cursor_y` (as seeded by the caller) are the fallback position a
+/// `Custom` node with no [`mkui_layout::LayoutResult`] entry of its own
+/// (an overlay node, per [`WgpuLeafMeasure::is_overlay`]) gets handed
+/// through `ctx.content_x`/`ctx.cursor_y` — every other node's position
+/// comes straight from the precomputed layout, not from any running
+/// cursor this function tracks itself.
+#[allow(clippy::too_many_arguments)] // #287 added `layout`; every argument is load-bearing walk state, same escape hatch as `components::dot`/`components::button`.
 fn walk_children(
     tree: &AppTree,
     children: &[NodeId],
     ctx: &mut WgpuRenderCtx<'_>,
-    content_width: f32,
+    layout: &mkui_layout::LayoutResult,
+    container_content_x: f32,
     layouts: &mut Vec<NodeLayout>,
     mut cache: Option<&mut WalkCache>,
     stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
-    let mut first_flow_child = true;
+    let mut flow_cursor_y = ctx.cursor_y;
     for child_id in children {
         let Some(node) = tree.get(*child_id) else {
             continue;
@@ -395,36 +608,32 @@ fn walk_children(
         if node.resolved.hidden {
             continue;
         }
-        if is_flow_excluded(node) {
-            // An overlay node (#192) floats over the layout: no gap goes
-            // in before it, and it does not consume the "first flow
-            // child" slot either, so the next flow-participating sibling
-            // is placed exactly as if this node were not in the tree at
-            // all — not merely as if this node had zero height.
-            walk_node_or_cached(
-                tree,
-                node,
-                ctx,
-                content_width,
-                layouts,
-                cache.as_deref_mut(),
-                stats,
-            )?;
-            continue;
-        }
-        if !first_flow_child {
-            ctx.cursor_y += gap_px(&node.resolved);
-        }
-        first_flow_child = false;
+        let rect = node_rect(layout, node.id);
+        // `rect` is `None` only for an overlay `Custom` node (dropped from
+        // `mkui_layout`'s flow entirely) or the documented RecurseChildren
+        // gap — see the module docs. Either way, fall back to this
+        // container's content edge / the running flow position so a
+        // custom renderer that reads `ctx.content_x`/`ctx.cursor_y` still
+        // gets a sane default.
+        ctx.content_x = rect.map(|r| r.origin.x).unwrap_or(container_content_x);
+        ctx.cursor_y = rect.map(|r| r.origin.y).unwrap_or(flow_cursor_y);
         walk_node_or_cached(
             tree,
             node,
             ctx,
-            content_width,
+            layout,
+            rect,
             layouts,
             cache.as_deref_mut(),
             stats,
         )?;
+        if let Some(r) = rect {
+            // Only a node that actually occupies flow space (i.e. has a
+            // real rect) advances the fallback cursor — an overlay node
+            // must not disturb where the *next* sibling's fallback would
+            // land, matching the pre-#287 `is_flow_excluded` contract.
+            flow_cursor_y = r.height_end();
+        }
     }
     Ok(())
 }
@@ -434,40 +643,41 @@ fn walk_children(
 /// path) this is just a thin, allocation-free pass-through to `walk_node`.
 ///
 /// A hit requires `node.id`'s cached entry to match *exactly* on
-/// `subtree_revision` plus every bit of layout context the entry was built
-/// under (`content_x`, `cursor_y`, `content_width`, inherited foreground) —
-/// see the module docs for why no translation is attempted. On a hit, the
-/// cached primitives/hits/layouts are cloned into the live output and
-/// `ctx.cursor_y` jumps straight to the cached exit value — no layout math,
-/// no text measurement, no registry dispatch.
+/// `subtree_revision`, the node's own computed `rect`, and the inherited
+/// foreground — see the module docs for why no translation is attempted.
+/// A node with no computed `rect` (an overlay `Custom` node) is never
+/// served from — or written into — the cache at all; it has nothing
+/// position-stable to key on. On a hit, the cached primitives/hits/layouts
+/// are cloned into the live output — no layout math, no text measurement,
+/// no registry dispatch.
 ///
 /// On a miss, this calls through to [`walk_node`] and, provided the walk
 /// touched no `NodeKind::Custom` node anywhere inside it, captures the
 /// newly-appended primitives/hits/layouts into a fresh cache entry so the
 /// *next* frame can hit.
+#[allow(clippy::too_many_arguments)] // #287 added `layout`/`rect`; every argument is load-bearing walk state, same escape hatch as `components::dot`/`components::button`.
 fn walk_node_or_cached(
     tree: &AppTree,
     node: &mkui_runtime::Node,
     ctx: &mut WgpuRenderCtx<'_>,
-    content_width: f32,
+    layout: &mkui_layout::LayoutResult,
+    rect: Option<Rect>,
     layouts: &mut Vec<NodeLayout>,
     cache: Option<&mut WalkCache>,
     stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
     let Some(cache) = cache else {
         stats.walked += 1;
-        return walk_node(tree, node, ctx, content_width, layouts, None, stats);
+        return walk_node(tree, node, ctx, layout, rect, layouts, None, stats);
     };
-    let Some(subtree_revision) = tree.subtree_revision(node.id) else {
+    let (Some(subtree_revision), Some(rect)) = (tree.subtree_revision(node.id), rect) else {
         stats.walked += 1;
-        return walk_node(tree, node, ctx, content_width, layouts, Some(cache), stats);
+        return walk_node(tree, node, ctx, layout, rect, layouts, Some(cache), stats);
     };
 
     let key = CacheKey {
         subtree_revision,
-        content_x: ctx.content_x,
-        cursor_y: ctx.cursor_y,
-        content_width,
+        rect,
         foreground: ctx.current_foreground,
     };
 
@@ -478,7 +688,6 @@ fn walk_node_or_cached(
                 .extend(entry.primitives.iter().cloned());
             ctx.hits.extend(entry.hits.iter().copied());
             layouts.extend(entry.layouts.iter().copied());
-            ctx.cursor_y = entry.exit_cursor_y;
             stats.reused += 1;
             return Ok(());
         }
@@ -491,7 +700,16 @@ fn walk_node_or_cached(
     let hits_start = ctx.hits.len();
     let layouts_start = layouts.len();
 
-    walk_node(tree, node, ctx, content_width, layouts, Some(cache), stats)?;
+    walk_node(
+        tree,
+        node,
+        ctx,
+        layout,
+        Some(rect),
+        layouts,
+        Some(cache),
+        stats,
+    )?;
 
     let subtree_saw_custom = stats.saw_custom;
     stats.saw_custom = saved_saw_custom || subtree_saw_custom;
@@ -507,7 +725,6 @@ fn walk_node_or_cached(
             node.id,
             CacheEntry {
                 key,
-                exit_cursor_y: ctx.cursor_y,
                 primitives: ctx.scene.primitives[primitives_start..].to_vec(),
                 hits: ctx.hits[hits_start..].to_vec(),
                 layouts: layouts[layouts_start..].to_vec(),
@@ -517,39 +734,22 @@ fn walk_node_or_cached(
     Ok(())
 }
 
-/// Whether `node` is excluded from the walker's vertical-flow spacing
-/// entirely (#192 acceptance criterion #2) — the inter-sibling gap
-/// [`walk_children`] would otherwise insert before it, and the
-/// "first flow child" bookkeeping that gap depends on — not merely from
-/// its own `cursor_y` advance (which the renderer itself already skips;
-/// see `BadgeRenderer::render`'s `overlay` handling in `bridge.rs`).
-///
-/// `Tooltip` floats unconditionally — there is no non-overlay tooltip.
-/// `Badge` floats only when its `overlay` prop is `true`; the default
-/// (`false`, or the prop absent) keeps pre-#192 flow behavior.
-fn is_flow_excluded(node: &mkui_runtime::Node) -> bool {
-    let NodeKind::Custom { type_name, props } = &node.kind else {
-        return false;
-    };
-    match type_name.as_str() {
-        "tooltip" => true,
-        "badge" => props
-            .get("overlay")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        _ => false,
-    }
-}
-
+#[allow(clippy::too_many_arguments)] // #287 added `layout`/`rect`; every argument is load-bearing walk state, same escape hatch as `components::dot`/`components::button`.
 fn walk_node(
     tree: &AppTree,
     node: &mkui_runtime::Node,
     ctx: &mut WgpuRenderCtx<'_>,
-    content_width: f32,
+    layout: &mkui_layout::LayoutResult,
+    rect: Option<Rect>,
     layouts: &mut Vec<NodeLayout>,
     cache: Option<&mut WalkCache>,
     stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
+    // A built-in leaf/container with no computed rect only happens through
+    // the documented RecurseChildren gap (see the module docs) — fall back
+    // to a zero-size rect at the renderer's current position rather than
+    // panicking.
+    let fallback_rect = || Rect::new(Point::new(ctx.content_x, ctx.cursor_y), Size::new(0.0, 0.0));
     match &node.kind {
         NodeKind::Root => {
             // Walked from the top-level entry; recurse defensively in
@@ -559,15 +759,27 @@ fn walk_node(
                 tree,
                 &node.children,
                 ctx,
-                content_width,
+                layout,
+                ctx.content_x,
                 layouts,
                 cache,
                 stats,
             )?;
         }
-        NodeKind::View(_) => render_view(tree, node, ctx, content_width, layouts, cache, stats)?,
-        NodeKind::Text(t) => render_text(node, t, ctx, content_width, layouts),
-        NodeKind::Button(b) => render_button(node, b, ctx, layouts),
+        NodeKind::View(_) => render_view(
+            tree,
+            node,
+            ctx,
+            layout,
+            rect.unwrap_or_else(fallback_rect),
+            layouts,
+            cache,
+            stats,
+        )?,
+        NodeKind::Text(t) => render_text(node, t, ctx, rect.unwrap_or_else(fallback_rect), layouts),
+        NodeKind::Button(b) => {
+            render_button(node, b, ctx, rect.unwrap_or_else(fallback_rect), layouts)
+        }
         NodeKind::Custom { type_name, props } => {
             // Custom renderers may read state that lives outside the tree
             // (#229 — see the module docs): poison this subtree for caching
@@ -581,7 +793,8 @@ fn walk_node(
                     tree,
                     &node.children,
                     ctx,
-                    content_width,
+                    layout,
+                    ctx.content_x,
                     layouts,
                     cache,
                     stats,
@@ -592,83 +805,27 @@ fn walk_node(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // #287 added `layout`/`rect`; every argument is load-bearing walk state, same escape hatch as `components::dot`/`components::button`.
 fn render_view(
     tree: &AppTree,
     node: &mkui_runtime::Node,
     ctx: &mut WgpuRenderCtx<'_>,
-    content_width: f32,
+    layout: &mkui_layout::LayoutResult,
+    rect: Rect,
     layouts: &mut Vec<NodeLayout>,
     cache: Option<&mut WalkCache>,
     stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
     let style = &node.resolved;
-    let pad_x = padding_x_px(style);
-    let pad_y = padding_y_px(style);
-    let outer_top = ctx.cursor_y;
-    let outer_left = ctx.content_x;
-
-    let inner_width = (content_width - pad_x * 2.0).max(0.0);
-    let inner_left = outer_left + pad_x;
 
     // `bg-card` (today the only class that sets `ResolvedStyle::background`)
     // paints a themed quad behind the container's children — previously
     // this role was parsed but never consumed, so the class had no visual
-    // effect on wgpu (issue #205). The quad's final rect isn't known until
-    // the children below have been laid out (height grows with content),
-    // but it must still land *behind* them in `Scene::primitives`' paint
-    // order, so a placeholder is reserved here and patched in place once
-    // `outer_bottom` is known.
-    let bg_index = style.background.map(|_| {
-        ctx.scene.primitives.push(Primitive::Quad(Quad {
-            rect: Rect::new(Point::new(outer_left, outer_top), Size::new(0.0, 0.0)),
-            fill: Color::TRANSPARENT,
-            corner_radii: CornerRadii::all(0.0),
-            stroke: None,
-        }));
-        ctx.scene.primitives.len() - 1
-    });
-
-    let saved_content_x = ctx.content_x;
-    // `text-*` on a container (e.g. the showcase's `bg-card
-    // text-card-foreground` card) must cascade to descendant `Text` nodes
-    // that set no color of their own — the same inheritance `mkui-web`
-    // gets for free from CSS. Save/restore around the recursion mirrors
-    // the existing `content_x` save/restore just above.
-    let saved_foreground = ctx.current_foreground;
-    if let Some(role) = style.foreground {
-        ctx.current_foreground = color_role_foreground(role, ctx.theme);
-    }
-
-    ctx.content_x = inner_left;
-    ctx.cursor_y = outer_top + pad_y;
-
-    walk_children(
-        tree,
-        &node.children,
-        ctx,
-        inner_width,
-        layouts,
-        cache,
-        stats,
-    )?;
-
-    let content_bottom = ctx.cursor_y;
-    let outer_bottom = content_bottom + pad_y;
-
-    // Restore the cursor + content_x for the next sibling. Container
-    // width may have been narrower than the parent's available width;
-    // for v0.6.0 we don't carry that distinction through (all containers
-    // stretch to their parent's content_width).
-    ctx.content_x = saved_content_x;
-    ctx.cursor_y = outer_bottom;
-    ctx.current_foreground = saved_foreground;
-
-    let rect = Rect::new(
-        Point::new(outer_left, outer_top),
-        Size::new(content_width.max(0.0), (outer_bottom - outer_top).max(0.0)),
-    );
-
-    if let (Some(role), Some(idx)) = (style.background, bg_index) {
+    // effect on wgpu (issue #205). `rect` is already final by the time
+    // this runs (#287 computes it in the upfront layout pass), so unlike
+    // the pre-#287 placeholder-then-patch dance, the quad can be pushed
+    // once, in its final paint-order position (behind the children below).
+    if let Some(role) = style.background {
         let fill = color_role_fill(role, ctx.theme);
         let card = ctx.theme.card();
         let corner_radius = if style.rounded_lg {
@@ -684,13 +841,35 @@ fn render_view(
         } else {
             None
         };
-        ctx.scene.primitives[idx] = Primitive::Quad(Quad {
+        ctx.scene.primitives.push(Primitive::Quad(Quad {
             rect,
             fill,
             corner_radii: CornerRadii::all(corner_radius),
             stroke,
-        });
+        }));
     }
+
+    // `text-*` on a container (e.g. the showcase's `bg-card
+    // text-card-foreground` card) must cascade to descendant `Text` nodes
+    // that set no color of their own — the same inheritance `mkui-web`
+    // gets for free from CSS.
+    let saved_foreground = ctx.current_foreground;
+    if let Some(role) = style.foreground {
+        ctx.current_foreground = color_role_foreground(role, ctx.theme);
+    }
+
+    walk_children(
+        tree,
+        &node.children,
+        ctx,
+        layout,
+        rect.origin.x,
+        layouts,
+        cache,
+        stats,
+    )?;
+
+    ctx.current_foreground = saved_foreground;
 
     layouts.push(NodeLayout {
         node: node.id,
@@ -704,7 +883,7 @@ fn render_text(
     node: &mkui_runtime::Node,
     text: &mkui_runtime::TextProps,
     ctx: &mut WgpuRenderCtx<'_>,
-    content_width: f32,
+    rect: Rect,
     layouts: &mut Vec<NodeLayout>,
 ) {
     let style = &node.resolved;
@@ -734,31 +913,15 @@ fn render_text(
         ..body_style
     };
 
-    // #179 (review follow-up): reserve exactly as many lines as the real
-    // text system produces at this width — not a character-count
-    // estimate. An estimate ignores word boundaries and explicit
-    // newlines, so it can (and did) under-reserve for ordinary settings
-    // text; `tessellate_text` caps the lines it actually draws at
-    // `floor(rect.height / line_height)`, so under-reserving silently
-    // drops the rest. `wrapped_line_count` calls the identical `layout`
-    // mkui-text method with the identical spec `tessellate_text` will use
-    // later (only `max_lines` differs, and that's derived FROM this
-    // rect's height) — same input, so the two passes can never disagree.
-    let line_count = wrapped_line_count(
-        ctx.text_system,
-        &text.content,
-        font_size,
-        line_height,
-        align,
-        content_width,
-    );
-    let rect_height = line_height * line_count as f32;
-
-    let rect = Rect::new(
-        Point::new(ctx.content_x, ctx.cursor_y),
-        Size::new(content_width.max(0.0), rect_height),
-    );
-
+    // #179: `rect`'s height already reserves exactly as many lines as the
+    // real text system produces at this width — not a character-count
+    // estimate — because `WgpuLeafMeasure::measure_text` (run during the
+    // upfront `mkui_layout::compute_layout` pass, not here) builds the
+    // identical `LayoutSpec` `tessellation::tessellate_text` builds for
+    // this same `Text` primitive and reserves `line_height * runs.len()`.
+    // `tessellate_text` derives its own `max_lines` from that height later
+    // — same text system, same spec, same width, so the two can never
+    // disagree.
     ctx.scene.text(Text {
         rect,
         content: text.content.clone(),
@@ -769,59 +932,18 @@ fn render_text(
         node: node.id,
         rect,
     });
-
-    ctx.cursor_y += rect_height;
-}
-
-/// How many lines `text_system` actually wraps `content` into at
-/// `content_width` (#179 review follow-up — replaces an earlier
-/// character-count estimate). Builds the identical [`LayoutSpec`]
-/// `tessellation::tessellate_text` builds for the same `Text` primitive
-/// (down to the bitmap-only `font_id` — see that function's own comment
-/// for why), with `max_lines: None` so this call learns the *unclamped*
-/// line count rather than reproducing a clamp. `render_text`'s call site
-/// reserves that many lines of rect height, and `tessellate_text` later
-/// derives its own `max_lines` from that height — same text system, same
-/// spec, same width, so the two can never disagree.
-fn wrapped_line_count(
-    text_system: &dyn TextSystem,
-    content: &str,
-    font_size_px: f32,
-    line_height_px: f32,
-    align: TextAlign,
-    content_width: f32,
-) -> u32 {
-    let spec = LayoutSpec {
-        font_id: FontId::BITMAP,
-        font_generation: 0,
-        font_size_px,
-        line_height_px,
-        align: map_align(align),
-        max_lines: None,
-        hinting: HintingMode::None,
-        variations: VariationSettings::empty(),
-        synthesis_flags: 0,
-    };
-    let runs = text_system.layout(content, &spec, Some(content_width.max(1.0)));
-    (runs.len() as u32).max(1)
 }
 
 fn render_button(
     node: &mkui_runtime::Node,
     button: &mkui_runtime::ButtonProps,
     ctx: &mut WgpuRenderCtx<'_>,
+    rect: Rect,
     layouts: &mut Vec<NodeLayout>,
 ) {
     let theme = ctx.theme;
     let variant = map_button_variant(button.variant);
     let style = theme.button_style(variant, ButtonSize::Default);
-
-    let approx_label_width = button.label.chars().count() as f32 * APPROX_CHAR_WIDTH_PX;
-    let width = (approx_label_width + BUTTON_PADDING_X_PX * 2.0).max(64.0);
-    let rect = Rect::new(
-        Point::new(ctx.content_x, ctx.cursor_y),
-        Size::new(width, BUTTON_HEIGHT_PX),
-    );
 
     let corner_radii = CornerRadii::all(style.corner_radius);
     ctx.scene.quad(Quad {
@@ -892,8 +1014,6 @@ fn render_button(
         node: node.id,
         rect,
     });
-
-    ctx.cursor_y += BUTTON_HEIGHT_PX + BUTTON_GAP_PX;
 }
 
 /// Sub-pixel (below rendering precision) inset applied to each padding
@@ -1040,30 +1160,6 @@ fn map_text_variant(v: TextVariant) -> ThemeTextVariant {
     }
 }
 
-fn gap_px(style: &ResolvedStyle) -> f32 {
-    style
-        .gap
-        .or(style.space_y)
-        .map(|n| n as f32 * TAILWIND_UNIT_PX)
-        .unwrap_or(DEFAULT_GAP_PX)
-}
-
-fn padding_x_px(style: &ResolvedStyle) -> f32 {
-    style
-        .padding_x
-        .or(style.padding)
-        .map(|n| n as f32 * TAILWIND_UNIT_PX)
-        .unwrap_or(0.0)
-}
-
-fn padding_y_px(style: &ResolvedStyle) -> f32 {
-    style
-        .padding_y
-        .or(style.padding)
-        .map(|n| n as f32 * TAILWIND_UNIT_PX)
-        .unwrap_or(0.0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,6 +1168,13 @@ mod tests {
     use crate::types::{Primitive, Size, Text as PrimitiveText};
     use mkui_core::components::{Button, Mkui as CoreMkui, Text as CoreText, View};
     use mkui_text::BitmapTextSystem;
+
+    /// Mirrors `WgpuTheme::default().tokens.spacing.button_height` (#287
+    /// promoted this from a `walker.rs`-local production constant into a
+    /// real theme token — see `WgpuLeafMeasure::measure_button`). Kept here
+    /// as a plain literal so these pre-existing assertions don't need a
+    /// `WgpuTheme::default()` constructed at every call site.
+    const BUTTON_HEIGHT_PX: f32 = 36.0;
 
     fn walk(core: &CoreMkui) -> WalkOutput {
         let registry = WgpuRendererRegistry::with_defaults();
@@ -1185,6 +1288,38 @@ mod tests {
     fn texts_first_node(core: &CoreMkui) -> NodeId {
         let root = core.tree().get(core.tree().root()).expect("root");
         root.children[0]
+    }
+
+    /// #287 acceptance: `mkui_layout` actually understands `flex`/`gap-*`,
+    /// unlike the pre-#287 walker's fixed top-down vertical flow (every
+    /// child, row or not, stacked one per line regardless of class). Two
+    /// buttons under `flex gap-4` must now sit side by side on the same
+    /// row instead of stacking — geometry the old walker could never
+    /// produce, so this is a case where the real algorithm's answer is
+    /// legitimately different (and more correct) than before.
+    #[test]
+    fn flex_row_lays_out_children_side_by_side_instead_of_stacking() {
+        let core = CoreMkui::new().child(
+            View::new()
+                .class("flex gap-4")
+                .child(Button::new("first").on_press(|| {}))
+                .child(Button::new("second").on_press(|| {})),
+        );
+        let out = walk(&core);
+        // Three layout entries: the two buttons plus the `flex` row `View`
+        // itself (pushed last — `render_view` records its own rect after
+        // recursing into its children).
+        assert_eq!(out.layouts.len(), 3);
+        let first = out.layouts[0].rect;
+        let second = out.layouts[1].rect;
+        assert_eq!(
+            first.origin.y, second.origin.y,
+            "flex row children must share the same y, not stack vertically"
+        );
+        assert!(
+            second.origin.x >= first.width_end(),
+            "the second button must sit to the right of (or exactly abutting) the first"
+        );
     }
 
     #[test]
@@ -2033,6 +2168,43 @@ mod tests {
         let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
         assert_eq!(out, fresh);
         let _ = after;
+    }
+
+    /// #287: the redesigned [`CacheKey`] keys on the node's own computed
+    /// rect rather than the pre-#287 `content_x`/`cursor_y`/`content_width`
+    /// triple. A second walk of a genuinely *unchanged* tree — no mutation,
+    /// no `mark_dirty`, same viewport/theme — must therefore hit on every
+    /// single subtree: nothing re-walks at all.
+    #[test]
+    fn cached_walk_of_a_truly_unchanged_tree_reuses_every_subtree() {
+        const ROWS: usize = 5;
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        for i in 0..ROWS {
+            tree.push_text(root, format!("row {i}"), TextVariant::Body, "")
+                .unwrap();
+        }
+
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = hud_options(&text_system, Size::new(800.0, 600.0));
+        let mut cache = WalkCache::new();
+
+        walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("first walk");
+        let (out, stats) =
+            walk_app_tree_cached(&tree, &registry, &options, &mut cache).expect("second walk");
+
+        assert_eq!(
+            stats.walked, 0,
+            "an unchanged tree must re-walk nothing: {stats:?}"
+        );
+        assert_eq!(
+            stats.reused, ROWS as u32,
+            "every row must be served from the cache: {stats:?}"
+        );
+
+        let fresh = walk_app_tree(&tree, &registry, &options).expect("fresh reference walk");
+        assert_eq!(out, fresh);
     }
 
     /// The coarse [`AppTree::mark_dirty`] escape hatch (what an action
