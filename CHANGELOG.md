@@ -8,6 +8,46 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **Node removal API: `ActionRegistry::remove`, `AppTree::remove_node`,
+  FFI `mkui_app_remove_node`, and PyO3 `App.remove_node` (#83).** Option A
+  from #70: the generation-reservation infrastructure #70 left dormant is
+  now load-bearing — `diff_keyed`'s `DiffOp::Remove` (#268) finally has
+  something to apply it to. `ActionRegistry::remove(id)` bumps the slot's
+  generation, returns its index to a `free` pool for the next
+  registration to recycle, and hands back the previously-stored
+  `LocalAction` (or `None` if the slot was already empty or `id` was
+  stale). `AppTree::remove_node(id)` detaches the node from its parent,
+  recurses into every descendant (freeing each one's slot the same way),
+  and unregisters any `ActionId` a removed `Button` held; it rejects a
+  stale/missing id *and* the root (which has no parent to detach from)
+  by returning `None` rather than panicking. The C binding's
+  `mkui_app_remove_node(app, node)` returns `MkuiErrorCode::
+  MkuiInvalidParameter` on the same rejections, never panicking across
+  the `extern "C"` boundary (`ffi_guard` still catches a genuine Rust
+  panic as a defense in depth, but there is none on this path). The
+  Python binding's `App.remove_node(id)` raises `PyValueError` instead.
+  New cross-binding tests (`mkui-c/tests/parity.rs`, `mkui-py/tests/
+  parity.rs`) assert the Rust, C, and Python surfaces each reject a
+  stale `NodeId` the way that binding already rejects a stale id
+  elsewhere (Rust: `None`; C: `MkuiInvalidParameter`; Python:
+  `PyValueError`), with no panic on any of the three. Firing a removed
+  `Button`'s `ActionId` is rejected the same way: `mkui_app_fire_action`
+  and `App.fire_action` check the new `ActionRegistry::contains(id)`
+  against the runtime registry (which `remove` bumped) before consulting
+  their own foreign-callback table — not that table's own `generation`
+  field alone, which only a fresh registration updates — and
+  `mkui_app_remove_node` / `App.remove_node` sweep that table clear of
+  any now-dead entries right after a successful removal, so neither a
+  raw `user_data` pointer nor a `Py<PyAny>` sits referenced indefinitely.
+  Both checks drop their borrow before invoking the callback, so a
+  callback that removes its own node from inside the call `fire_action`
+  is still making (the delete-row-button pattern) does not reenter an
+  already-borrowed `RefCell`. Two buttons sharing one `ActionId`
+  (nothing stops this — the C/Py `register_callback` APIs allow handing
+  the same id to two `*_child` calls) both go dead when either is
+  removed; this is the issue's mandated unregister-on-removal behavior,
+  not refcounted, so a caller that needs two buttons to survive one
+  removal must register two separate actions.
 - **`mkui-runtime::AppTree` gains dynamic-tree operations: child
   reordering in place, wholesale class/prop replacement, and a keyed-
   child diff algorithm (#268).** F2 of the mkui goal/course-correction

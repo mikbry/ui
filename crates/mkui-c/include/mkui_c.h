@@ -132,6 +132,15 @@ struct MkuiNodeId mkui_app_button_child(struct MkuiApp *app,
                                         struct MkuiActionId on_press);
 
 /**
+ * Remove `node` and every descendant from the tree, unregistering any
+ * action a removed `Button` held (#83). Returns `MkuiErrorCode::
+ * MkuiSuccess` on success, or `MkuiErrorCode::MkuiInvalidParameter` if
+ * `node` is stale/missing or names the root (the root has no parent to
+ * detach from and the tree always carries exactly one).
+ */
+struct MkuiResult mkui_app_remove_node(struct MkuiApp *app, struct MkuiNodeId node);
+
+/**
  * Register a C function as a callback. The returned [`MkuiActionId`] is
  * what `mkui_app_button_child` accepts; firing the action invokes
  * `func(user_data)` exactly once.

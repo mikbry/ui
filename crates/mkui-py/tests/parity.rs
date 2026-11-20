@@ -111,6 +111,70 @@ fn py_app_and_rust_runtime_produce_byte_identical_snapshots() {
 }
 
 #[test]
+fn remove_node_detaches_the_node_and_rejects_the_stale_id_afterward() {
+    // Cross-binding parity for #83: `App::remove_node` mirrors
+    // `AppTree::remove_node` and `mkui_app_remove_node`'s contract —
+    // success once, a typed error (never a panic) on a repeat call with
+    // the same now-stale id.
+    let app = App::new_for_test();
+    let root = app.root();
+    let view = app.view_child(root, "").unwrap();
+
+    assert!(app.remove_node(view).is_ok());
+
+    let second = app.remove_node(view);
+    assert!(second.is_err(), "a second remove on the same id must fail");
+    let err_text = second.unwrap_err().to_string();
+    assert!(
+        err_text.contains("stale") || err_text.contains("missing") || err_text.contains("root"),
+        "expected stale/missing/root in error message, got: {err_text}"
+    );
+}
+
+#[test]
+fn removing_a_buttons_node_stops_its_action_from_firing() {
+    // `register_remote_action_for_test` never populates `App`'s own
+    // `callbacks` table (it can't — building a `Py<PyAny>` needs a live
+    // interpreter), so `fire_action` would reject this id as "unknown"
+    // regardless of removal. The real end-to-end regression coverage
+    // (a registered Python callable that actually would have fired) is
+    // `smoke_py.rs`'s live-interpreter script; this test only pins the
+    // `App::remove_node` + `fire_action` contract at the Rust level.
+    let app = App::new_for_test();
+    let root = app.root();
+    let action = app.register_remote_action_for_test();
+    let button = app
+        .button_child(
+            root,
+            "ok",
+            ButtonVariant::Primary.to_ffi(),
+            "",
+            Some(action),
+        )
+        .unwrap();
+
+    assert!(app.remove_node(button).is_ok());
+
+    pyo3::Python::attach(|py| {
+        let fire = app.fire_action(py, action);
+        assert!(
+            fire.is_err(),
+            "firing a removed button's action must be rejected"
+        );
+    });
+}
+
+#[test]
+fn remove_node_on_the_root_raises_python_value_error() {
+    let app = App::new_for_test();
+    let root = app.root();
+    assert!(
+        app.remove_node(root).is_err(),
+        "the root has no parent to detach from and must be protected"
+    );
+}
+
+#[test]
 fn stale_parent_raises_python_value_error() {
     // P1 #3 regression: a fabricated parent must surface as PyValueError,
     // not as a panic across the PyO3 boundary.

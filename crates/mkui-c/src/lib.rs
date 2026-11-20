@@ -448,6 +448,67 @@ pub unsafe extern "C" fn mkui_app_button_child(
     })
 }
 
+/// Remove `node` and every descendant from the tree, unregistering any
+/// action a removed `Button` held (#83). Returns `MkuiErrorCode::
+/// MkuiSuccess` on success, or `MkuiErrorCode::MkuiInvalidParameter` if
+/// `node` is stale/missing or names the root (the root has no parent to
+/// detach from and the tree always carries exactly one).
+#[no_mangle]
+pub unsafe extern "C" fn mkui_app_remove_node(app: *mut MkuiApp, node: MkuiNodeId) -> MkuiResult {
+    ffi_guard(panic_result(), || {
+        if app.is_null() {
+            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "App pointer is null");
+        }
+        // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
+        // A shared reference is enough — every field is a `RefCell`, and a
+        // bare `&mut MkuiApp` here would alias a `&MkuiApp` an outer,
+        // still-on-the-stack call (e.g. `mkui_app_fire_action` invoking a
+        // callback that itself calls `mkui_app_remove_node` on the same
+        // `app` pointer — removing a row from its own delete-button
+        // handler) already holds.
+        let app_ref = unsafe { &*app };
+        let removed = {
+            let mut tree = app_ref.tree.borrow_mut();
+            tree.remove_node(node.into()).is_some()
+        };
+        if !removed {
+            return MkuiResult::error(
+                MkuiErrorCode::MkuiInvalidParameter,
+                "node id is stale, missing, or the root",
+            );
+        }
+        // The runtime already unregistered any action a removed Button
+        // held (bumping its slot generation) — drop this binding's own
+        // foreign-callback entry for it too, so `user_data` doesn't sit
+        // referenced indefinitely and a later `mkui_app_fire_action` on
+        // the id can't resolve a once-removed slot's entry if it is ever
+        // reached before that call's own liveness check (belt + braces;
+        // see `mkui_app_fire_action`).
+        sweep_stale_callbacks(app_ref);
+        MkuiResult::success()
+    })
+}
+
+/// Drop every `callbacks` table entry whose `ActionId` no longer resolves
+/// in the runtime's [`mkui_runtime::ActionRegistry`] (#83). Called after a
+/// successful `mkui_app_remove_node` — the removal may have unregistered
+/// one or more `Button.on_press` ids (the subtree root's own, plus any
+/// descendant's), and this binding has no cheaper way to learn which
+/// indices those were than to ask the registry directly via
+/// [`mkui_runtime::ActionRegistry::contains`].
+fn sweep_stale_callbacks(app_ref: &MkuiApp) {
+    let tree = app_ref.tree.borrow();
+    let actions = tree.actions();
+    let mut callbacks = app_ref.callbacks.borrow_mut();
+    for (idx, slot) in callbacks.iter_mut().enumerate() {
+        if let Some(cb) = slot {
+            if !actions.contains(ActionId::from_raw(idx as u32, cb.generation)) {
+                *slot = None;
+            }
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Action callbacks — binding-owned table keyed by ActionId
 // -------------------------------------------------------------------------
@@ -504,17 +565,47 @@ pub unsafe extern "C" fn mkui_app_fire_action(app: *mut MkuiApp, id: MkuiActionI
         }
         // SAFETY: caller guarantees `app` was produced by `mkui_app_new`.
         let app_ref = unsafe { &*app };
-        let callbacks = app_ref.callbacks.borrow();
-        let Some(slot) = callbacks.get(id.index as usize) else {
-            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Unknown action id");
-        };
-        let Some(cb) = slot else {
-            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is empty");
-        };
-        if cb.generation != id.generation {
-            return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Action id is stale");
+        // Consult the runtime registry first, and drop this borrow before
+        // invoking the callback below (#83): `sweep_stale_callbacks`
+        // clears this binding's own table on removal, but only from
+        // `mkui_app_remove_node` — asking the registry directly here is
+        // what actually rejects a stale id if this ever runs without that
+        // sweep having happened (e.g. a future caller that frees a node
+        // through a path that skips it). Scoping the borrow also means a
+        // callback that re-enters the tree (another `mkui_app_*` call)
+        // does not hit an already-borrowed `RefCell` panic.
+        let is_live = app_ref.tree.borrow().actions().contains(id.into());
+        if !is_live {
+            return MkuiResult::error(
+                MkuiErrorCode::MkuiInvalidParameter,
+                "Action id is stale or removed",
+            );
         }
-        (cb.func)(cb.user_data);
+        // Scoped so the `callbacks` borrow is dropped before `func` runs
+        // below — `func` is the host's callback, which may re-enter mkui
+        // (e.g. `mkui_app_remove_node` on its own button, the delete-row
+        // pattern). `func`/`user_data` are both `Copy` (a fn pointer and a
+        // raw pointer), so copying them out of the borrow costs nothing.
+        let (func, user_data) = {
+            let callbacks = app_ref.callbacks.borrow();
+            let Some(slot) = callbacks.get(id.index as usize) else {
+                return MkuiResult::error(MkuiErrorCode::MkuiInvalidParameter, "Unknown action id");
+            };
+            let Some(cb) = slot else {
+                return MkuiResult::error(
+                    MkuiErrorCode::MkuiInvalidParameter,
+                    "Action id is empty",
+                );
+            };
+            if cb.generation != id.generation {
+                return MkuiResult::error(
+                    MkuiErrorCode::MkuiInvalidParameter,
+                    "Action id is stale",
+                );
+            }
+            (cb.func, cb.user_data)
+        };
+        func(user_data);
         MkuiResult::success()
     })
 }
@@ -752,6 +843,186 @@ mod tests {
     }
 
     #[test]
+    fn a_delete_row_callback_can_remove_its_own_button() {
+        // The headline use case for removal: a row's own delete button
+        // calls `mkui_app_remove_node` on itself from inside the callback
+        // `mkui_app_fire_action` is still in the middle of invoking.
+        // `fire_action` must drop its `callbacks` borrow before calling
+        // the host function, or this reentrant `remove_node` (which
+        // sweeps the same `callbacks` table) hits an already-borrowed
+        // `RefCell` and panics — caught by `ffi_guard`, but surfacing as
+        // a spurious `MkuiRuntimeError` for a removal that actually
+        // happened underneath it.
+        // `button`/`removal_code` are `Cell`s (not plain fields written
+        // through `&mut ctx`) so every access — including the one from
+        // `on_delete`, running through the raw pointer handed to
+        // `mkui_app_register_callback` — goes through shared-reference
+        // interior mutability. A later ordinary write through `&mut ctx`
+        // would invalidate that earlier-constructed `*const DeleteCtx`,
+        // same pattern as `handle_callback_round_trip`'s `Cell<u32>`.
+        struct DeleteCtx {
+            app: *mut MkuiApp,
+            button: std::cell::Cell<MkuiNodeId>,
+            removal_code: std::cell::Cell<Option<MkuiErrorCode>>,
+        }
+
+        extern "C" fn on_delete(data: *mut c_void) {
+            // SAFETY: `data` is `&DeleteCtx` on the test's stack, alive for
+            // the whole call (the test waits for `mkui_app_fire_action` to
+            // return before it does anything else).
+            let ctx = unsafe { &*(data as *const DeleteCtx) };
+            // SAFETY: `ctx.app` is the same live `MkuiApp` the outer
+            // `mkui_app_fire_action` call is already operating on.
+            let result = unsafe { mkui_app_remove_node(ctx.app, ctx.button.get()) };
+            ctx.removal_code.set(Some(result.code));
+        }
+
+        // SAFETY: single-threaded test; every pointer comes from a
+        // `Box::into_raw` we own or a `CString` that outlives the call.
+        unsafe {
+            let app = mkui_app_new();
+            let root = mkui_app_root(app);
+            let class = CString::new("").unwrap();
+            let label = CString::new("delete").unwrap();
+
+            let ctx = DeleteCtx {
+                app,
+                button: std::cell::Cell::new(invalid_node()),
+                removal_code: std::cell::Cell::new(None),
+            };
+            let action = mkui_app_register_callback(
+                app,
+                Some(on_delete),
+                &ctx as *const DeleteCtx as *mut c_void,
+            );
+            let button = mkui_app_button_child(
+                app,
+                root,
+                label.as_ptr(),
+                MKUI_BUTTON_PRIMARY,
+                class.as_ptr(),
+                action,
+            );
+            ctx.button.set(button);
+
+            let fire = mkui_app_fire_action(app, action);
+            assert!(
+                matches!(fire.code, MkuiErrorCode::MkuiSuccess),
+                "the outer fire must still report success, not a RefCell panic \
+                 caught as MkuiRuntimeError: {:?}",
+                fire.code
+            );
+            assert!(
+                matches!(ctx.removal_code.get(), Some(MkuiErrorCode::MkuiSuccess)),
+                "the reentrant remove_node (inside the callback) must itself \
+                 succeed: {:?}",
+                ctx.removal_code.get()
+            );
+            assert!(
+                matches!(
+                    mkui_app_remove_node(app, button).code,
+                    MkuiErrorCode::MkuiInvalidParameter
+                ),
+                "the button must actually be gone after the reentrant removal"
+            );
+
+            mkui_app_free(app);
+        }
+    }
+
+    #[test]
+    fn remove_node_detaches_the_node_and_rejects_the_stale_id_afterward() {
+        // SAFETY: single-threaded test; every pointer comes from a
+        // `Box::into_raw` we own.
+        unsafe {
+            let app = mkui_app_new();
+            let root = mkui_app_root(app);
+            let class = CString::new("").unwrap();
+            let view = mkui_app_view_child(app, root, class.as_ptr());
+            assert_ne!(view, invalid_node());
+
+            let result = mkui_app_remove_node(app, view);
+            assert!(matches!(result.code, MkuiErrorCode::MkuiSuccess));
+
+            // Removing the same (now-stale) id again must fail, not panic.
+            let second = mkui_app_remove_node(app, view);
+            assert!(matches!(second.code, MkuiErrorCode::MkuiInvalidParameter));
+
+            mkui_app_free(app);
+        }
+    }
+
+    #[test]
+    fn removing_a_buttons_node_stops_its_action_from_firing() {
+        // Firing an id whose button was removed must be rejected, not
+        // re-invoke the (possibly use-after-free) callback — the whole
+        // point of the runtime registry's generation bump on remove.
+        unsafe {
+            extern "C" fn cb(data: *mut c_void) {
+                let cell = data as *const std::cell::Cell<u32>;
+                let c = unsafe { &*cell };
+                c.set(c.get() + 1);
+            }
+
+            let counter = std::cell::Cell::new(0u32);
+            let app = mkui_app_new();
+            let root = mkui_app_root(app);
+            let action =
+                mkui_app_register_callback(app, Some(cb), (&counter) as *const _ as *mut c_void);
+            let class = CString::new("").unwrap();
+            let label = CString::new("ok").unwrap();
+            let button = mkui_app_button_child(
+                app,
+                root,
+                label.as_ptr(),
+                MKUI_BUTTON_PRIMARY,
+                class.as_ptr(),
+                action,
+            );
+            assert_ne!(button, invalid_node());
+
+            let removal = mkui_app_remove_node(app, button);
+            assert!(matches!(removal.code, MkuiErrorCode::MkuiSuccess));
+
+            let fire = mkui_app_fire_action(app, action);
+            assert!(
+                matches!(fire.code, MkuiErrorCode::MkuiInvalidParameter),
+                "firing a removed button's action must be rejected"
+            );
+            assert_eq!(
+                counter.get(),
+                0,
+                "the callback must not run after its node was removed"
+            );
+
+            mkui_app_free(app);
+        }
+    }
+
+    #[test]
+    fn remove_node_on_stale_or_root_id_returns_invalid_parameter() {
+        // SAFETY: single-threaded test.
+        unsafe {
+            let app = mkui_app_new();
+            let stale = MkuiNodeId {
+                index: u32::MAX - 1,
+                generation: 0,
+            };
+            let result = mkui_app_remove_node(app, stale);
+            assert!(matches!(result.code, MkuiErrorCode::MkuiInvalidParameter));
+
+            let root = mkui_app_root(app);
+            let root_removal = mkui_app_remove_node(app, root);
+            assert!(matches!(
+                root_removal.code,
+                MkuiErrorCode::MkuiInvalidParameter
+            ));
+
+            mkui_app_free(app);
+        }
+    }
+
+    #[test]
     fn stale_or_fabricated_parent_returns_invalid_not_panic() {
         // Regression test for Codex round-8 P1: a fabricated parent
         // `NodeId` reaching `push_*_unchecked` would `assert!` and abort
@@ -895,6 +1166,17 @@ mod tests {
             test_panic::arm();
             let id = mkui_app_register_callback(dummy_app(), None, ptr::null_mut());
             assert_eq!(id, invalid_action());
+        }
+    }
+
+    #[test]
+    fn panic_remove_node_returns_runtime_error_null_message() {
+        // SAFETY: handle never dereferenced.
+        unsafe {
+            test_panic::arm();
+            let result = mkui_app_remove_node(dummy_app(), invalid_node());
+            assert!(matches!(result.code, MkuiErrorCode::MkuiRuntimeError));
+            assert!(result.message.is_null(), "fallback must not allocate");
         }
     }
 

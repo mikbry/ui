@@ -144,6 +144,134 @@ fn c_ffi_and_rust_runtime_produce_byte_identical_snapshots() {
     assert_eq!(rust_json, c_json);
 }
 
+/// Cross-binding parity for #83's stale-id rejection: build the same
+/// view-under-root shape through the Rust reference API and the C FFI,
+/// remove the view through each, then confirm each binding's
+/// post-removal lookup rejects the stale id — and that neither panics
+/// doing so (round-8's `ffi_guard` would turn a Rust panic into an
+/// `MkuiErrorCode::MkuiRuntimeError` instead of unwinding across the
+/// `extern "C"` boundary, but there should be no panic to catch here at
+/// all).
+#[test]
+fn remove_node_rejects_a_stale_id_identically_in_rust_and_c() {
+    // Rust reference: `AppTree::remove_node` returns the removed node
+    // once, then `None` on a repeat call with the same (now-stale) id.
+    let mut tree = mkui_runtime::AppTree::new();
+    let root = tree.root();
+    let view = tree.push_view(root, "").unwrap();
+    assert!(tree.remove_node(view).is_some());
+    assert!(
+        tree.get(view).is_none(),
+        "Rust: removed id must no longer resolve"
+    );
+    assert!(
+        tree.remove_node(view).is_none(),
+        "Rust: a second remove on the same id must be rejected, not panic"
+    );
+
+    // C FFI: `mkui_app_remove_node` mirrors the same contract —
+    // `MkuiSuccess` once, `MkuiInvalidParameter` (never a panic) after.
+    // SAFETY: single-threaded test; every pointer comes from a
+    // `Box::into_raw` we own.
+    unsafe {
+        let app = mkui_app_new();
+        let root = mkui_app_root(app);
+        let class = CString::new("").unwrap();
+        let view = mkui_app_view_child(app, root, class.as_ptr());
+        assert_ne!(view.index, u32::MAX, "mkui_app_view_child must succeed");
+
+        let first = mkui_app_remove_node(app, view);
+        assert!(
+            matches!(first.code, MkuiErrorCode::MkuiSuccess),
+            "C: first remove must succeed"
+        );
+        let second = mkui_app_remove_node(app, view);
+        assert!(
+            matches!(second.code, MkuiErrorCode::MkuiInvalidParameter),
+            "C: a second remove on the same id must be rejected, not panic"
+        );
+
+        mkui_app_free(app);
+    }
+}
+
+/// Cross-binding invariant for #83: removing a `Button` must stop its
+/// `on_press` action from firing, in both Rust and C — each rejects it
+/// the way that binding already rejects any stale id (Rust: a silent
+/// no-op through `ActionRegistry::fire`; C: `MkuiInvalidParameter` from
+/// `mkui_app_fire_action`, never a panic, even though `mkui_app_remove_node`
+/// unregistered the action in the *runtime* registry while the C
+/// binding's own `callbacks` table — keyed by the same `ActionId` but
+/// tracking its own copy of `generation` — is a separate piece of state
+/// that has to be told about the removal too).
+#[test]
+fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
+    // Rust reference: `ActionRegistry::fire` on the unregistered id is a
+    // silent no-op (it returns a default `RuntimeCtx`, never panics) —
+    // this is `ActionRegistry::get`'s existing stale-id contract, exercised
+    // here through the same remove path `AppTree::remove_node` uses.
+    let mut tree = mkui_runtime::AppTree::new();
+    let root = tree.root();
+    let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
+    let button = tree
+        .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
+        .unwrap();
+    assert!(tree.remove_node(button).is_some());
+    assert!(
+        !tree.actions().contains(action),
+        "Rust: the action must no longer be registered after its button is removed"
+    );
+    let ctx = tree.actions().fire(action);
+    assert!(
+        !ctx.is_dirty(),
+        "Rust: firing the unregistered id must be a no-op"
+    );
+
+    // C FFI: `mkui_app_fire_action` must reject the id with
+    // `MkuiInvalidParameter`, not re-invoke the callback.
+    // SAFETY: single-threaded test; every pointer comes from a
+    // `Box::into_raw` we own.
+    unsafe {
+        extern "C" fn cb(data: *mut c_void) {
+            let cell = data as *const std::cell::Cell<u32>;
+            let c = unsafe { &*cell };
+            c.set(c.get() + 1);
+        }
+
+        let counter = std::cell::Cell::new(0u32);
+        let app = mkui_app_new();
+        let root = mkui_app_root(app);
+        let action =
+            mkui_app_register_callback(app, Some(cb), (&counter) as *const _ as *mut c_void);
+        let class = CString::new("").unwrap();
+        let label = CString::new("ok").unwrap();
+        let button = mkui_app_button_child(
+            app,
+            root,
+            label.as_ptr(),
+            MKUI_BUTTON_PRIMARY,
+            class.as_ptr(),
+            action,
+        );
+
+        let removal = mkui_app_remove_node(app, button);
+        assert!(matches!(removal.code, MkuiErrorCode::MkuiSuccess));
+
+        let fire = mkui_app_fire_action(app, action);
+        assert!(
+            matches!(fire.code, MkuiErrorCode::MkuiInvalidParameter),
+            "C: firing a removed button's action must be rejected"
+        );
+        assert_eq!(
+            counter.get(),
+            0,
+            "C: the callback must not run after its node was removed"
+        );
+
+        mkui_app_free(app);
+    }
+}
+
 #[test]
 fn snapshot_is_deterministic_across_repeated_construction() {
     // Sanity: building the same tree twice must produce the same JSON.

@@ -31,16 +31,15 @@
 //!
 //! 1. For every [`DiffOp::Insert`], build the new node (`push_*`) and
 //!    remember its `NodeId` against the key.
-//! 2. For every [`DiffOp::Remove`], remove the node. **This is the one
-//!    step #268 cannot finish today**: `AppTree` has no `remove_node` yet
-//!    (that's #83, still open — see the #268 tracker comment). A caller
-//!    with a `Remove { node, .. }` op in hand either waits for #83, or
-//!    keeps the node in the tree (e.g. hides it via `set_class`) and
-//!    *excludes it from the `new` sequence it hands to
-//!    `reorder_children`* — `reorder_children` requires `order` to be a
-//!    permutation of *all* current children, so a removed-but-not-
-//!    actually-removed node must still appear somewhere in that call's
-//!    `order` or the call is rejected outright (wrong length).
+//! 2. For every [`DiffOp::Remove`], call
+//!    [`crate::tree::AppTree::remove_node`] (#83) on the node — it detaches
+//!    the node from its parent, recurses into any children it still has,
+//!    and unregisters any `ActionId` a removed `Button` held. Do this
+//!    *before* step 4's `reorder_children` call: a removed node must not
+//!    appear in the `order` slice that call receives, since
+//!    `reorder_children` requires `order` to be a permutation of *all*
+//!    current children and would reject a stale id outright (wrong
+//!    length/unknown id).
 //! 3. For every [`DiffOp::Move`] or [`DiffOp::Update`], resync props as
 //!    needed (e.g. `AppTree::set_text_props`) — both of those setters
 //!    no-op if nothing actually changed, so this is cheap even when
