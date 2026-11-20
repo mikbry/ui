@@ -8,6 +8,43 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`NodeKind::Card` — the second component promoted into the shared
+  contract, plus `Button`'s `disabled` field folded in as the first
+  completed case (#270, #245).** `mkui-runtime::tree::NodeKind` gains a
+  `Card(CardProps)` variant (`CardProps` is empty, like `ViewProps` — fill/
+  border/corner-radius come from each backend's own theme, never a field
+  on the node) and a matching `AppTree::push_card`/`push_card_unchecked`,
+  mirroring `push_view` exactly; `mkui-core::components::Card` is the
+  ergonomic builder, registered in `LoweringRegistry::with_defaults`.
+  `mkui-layout` treats `Card` as a flex container identically to `View`.
+  Every backend renders it through its own native primitive: `mkui-wgpu`'s
+  `walker::render_card` calls `components::card`, the same theme-driven
+  chrome function `render_view`'s `bg-card` class escape hatch (#205)
+  painted a plain `Quad` version of by hand — not byte-identical, since
+  `components::card` forks onto the anti-aliased vector-path lane under
+  this crate's own default `slug` feature; `mkui-web`
+  emits a real `<div class="card">` styled by a new `.card` CSS rule;
+  `mkui-console` wraps the card's flattened lines in a box-drawing
+  `┌───┐`/`└───┘` border, the terminal's native "there is no nested-box
+  model" primitive. `examples/showcase-common`'s "Button Components"
+  section now builds a real `Card` instead of a `View` carrying
+  `bg-card`/`border`/`rounded-lg` classes by hand — the canonical
+  three-backend proof, not just a unit test. Also folded in: `ButtonProps`
+  gains `disabled: bool` (threaded through `push_button`/
+  `push_button_unchecked`, `mkui-c`'s `mkui_app_button_child` (new trailing
+  `int disabled` param) and its C++ wrapper (defaulted, source-compatible),
+  `mkui-py`'s `button_child` (defaulted via `#[pyo3(signature = ...)]`, so
+  existing Python callers are unaffected), every binding's parity-test
+  fixture, and `mkui-wgpu::walker::render_button` (reuses
+  `components::button`'s existing dim-by-`DISABLED_ALPHA_FACTOR` +
+  no-hit-rect-while-disabled contract) / `mkui-web` (native `disabled`
+  attribute) / `mkui-console` (dims the row, `Selectable::on_activate`
+  refuses to hand back the action). See
+  `docs/architecture/0015-component-promotion-process.md` for the
+  repeatable checklist this is the second and first-folded-in instance of,
+  a status table of the ~20 still-unpromoted components, and why Tooltip
+  is the next candidate but carries real anchor/overlay design debt Card
+  did not.
 - **Node removal API: `ActionRegistry::remove`, `AppTree::remove_node`,
   FFI `mkui_app_remove_node`, and PyO3 `App.remove_node` (#83).** Option A
   from #70: the generation-reservation infrastructure #70 left dormant is

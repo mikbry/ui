@@ -8,6 +8,13 @@ body {
 
 /* Component classes */
 * {
+  /* `NodeKind::Card` (#270) — mkui-web's own native primitive for the card
+     chrome, promoted out of the `mkui-wgpu`-only `bg-card` class escape
+     hatch. Same look that class produced (shadcn's Card). */
+  .card {
+    @apply rounded-lg border bg-card text-card-foreground shadow-sm;
+  }
+
   .btn {
     @apply inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50;
   }

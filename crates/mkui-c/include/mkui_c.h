@@ -122,14 +122,17 @@ struct MkuiNodeId mkui_app_text_child(struct MkuiApp *app,
 
 /**
  * Append a `Button` under `parent`. Pass `MkuiActionId{UINT_MAX, UINT_MAX}`
- * for no callback, or an id from [`mkui_app_register_callback`].
+ * for no callback, or an id from [`mkui_app_register_callback`]. `disabled`
+ * is a plain C bool (`0`/`1`) — a disabled button (#245) dims on every
+ * backend and never fires `on_press`, even if one was registered.
  */
 struct MkuiNodeId mkui_app_button_child(struct MkuiApp *app,
                                         struct MkuiNodeId parent,
                                         const char *label,
                                         int variant,
                                         const char *class_name,
-                                        struct MkuiActionId on_press);
+                                        struct MkuiActionId on_press,
+                                        int disabled);
 
 /**
  * Remove `node` and every descendant from the tree, unregistering any

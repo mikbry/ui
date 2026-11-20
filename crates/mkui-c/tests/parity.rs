@@ -44,8 +44,15 @@ fn build_reference_tree_json() -> String {
     // Register the action **before** the button so its id is (0, 0) — the
     // FFI side does the same thing, so the snapshotted ids match.
     let action = tree.actions_mut().register_remote();
-    tree.push_button(header, "OK", ButtonVariant::Primary, "p-6", Some(action))
-        .unwrap();
+    tree.push_button(
+        header,
+        "OK",
+        ButtonVariant::Primary,
+        "p-6",
+        Some(action),
+        false,
+    )
+    .unwrap();
 
     let content = tree.push_view(root, "flex-1").unwrap();
     tree.push_text(content, "Body", TextVariant::Body, "text-foreground")
@@ -89,6 +96,7 @@ unsafe fn build_c_tree_json() -> String {
         MKUI_BUTTON_PRIMARY,
         ok_class.as_ptr(),
         action,
+        0,
     );
 
     let content_class = CString::new("flex-1").unwrap();
@@ -214,7 +222,7 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
     let root = tree.root();
     let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
     let button = tree
-        .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
+        .push_button(root, "ok", ButtonVariant::Primary, "", Some(action), false)
         .unwrap();
     assert!(tree.remove_node(button).is_some());
     assert!(
@@ -252,6 +260,7 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
             MKUI_BUTTON_PRIMARY,
             class.as_ptr(),
             action,
+            0,
         );
 
         let removal = mkui_app_remove_node(app, button);
@@ -270,6 +279,51 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
 
         mkui_app_free(app);
     }
+}
+
+/// #245: a `disabled` button must snapshot byte-identically whether it's
+/// built through the Rust runtime API or the C FFI surface — the same
+/// parity gate every other `ButtonProps` field already has to clear.
+#[test]
+fn disabled_button_produces_byte_identical_snapshots_in_rust_and_c() {
+    let rust_json = {
+        let mut tree = mkui_runtime::AppTree::new();
+        let root = tree.root();
+        tree.push_button(root, "Save", ButtonVariant::Primary, "", None, true)
+            .unwrap();
+        TreeSnapshot::of(&tree).to_json()
+    };
+
+    // SAFETY: single-threaded test; every pointer comes from a
+    // `Box::into_raw`/`CString` we own and free/drop within this scope.
+    let c_json = unsafe {
+        let app = mkui_app_new();
+        let root = mkui_app_root(app);
+        let label = CString::new("Save").unwrap();
+        let empty = CString::new("").unwrap();
+        let no_callback = MkuiActionId {
+            index: u32::MAX,
+            generation: u32::MAX,
+        };
+        mkui_app_button_child(
+            app,
+            root,
+            label.as_ptr(),
+            MKUI_BUTTON_PRIMARY,
+            empty.as_ptr(),
+            no_callback,
+            1,
+        );
+        let json_ptr = mkui_app_snapshot_json(app);
+        assert!(!json_ptr.is_null());
+        let json = CStr::from_ptr(json_ptr).to_str().unwrap().to_string();
+        mkui_free_error_message(json_ptr);
+        mkui_app_free(app);
+        json
+    };
+
+    assert_eq!(rust_json, c_json);
+    assert!(c_json.contains("\"disabled\":true"));
 }
 
 #[test]

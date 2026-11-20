@@ -77,6 +77,10 @@ mod tooltip;
 
 pub use badge::badge;
 pub use button::{button, button_with, ButtonRegions, MIN_TOUCH_TARGET_PX};
+// Crate-private: `walker::render_button` reuses the exact same disabled-dim
+// factor `components::button` applies, instead of a second magic constant
+// (#245/#270).
+pub(crate) use button::DISABLED_ALPHA_FACTOR;
 pub use card::card;
 pub use chip_group::chip_group;
 pub use counter_chip::{counter_chip, CounterChipRegions};

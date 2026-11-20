@@ -199,8 +199,11 @@ impl App {
         Ok(id.into())
     }
 
-    /// Append a `Button` under `parent`.
-    #[pyo3(signature = (parent, label, variant, class_name="", on_press=None))]
+    /// Append a `Button` under `parent`. `disabled` (#245) dims the button
+    /// on every backend and keeps `on_press` from ever firing, even if one
+    /// was registered — defaulted so existing callers are unaffected.
+    #[pyo3(signature = (parent, label, variant, class_name="", on_press=None, disabled=false))]
+    #[allow(clippy::too_many_arguments)]
     pub fn button_child(
         &self,
         parent: PyNodeId,
@@ -208,6 +211,7 @@ impl App {
         variant: i32,
         class_name: &str,
         on_press: Option<PyActionId>,
+        disabled: bool,
     ) -> PyResult<PyNodeId> {
         let variant = ButtonVariant::from_ffi(variant)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
@@ -223,7 +227,7 @@ impl App {
                 "stale or invalid parent NodeId",
             ));
         }
-        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
+        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action, disabled);
         Ok(id.into())
     }
 

@@ -60,7 +60,9 @@ pub enum KindSnapshot {
         label: String,
         variant: crate::props::ButtonVariant,
         on_press: Option<crate::actions::ActionId>,
+        disabled: bool,
     },
+    Card,
     Custom {
         type_name: String,
         props: serde_json::Value,
@@ -105,7 +107,9 @@ impl NodeSnapshot {
                 label: b.label.clone(),
                 variant: b.variant,
                 on_press: b.on_press,
+                disabled: b.disabled,
             },
+            crate::tree::NodeKind::Card(_) => KindSnapshot::Card,
             crate::tree::NodeKind::Custom { type_name, props } => KindSnapshot::Custom {
                 type_name: type_name.clone(),
                 props: props.clone(),
@@ -140,8 +144,15 @@ mod tests {
         tree.push_text(container, "hello", TextVariant::Heading1, "text-2xl")
             .unwrap();
         let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
-        tree.push_button(container, "ok", ButtonVariant::Primary, "p-6", Some(action))
-            .unwrap();
+        tree.push_button(
+            container,
+            "ok",
+            ButtonVariant::Primary,
+            "p-6",
+            Some(action),
+            false,
+        )
+        .unwrap();
         tree
     }
 

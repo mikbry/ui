@@ -42,6 +42,11 @@ pub struct ConsoleButton {
     pub variant: ButtonVariant,
     pub on_press: Option<ActionId>,
     pub style: ResolvedStyle,
+    /// #245: folded in alongside `mkui-wgpu`/`mkui-web` — a disabled
+    /// button's row still renders (dimmed, see `high_level::button_styled_
+    /// content`) but [`Selectable::on_activate`] refuses to hand back its
+    /// action, the terminal's equivalent of "no hit rect"/"no onclick".
+    pub disabled: bool,
 }
 
 /// Console-side projection of one row of a `"menu_list"` `NodeKind::Custom`
@@ -75,6 +80,7 @@ impl Selectable {
     /// if any was registered.
     pub fn on_activate(&self) -> Option<ActionId> {
         match self {
+            Selectable::Button(button) if button.disabled => None,
             Selectable::Button(button) => button.on_press,
             Selectable::MenuItem(item) => item.on_select,
         }
@@ -105,6 +111,16 @@ pub enum Line {
     Spacer,
     Button(usize),
     MenuListItem(usize),
+    /// Top border of a `Card` node's bordered box (#270) — the console's
+    /// own native primitive for the card chrome every other backend paints
+    /// as a filled/stroked rect. Everything between a `CardTop` and its
+    /// matching `CardBottom` is the card's flattened children, unindented
+    /// — the terminal has no nested-box model, so the border is the only
+    /// visual cue, same spirit as `mkui-wgpu`'s pre-#270 `bg-card`
+    /// class-driven tint being the only cue there before a real `Card`
+    /// node existed.
+    CardTop,
+    CardBottom,
 }
 
 /// Walk an [`AppTree`] and flatten it into lines + a unified list of
@@ -131,6 +147,11 @@ fn walk_children(
             NodeKind::View(_) => {
                 walk_children(tree, &node.children, layout, selectables);
             }
+            NodeKind::Card(_) => {
+                layout.push(Line::CardTop);
+                walk_children(tree, &node.children, layout, selectables);
+                layout.push(Line::CardBottom);
+            }
             NodeKind::Text(t) => {
                 let content = t.content.clone();
                 let line = match t.variant {
@@ -151,6 +172,7 @@ fn walk_children(
                     variant: b.variant,
                     on_press: b.on_press,
                     style: node.resolved.clone(),
+                    disabled: b.disabled,
                 }));
                 layout.push(Line::Button(index));
             }
@@ -358,6 +380,57 @@ mod tests {
             })
             .collect();
         assert_eq!(initial_flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn card_node_wraps_its_children_in_card_top_and_bottom_lines() {
+        let app = Mkui::new().child(
+            View::new().child(
+                mkui_core::components::Card::new()
+                    .child(Text::new("inside").variant(TextVariant::Body)),
+            ),
+        );
+
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        let top = layout.iter().position(|l| *l == Line::CardTop);
+        let bottom = layout.iter().position(|l| *l == Line::CardBottom);
+        let body = layout
+            .iter()
+            .position(|l| matches!(l, Line::Body(t) if t == "inside"));
+        assert!(
+            matches!((top, body, bottom), (Some(t), Some(b), Some(bot)) if t < b && b < bot),
+            "expected CardTop, then the body line, then CardBottom, got {layout:?}"
+        );
+    }
+
+    #[test]
+    fn disabled_button_has_no_activatable_action() {
+        use std::cell::Cell;
+        let pressed = Rc::new(Cell::new(false));
+        let pressed_in = Rc::clone(&pressed);
+
+        let app = Mkui::new().child(
+            Button::new("Save")
+                .disabled(true)
+                .on_press(move || pressed_in.set(true)),
+        );
+
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        let Selectable::Button(button) = &selectables[0] else {
+            panic!("expected a Button selectable")
+        };
+        assert!(button.disabled);
+        assert!(
+            selectables[0].on_activate().is_none(),
+            "a disabled button must refuse to hand back its action, even though \
+             on_press was set"
+        );
     }
 
     #[test]

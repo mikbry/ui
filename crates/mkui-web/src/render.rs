@@ -210,6 +210,25 @@ fn render_node(
             }
             el
         }
+        NodeKind::Card(_) => {
+            // #270: a real `<div class="card ...">` through `mkui-web`'s own
+            // native primitive — the `.card` rule lives in the showcase's
+            // CSS (`bg-card`/`text-card-foreground`/`rounded-lg`/`border`
+            // already resolve through the existing `--card`/`--card-foreground`
+            // CSS variables), mirroring the `View` arm's class-merge shape.
+            let el = document.create_element("div")?;
+            let class = if node.class.raw().is_empty() {
+                "card".to_string()
+            } else {
+                format!("card {}", node.class.raw())
+            };
+            el.set_class_name(&class);
+            for child_id in &node.children {
+                let child = render_node(tree, *child_id, document, registry)?;
+                el.append_child(&child)?;
+            }
+            el
+        }
         NodeKind::Button(b) => render_button(tree, node, b, document)?,
         NodeKind::Custom { type_name, props } => {
             // Custom renderers are responsible for their own children; we
@@ -250,25 +269,35 @@ fn render_button(
     };
     button.set_class_name(&class);
 
-    if let Some(action_id) = b.on_press {
-        // Capture the action id; firing routes through the tree's action
-        // registry from inside the renderer's owning Mkui state. The
-        // closure path goes through a thread-local pointer because
-        // wasm_bindgen closures must be `'static + FnMut(JsValue)`.
-        //
-        // For Sprint 4 we wire the closure to look the action up by id
-        // via the global tree pointer that `high_level::Mkui::run` installs
-        // before mounting; see `crate::high_level::with_tree`.
-        let action_idx = action_id.index();
-        let action_gen = action_id.generation();
-        let onclick = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            crate::high_level::fire_action_global(action_idx, action_gen);
-        }) as Box<dyn FnMut(_)>);
-        button
-            .dyn_ref::<web_sys::HtmlElement>()
-            .unwrap()
-            .set_onclick(Some(onclick.as_ref().unchecked_ref()));
-        onclick.forget();
+    // #245: the native `disabled` attribute both dims the button (the
+    // showcase's `.btn` rule already has `disabled:pointer-events-none
+    // disabled:opacity-50`) and makes the browser itself refuse pointer
+    // input — so a disabled button's `onclick` is never wired at all,
+    // mirroring `mkui-wgpu`'s "no hit rect while disabled" contract.
+    button.set_disabled(b.disabled);
+
+    if !b.disabled {
+        if let Some(action_id) = b.on_press {
+            // Capture the action id; firing routes through the tree's
+            // action registry from inside the renderer's owning Mkui
+            // state. The closure path goes through a thread-local pointer
+            // because wasm_bindgen closures must be `'static +
+            // FnMut(JsValue)`.
+            //
+            // For Sprint 4 we wire the closure to look the action up by id
+            // via the global tree pointer that `high_level::Mkui::run`
+            // installs before mounting; see `crate::high_level::with_tree`.
+            let action_idx = action_id.index();
+            let action_gen = action_id.generation();
+            let onclick = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                crate::high_level::fire_action_global(action_idx, action_gen);
+            }) as Box<dyn FnMut(_)>);
+            button
+                .dyn_ref::<web_sys::HtmlElement>()
+                .unwrap()
+                .set_onclick(Some(onclick.as_ref().unchecked_ref()));
+            onclick.forget();
+        }
     }
 
     let _ = tree; // children currently unused on Button
