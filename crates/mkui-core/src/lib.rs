@@ -5,7 +5,8 @@
 //! types every backend agrees on:
 //!
 //! - **Components** ([`components::Component`], [`components::View`],
-//!   [`components::Text`], [`components::Button`]) — the renderable tree.
+//!   [`components::Text`], [`components::Button`], [`components::Card`]) —
+//!   the renderable tree.
 //! - **Headless logic** ([`headless`]) — state, events, and a11y helpers for
 //!   interactive components that are identical across backends.
 //! - **Theme contracts** ([`theme::Theme`], [`theme::ThemeMode`],
@@ -49,7 +50,7 @@ pub mod theme;
 
 pub mod prelude {
     // Components (high-level cross-platform components)
-    pub use crate::components::{Button, Component, MenuList, Mkui, Text, View};
+    pub use crate::components::{Button, Card, Component, MenuList, Mkui, Text, View};
 
     // Headless components (logic-only, no rendering)
     pub use crate::headless::{

@@ -77,6 +77,12 @@ and the records below.
   Sprint 5 wgpu-local layout seam into the permanent, backend-neutral
   substrate; wiring `mkui-wgpu`'s walker to actually consume it is tracked
   separately (issue #287).
+- [ADR 0015 — The component-promotion process, and Card as its second proof](0015-component-promotion-process.md)
+  — The repeatable checklist for promoting a `mkui-wgpu`-only component
+  into the shared `NodeKind` contract across all three back ends, worked
+  through with `Card` (#270) and folding in `Button`'s `disabled` field
+  (#245) as the first completed case. Includes the component status table
+  and why Tooltip is next but not yet.
 
 ## ADR format conventions
 

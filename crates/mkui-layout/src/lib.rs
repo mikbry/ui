@@ -187,6 +187,7 @@ mod tests {
                 ButtonVariant::Ghost,
                 "",
                 Some(action),
+                false,
             )
             .unwrap();
 
@@ -245,7 +246,7 @@ mod tests {
         let mut buttons = [NodeId::from_raw(0, 0); 5];
         for (i, (label, variant)) in button_specs.into_iter().enumerate() {
             buttons[i] = tree
-                .push_button(button_row, label, variant, "", None)
+                .push_button(button_row, label, variant, "", None, false)
                 .unwrap();
         }
 

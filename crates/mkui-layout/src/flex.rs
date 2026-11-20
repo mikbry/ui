@@ -4,8 +4,10 @@
 //!
 //! ## Model
 //!
-//! Every [`mkui_runtime::NodeKind::View`] (and the synthetic `Root`) is a
-//! flex container. `resolved.flex_column`, or the absence of `resolved.flex`
+//! Every [`mkui_runtime::NodeKind::View`] (and the synthetic `Root`, and
+//! [`mkui_runtime::NodeKind::Card`] — #270's card chrome is a container,
+//! not a leaf) is a flex container. `resolved.flex_column`, or the absence
+//! of `resolved.flex`
 //! entirely (ordinary tailwind block flow — children stack one per line),
 //! both mean **Column**; `resolved.flex` without `flex-col` means **Row**.
 //! This mirrors real Tailwind: a plain block element's children already
@@ -288,7 +290,7 @@ fn explicit_height_px(style: &ResolvedStyle) -> Option<f32> {
 fn is_container(tree: &AppTree, id: NodeId) -> bool {
     matches!(
         tree.get(id).map(|n| &n.kind),
-        Some(NodeKind::View(_)) | Some(NodeKind::Root)
+        Some(NodeKind::View(_)) | Some(NodeKind::Card(_)) | Some(NodeKind::Root)
     )
 }
 
@@ -327,7 +329,7 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
         return 0.0;
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) => {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
             let style = &node.resolved;
             let pad_x = padding_x_px(style);
             let kids = visible_children(tree, measure, node);
@@ -387,7 +389,7 @@ fn layout_subtree(
         return ComputedNode::leaf(Size::ZERO);
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) => {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
             layout_container(tree, measure, node, avail_width, avail_height)
         }
         NodeKind::Text(t) => {

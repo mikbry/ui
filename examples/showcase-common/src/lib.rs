@@ -1,5 +1,5 @@
 use mkui::prelude::*;
-use mkui_core::components::{Button, Text, View};
+use mkui_core::components::{Button, Card, Text, View};
 use mkui_core::headless::{ButtonVariant, TextVariant};
 
 // Create the common showcase UI structure
@@ -80,9 +80,12 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                         )
                                 )
                                 .child(
-                                    // Button showcase section
-                                    View::new()
-                                        .class("rounded-lg border bg-card text-card-foreground shadow-sm p-6")
+                                    // Button showcase section — a real `Card` node (#270), the
+                                    // first component promoted beyond `Button` per ADR 0015,
+                                    // rather than a `View` carrying `bg-card`/`border`/
+                                    // `rounded-lg` classes by hand.
+                                    Card::new()
+                                        .class("p-6")
                                         .child(
                                             View::new()
                                                 .class("mb-6")
@@ -159,6 +162,16 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                             #[cfg(feature = "wgpu")]
                                                             println!("Ghost button clicked!");
                                                         })
+                                                )
+                                                .child(
+                                                    // #245 fold-in: a disabled button, with no
+                                                    // `on_press` at all (nothing to fire it with
+                                                    // regardless) — the first time `disabled` is
+                                                    // exercised through the canonical, every-
+                                                    // backend showcase rather than only in tests.
+                                                    Button::new("Disabled")
+                                                        .variant(ButtonVariant::Secondary)
+                                                        .disabled(true)
                                                 )
                                         )
                                 )

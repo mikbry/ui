@@ -24,6 +24,7 @@ struct NodeCounts {
     views: usize,
     texts: usize,
     buttons: usize,
+    cards: usize,
 }
 
 fn count_nodes(app: &Mkui) -> NodeCounts {
@@ -33,6 +34,7 @@ fn count_nodes(app: &Mkui) -> NodeCounts {
             NodeKind::View(_) => counts.views += 1,
             NodeKind::Text(_) => counts.texts += 1,
             NodeKind::Button(_) => counts.buttons += 1,
+            NodeKind::Card(_) => counts.cards += 1,
             NodeKind::Root | NodeKind::Custom { .. } => {}
         }
     }
@@ -55,6 +57,26 @@ fn deeply_nested_tree_is_traversable() {
     assert_eq!(counts.views, 3, "expected 3 nested views");
     assert_eq!(counts.texts, 2, "expected title + footer");
     assert_eq!(counts.buttons, 1, "expected the single primary button");
+}
+
+#[test]
+fn card_counts_as_its_own_node_kind_during_traversal() {
+    // #270: `Card` is a distinct `NodeKind`, not a `View` carrying a
+    // `bg-card` class — a traversal that counts by kind must see it as
+    // such.
+    let app = Mkui::new().child(
+        View::new().child(
+            Card::new()
+                .child(Text::new("inside"))
+                .child(Button::new("ok")),
+        ),
+    );
+
+    let counts = count_nodes(&app);
+    assert_eq!(counts.views, 1);
+    assert_eq!(counts.cards, 1);
+    assert_eq!(counts.texts, 1);
+    assert_eq!(counts.buttons, 1);
 }
 
 #[test]

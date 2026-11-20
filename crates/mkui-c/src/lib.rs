@@ -12,7 +12,7 @@
 //! mkui_app_text_child(app, header, "Title", MKUI_TEXT_HEADING_1, "text-xl");
 //!
 //! MkuiActionId on_click = mkui_app_register_callback(app, &my_callback, NULL);
-//! mkui_app_button_child(app, header, "OK", MKUI_BUTTON_PRIMARY, "", on_click);
+//! mkui_app_button_child(app, header, "OK", MKUI_BUTTON_PRIMARY, "", on_click, 0);
 //!
 //! mkui_app_run_console(app);
 //! mkui_app_free(app);
@@ -401,8 +401,11 @@ pub unsafe extern "C" fn mkui_app_text_child(
 }
 
 /// Append a `Button` under `parent`. Pass `MkuiActionId{UINT_MAX, UINT_MAX}`
-/// for no callback, or an id from [`mkui_app_register_callback`].
+/// for no callback, or an id from [`mkui_app_register_callback`]. `disabled`
+/// is a plain C bool (`0`/`1`) — a disabled button (#245) dims on every
+/// backend and never fires `on_press`, even if one was registered.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)] // `disabled` (#245) joins the existing load-bearing FFI axes.
 pub unsafe extern "C" fn mkui_app_button_child(
     app: *mut MkuiApp,
     parent: MkuiNodeId,
@@ -410,6 +413,7 @@ pub unsafe extern "C" fn mkui_app_button_child(
     variant: c_int,
     class_name: *const c_char,
     on_press: MkuiActionId,
+    disabled: c_int,
 ) -> MkuiNodeId {
     ffi_guard(invalid_node(), || {
         if app.is_null() {
@@ -443,7 +447,8 @@ pub unsafe extern "C" fn mkui_app_button_child(
         if !parent_is_live(&tree, parent) {
             return invalid_node();
         }
-        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
+        let id =
+            tree.push_button_unchecked(parent.into(), label, variant, style, action, disabled != 0);
         id.into()
     })
 }
@@ -781,6 +786,7 @@ mod tests {
                 MKUI_BUTTON_PRIMARY,
                 empty.as_ptr(),
                 invalid_action(),
+                0,
             );
             assert_ne!(button, invalid_node());
 
@@ -902,6 +908,7 @@ mod tests {
                 MKUI_BUTTON_PRIMARY,
                 class.as_ptr(),
                 action,
+                0,
             );
             ctx.button.set(button);
 
@@ -978,6 +985,7 @@ mod tests {
                 MKUI_BUTTON_PRIMARY,
                 class.as_ptr(),
                 action,
+                0,
             );
             assert_ne!(button, invalid_node());
 
@@ -1053,6 +1061,7 @@ mod tests {
                 MKUI_BUTTON_PRIMARY,
                 class.as_ptr(),
                 invalid_action(),
+                0,
             );
             assert_eq!(b, invalid_node());
 
@@ -1154,6 +1163,7 @@ mod tests {
                 MKUI_BUTTON_PRIMARY,
                 ptr::null(),
                 invalid_action(),
+                0,
             );
             assert_eq!(id, invalid_node());
         }
