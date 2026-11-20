@@ -11,11 +11,11 @@
 //!    through [`ActionRegistry::register_local`] and skip the dance.
 //! 2. **Generation reservation.** [`ActionId`] carries a `generation` field
 //!    alongside its `index` so a stale id can be rejected (returning `None`)
-//!    rather than firing a recycled slot's callback. No public API removes an
-//!    action yet, so every live id has `generation == 0` and the guard only
-//!    rejects forged/out-of-band ids today — it is a forward-compat
-//!    reservation for a future node-removal API, not an active recycler.
-//!    See `ActionRegistry` below (#70).
+//!    rather than firing a recycled slot's callback. [`ActionRegistry::remove`]
+//!    bumps a slot's generation and returns it to the `free` pool, so a
+//!    later lookup with the pre-removal id is rejected even after the slot
+//!    is recycled by a later registration (#83, building on the reservation
+//!    laid down by #70).
 //!
 //! The registry is intentionally **not** `Send + Sync`. mkui has no
 //! multithreaded runtime today, and adding the bounds prematurely would force
@@ -28,9 +28,10 @@ use std::rc::Rc;
 use serde::{Deserialize, Serialize};
 
 /// Opaque action handle. The `index` points into [`ActionRegistry`]'s slot
-/// vector; `generation` is reserved to distinguish recycled slots from the
-/// original once a removal API exists (#70). Until then every live id has
-/// `generation == 0`.
+/// vector; `generation` distinguishes a recycled slot from the id that
+/// originally occupied it (#83) — [`ActionRegistry::remove`] bumps it, so
+/// an id minted before a remove+reuse cycle is rejected by
+/// [`ActionRegistry::get`] after the slot is recycled.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ActionId {
     index: u32,
@@ -60,21 +61,20 @@ impl ActionId {
 pub type LocalAction = Rc<RefCell<dyn FnMut(&mut RuntimeCtx)>>;
 
 /// Single-threaded action table. Slots are addressed by `ActionId`. Each slot
-/// carries a `generation` so a stale id can be rejected on lookup, but no
-/// public API removes an action today, so slots are append-only and every
-/// generation stays `0`.
-///
-// TODO: re-introduce a `free: Vec<u32>` reuse pool (and an `ActionRegistry::
-// remove(id)` that pushes to it + bumps the slot generation) when a
-// node-removal API lands — the Codex round-7 use-after-free guard was designed
-// for that path but the removal API never shipped (#70).
+/// carries a `generation` so a stale id can be rejected on lookup;
+/// [`ActionRegistry::remove`] bumps it and returns the slot to `free` so a
+/// later registration can recycle it (#83).
 #[derive(Default)]
 pub struct ActionRegistry {
     slots: Vec<Slot>,
+    /// Indices of removed slots, available for reuse by the next
+    /// `register_local_action`/`register_remote` call (#83).
+    free: Vec<u32>,
 }
 
 struct Slot {
-    /// Always `0` today; reserved for the future removal/recycle path (#70).
+    /// Bumped by [`ActionRegistry::remove`] every time this slot is freed,
+    /// so a pre-removal `ActionId` is rejected once the slot is recycled.
     generation: u32,
     action: Option<LocalAction>,
 }
@@ -96,36 +96,75 @@ impl ActionRegistry {
     /// this when it needs to wrap a foreign callback (Python `PyObject`,
     /// C function pointer) in an Rc<RefCell<...>> first.
     pub fn register_local_action(&mut self, action: LocalAction) -> ActionId {
-        let index = self.slots.len() as u32;
-        self.slots.push(Slot {
-            generation: 0,
-            action: Some(action),
-        });
-        ActionId {
-            index,
-            generation: 0,
-        }
+        self.alloc_slot(Some(action))
     }
 
     /// Register an `ActionId` with no local handler — used by FFI bindings
     /// that own their own callback table and only need the runtime to
     /// allocate a stable id.
     pub fn register_remote(&mut self) -> ActionId {
-        let index = self.slots.len() as u32;
-        self.slots.push(Slot {
-            generation: 0,
-            action: None,
-        });
-        ActionId {
-            index,
-            generation: 0,
+        self.alloc_slot(None)
+    }
+
+    /// Shared allocation path for `register_local_action`/`register_remote`:
+    /// reuse a freed slot (its generation already bumped by
+    /// [`ActionRegistry::remove`]) if one is available, otherwise append a
+    /// fresh slot at `generation == 0`.
+    fn alloc_slot(&mut self, action: Option<LocalAction>) -> ActionId {
+        if let Some(index) = self.free.pop() {
+            let slot = &mut self.slots[index as usize];
+            slot.action = action;
+            ActionId {
+                index,
+                generation: slot.generation,
+            }
+        } else {
+            let index = self.slots.len() as u32;
+            self.slots.push(Slot {
+                generation: 0,
+                action,
+            });
+            ActionId {
+                index,
+                generation: 0,
+            }
         }
+    }
+
+    /// Remove `id`'s action: bump the slot's generation and return its index
+    /// to the `free` pool so a later registration can recycle it. Returns
+    /// the previously-stored action, or `None` if the slot was already
+    /// empty (an FFI-only registration) or `id` is stale/missing — removal
+    /// is idempotent, a double `remove` on the same id is a no-op the
+    /// second time.
+    pub fn remove(&mut self, id: ActionId) -> Option<LocalAction> {
+        let slot = self.slots.get_mut(id.index as usize)?;
+        if slot.generation != id.generation {
+            return None;
+        }
+        let action = slot.action.take();
+        slot.generation = slot.generation.wrapping_add(1);
+        self.free.push(id.index);
+        action
+    }
+
+    /// Whether `id` still names a live slot — `true` if the index is in
+    /// range and the generation matches, regardless of whether the slot
+    /// holds a local closure. Unlike [`ActionRegistry::get`], this also
+    /// answers `true` for a live FFI-only (`register_remote`) slot, so a
+    /// binding's own foreign-callback table (keyed by the same `ActionId`)
+    /// can check liveness after a [`ActionRegistry::remove`] without the
+    /// registry handing back a payload it was never given (#83).
+    pub fn contains(&self, id: ActionId) -> bool {
+        self.slots
+            .get(id.index as usize)
+            .is_some_and(|slot| slot.generation == id.generation)
     }
 
     /// Look up a registered local action by id. Returns `None` if the slot
     /// is empty (FFI-only registration) or if the id's `generation` does not
-    /// match the slot. No removal API exists yet, so a mismatch only happens
-    /// for a forged/out-of-band id today (#70).
+    /// match the slot — either a forged/out-of-band id, or one minted before
+    /// a [`ActionRegistry::remove`] + recycle cycle (#83).
     pub fn get(&self, id: ActionId) -> Option<&LocalAction> {
         let slot = self.slots.get(id.index as usize)?;
         if slot.generation != id.generation {
@@ -252,13 +291,90 @@ mod tests {
     #[test]
     fn fire_with_wrong_generation_is_noop() {
         // Build an id that points at a real slot but with the wrong
-        // generation. No removal API exists yet (#70), so this exercises the
-        // forward-compat guard rejecting a forged/out-of-band id rather than a
-        // genuinely recycled slot.
+        // generation — a forged/out-of-band id, independent of removal.
         let mut reg = ActionRegistry::new();
         let real = reg.register_local(|ctx| ctx.mark_dirty());
         let stale = ActionId::from_raw(real.index(), real.generation().wrapping_add(1));
         let ctx = reg.fire(stale);
         assert!(!ctx.is_dirty(), "stale id must not fire");
+    }
+
+    #[test]
+    fn remove_returns_the_previously_stored_action() {
+        let mut reg = ActionRegistry::new();
+        let id = reg.register_local(|_| {});
+        assert!(reg.get(id).is_some());
+
+        let removed = reg.remove(id);
+        assert!(removed.is_some(), "remove must hand back the stored action");
+        assert!(
+            reg.get(id).is_none(),
+            "the removed id must no longer resolve"
+        );
+    }
+
+    #[test]
+    fn remove_on_an_ffi_only_slot_returns_none_but_still_frees_it() {
+        let mut reg = ActionRegistry::new();
+        let id = reg.register_remote();
+        assert!(reg.remove(id).is_none(), "no local action was ever stored");
+        assert!(reg.get(id).is_none());
+    }
+
+    #[test]
+    fn remove_on_a_stale_id_is_a_noop() {
+        let mut reg = ActionRegistry::new();
+        let stale = ActionId::from_raw(99, 0);
+        assert!(reg.remove(stale).is_none());
+    }
+
+    #[test]
+    fn remove_twice_on_the_same_id_is_idempotent() {
+        let mut reg = ActionRegistry::new();
+        let id = reg.register_local(|_| {});
+        assert!(reg.remove(id).is_some());
+        assert!(
+            reg.remove(id).is_none(),
+            "a second remove on the same (now-stale) id must be a no-op"
+        );
+    }
+
+    #[test]
+    fn contains_is_true_for_a_live_remote_slot_even_though_get_is_none() {
+        // `register_remote` slots never carry a local closure, so `get`
+        // always returns `None` for them. `contains` must still report
+        // them live — a binding's foreign-callback table (C/Py) uses this
+        // to detect removal, and `get` alone can't distinguish "live,
+        // FFI-only" from "removed" (#83).
+        let mut reg = ActionRegistry::new();
+        let id = reg.register_remote();
+        assert!(reg.get(id).is_none());
+        assert!(reg.contains(id));
+
+        reg.remove(id);
+        assert!(!reg.contains(id), "removed id must no longer be contained");
+    }
+
+    #[test]
+    fn removed_slot_is_recycled_with_a_bumped_generation() {
+        let mut reg = ActionRegistry::new();
+        let first = reg.register_local(|_| {});
+        reg.remove(first);
+
+        let second = reg.register_local(|_| {});
+        assert_eq!(
+            second.index(),
+            first.index(),
+            "the freed slot must be reused"
+        );
+        assert_ne!(
+            second.generation(),
+            first.generation(),
+            "the recycled slot must carry a new generation"
+        );
+
+        // The pre-removal id must not resolve to the new occupant's action.
+        assert!(reg.get(first).is_none());
+        assert!(reg.get(second).is_some());
     }
 }

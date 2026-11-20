@@ -57,7 +57,7 @@ def on_click():
     fired.append(True)
 
 action = app.register_callback(on_click)
-app.button_child(header, "OK", mkui_py.BUTTON_PRIMARY, "", action)
+button = app.button_child(header, "OK", mkui_py.BUTTON_PRIMARY, "", action)
 
 # root + header + text + button == 4 live nodes.
 assert app.node_count() == 4, f"node_count={app.node_count()}"
@@ -65,6 +65,36 @@ assert app.node_count() == 4, f"node_count={app.node_count()}"
 # The registered Python callable fires through the Rust action table.
 app.fire_action(action)
 assert fired == [True], f"callback did not fire: {fired}"
+
+# Removing the button's node unregisters its action too (#83) — through
+# the real PyO3 dispatcher, not called directly from Rust the way
+# tests/parity.rs exercises it. Firing the now-stale id must raise a
+# ValueError, never silently re-invoke the callback.
+app.remove_node(button)
+assert app.node_count() == 3, f"node_count after removal={app.node_count()}"
+try:
+    app.fire_action(action)
+    raise AssertionError("firing a removed button's action must raise")
+except ValueError:
+    pass
+assert fired == [True], "the callback must not fire again after its node was removed"
+
+# The headline removal use case: a row's own delete button removes
+# itself from inside its own callback. `fire_action` must drop its
+# callback-table borrow before calling into Python, or this reentrant
+# `remove_node` (which sweeps that same table) hits an already-borrowed
+# RefCell and raises PanicException instead of completing normally.
+row = app.view_child(root, "")
+deleted = []
+def on_delete():
+    app.remove_node(delete_button)
+    deleted.append(True)
+
+delete_action = app.register_callback(on_delete)
+delete_button = app.button_child(row, "Delete", mkui_py.BUTTON_DESTRUCTIVE, "", delete_action)
+app.fire_action(delete_action)
+assert deleted == [True], "the delete callback itself must complete normally"
+assert app.node_count() == 4, f"node_count after self-removal={app.node_count()}"
 
 # Module-level conveniences are wired up.
 assert mkui_py.version(), "version() returned empty"

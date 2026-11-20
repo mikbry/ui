@@ -227,6 +227,28 @@ impl App {
         Ok(id.into())
     }
 
+    /// Remove `id` and every descendant from the tree, unregistering any
+    /// action a removed `Button` held (#83). Raises `PyValueError` if `id`
+    /// is stale/missing or names the root (the root has no parent to
+    /// detach from and the tree always carries exactly one).
+    pub fn remove_node(&self, id: PyNodeId) -> PyResult<()> {
+        let removed = {
+            let mut tree = self.tree.borrow_mut();
+            tree.remove_node(id.into()).is_some()
+        };
+        if !removed {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "node id is stale, missing, or the root",
+            ));
+        }
+        // The runtime already unregistered any action a removed Button
+        // held — drop this binding's own callback-table entry for it too
+        // (#83), so the `Py<PyAny>` callable doesn't stay referenced
+        // indefinitely.
+        self.sweep_stale_callbacks();
+        Ok(())
+    }
+
     /// Register a Python callable as an action callback. Returns an
     /// `ActionId` the host passes to `button_child`. The callable is
     /// kept alive on the Rust side via `Py<PyAny>`.
@@ -247,23 +269,46 @@ impl App {
     /// Fire an action by id. Used in tests; production renderers fire on
     /// real user interaction.
     pub fn fire_action(&self, py: Python<'_>, id: PyActionId) -> PyResult<()> {
-        let callbacks = self.callbacks.borrow();
-        let Some(slot) = callbacks.get(id.index as usize) else {
+        // Consult the runtime registry first, and drop this borrow before
+        // calling into Python below (#83) — `sweep_stale_callbacks` clears
+        // this binding's own table on removal, but only from
+        // `remove_node`; asking the registry directly here is what
+        // actually rejects a stale id if this is ever reached without
+        // that sweep having run. Scoping the borrow also avoids holding
+        // it across `cb.func.call0`, in case the callable re-enters the
+        // tree.
+        let is_live = self.tree.borrow().actions().contains(id.into());
+        if !is_live {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "unknown action id",
-            ));
-        };
-        let Some(cb) = slot else {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "empty action id",
-            ));
-        };
-        if cb.generation != id.generation {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "stale action id",
+                "stale or removed action id",
             ));
         }
-        cb.func.call0(py)?;
+        // Scoped so the `callbacks` borrow is dropped before `func.call0`
+        // runs below — the Python callable may re-enter the tree (e.g.
+        // `app.remove_node` on its own button, the delete-row pattern),
+        // and `remove_node`'s `sweep_stale_callbacks` needs a fresh
+        // `borrow_mut` on this same `RefCell`. `clone_ref` is a cheap
+        // refcount bump, not a deep clone of the underlying callable.
+        let func = {
+            let callbacks = self.callbacks.borrow();
+            let Some(slot) = callbacks.get(id.index as usize) else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "unknown action id",
+                ));
+            };
+            let Some(cb) = slot else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "empty action id",
+                ));
+            };
+            if cb.generation != id.generation {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "stale action id",
+                ));
+            }
+            cb.func.clone_ref(py)
+        };
+        func.call0(py)?;
         Ok(())
     }
 
@@ -345,6 +390,26 @@ impl App {
             .actions_mut()
             .register_remote()
             .into()
+    }
+
+    /// Drop every `callbacks` table entry whose `ActionId` no longer
+    /// resolves in the runtime's `ActionRegistry` (#83). Called after a
+    /// successful `remove_node` — the removal may have unregistered one
+    /// or more `Button.on_press` ids (the subtree root's own, plus any
+    /// descendant's), and this binding has no cheaper way to learn which
+    /// indices those were than to ask the registry directly via
+    /// `ActionRegistry::contains`.
+    fn sweep_stale_callbacks(&self) {
+        let tree = self.tree.borrow();
+        let actions = tree.actions();
+        let mut callbacks = self.callbacks.borrow_mut();
+        for (idx, slot) in callbacks.iter_mut().enumerate() {
+            if let Some(cb) = slot {
+                if !actions.contains(ActionId::from_raw(idx as u32, cb.generation)) {
+                    *slot = None;
+                }
+            }
+        }
     }
 }
 

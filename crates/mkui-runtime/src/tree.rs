@@ -280,8 +280,13 @@ impl AppTree {
         slot.node.as_mut()
     }
 
-    /// Iterate every live node in insertion order. Order is load-bearing
-    /// for parity snapshots.
+    /// Iterate every live node in slot order. This is insertion order only
+    /// until a [`AppTree::remove_node`] + reuse cycle recycles a
+    /// lower-index slot (#83) — not load-bearing for parity: the byte-
+    /// identical snapshot gate (`crate::snapshot::TreeSnapshot::of`) walks
+    /// from the root through each node's `children` instead of this
+    /// iterator, so a binding only needs to apply the same operations in
+    /// the same order, not match this method's own order.
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.iter().filter_map(|s| s.node.as_ref())
     }
@@ -636,11 +641,73 @@ impl AppTree {
         id
     }
 
+    /// Remove `id` and every descendant, releasing each freed slot's
+    /// `NodeId` index back to `alloc_node`'s `free` pool and
+    /// unregistering any [`ActionId`] a removed `Button` held. Returns the
+    /// removed node (the subtree root only, not its descendants), or `None`
+    /// if `id` is stale/missing **or names the root** — the root has no
+    /// parent to detach from and the tree always carries exactly one, so
+    /// removing it is rejected the same way a stale id is.
+    ///
+    /// Each freed slot's generation is bumped here, at removal time (not
+    /// deferred to the next `alloc_node` reuse) — see
+    /// [`NodeId`]'s docs: a lookup against the pre-removal id must return
+    /// `None` immediately, not only after the slot happens to be recycled.
+    ///
+    /// Nothing prevents two `Button`s from sharing one [`ActionId`] (the C
+    /// and Python bindings' `register_callback` explicitly allow it: hand
+    /// the same id to two `*_child` calls). Removing either button
+    /// unregisters that shared id via [`ActionRegistry::remove`] — the
+    /// other button's `on_press` silently stops firing too. This is the
+    /// issue's mandated behavior (unregister on removal, no refcounting),
+    /// not an oversight; a caller that needs two live buttons to survive
+    /// one removal must register two separate actions.
+    pub fn remove_node(&mut self, id: NodeId) -> Option<Node> {
+        let node = self.get(id)?;
+        let parent = node.parent?;
+        let removed = self.free_subtree(id);
+        if let Some(parent_node) = self.get_mut(parent) {
+            parent_node.children.retain(|child| *child != id);
+        }
+        self.touch(parent);
+        removed
+    }
+
+    /// Post-order free of `id` and every descendant: children first, then
+    /// `id`'s own slot. Does **not** touch `id`'s entry in its parent's
+    /// `children` list — the caller ([`AppTree::remove_node`]) does that
+    /// once, for the subtree root only; a freed descendant's parent is
+    /// being freed in the same pass, so patching its `children` Vec would
+    /// be wasted work.
+    fn free_subtree(&mut self, id: NodeId) -> Option<Node> {
+        let node = self.get(id)?.clone();
+        for child in node.children.clone() {
+            self.free_subtree(child);
+        }
+        if let NodeKind::Button(ButtonProps {
+            on_press: Some(action_id),
+            ..
+        }) = &node.kind
+        {
+            self.actions.remove(*action_id);
+        }
+        let slot = &mut self.nodes[id.index() as usize];
+        slot.generation = slot.generation.wrapping_add(1);
+        slot.node = None;
+        slot.own_revision = 0;
+        slot.subtree_revision = 0;
+        self.free.push(id.index());
+        Some(node)
+    }
+
     fn alloc_node(&mut self, parent: Option<NodeId>, kind: NodeKind, class: StyleClass) -> NodeId {
         let resolved = class.parse().unwrap_or_default();
         if let Some(idx) = self.free.pop() {
             let slot = &mut self.nodes[idx as usize];
-            slot.generation = slot.generation.wrapping_add(1);
+            // Generation was already bumped by `free_subtree` when this slot
+            // was freed — do not bump again here, or a lookup against the
+            // id minted by *this* allocation would itself look one
+            // generation too new relative to what `remove_node` guaranteed.
             slot.own_revision = 0;
             slot.subtree_revision = 0;
             let id = NodeId::from_raw(idx, slot.generation);
@@ -1200,5 +1267,112 @@ mod tests {
         let tree = AppTree::new();
         let stale = NodeId::from_raw(99, 0);
         assert!(tree.subtree_revision(stale).is_none());
+    }
+
+    // ---- remove_node (#83) ----
+
+    #[test]
+    fn remove_node_detaches_from_its_parents_children() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let view = tree.push_view(root, "").unwrap();
+        tree.clear_dirty();
+
+        let removed = tree.remove_node(view);
+        assert!(removed.is_some());
+        assert!(tree.get(root).unwrap().children.is_empty());
+        assert!(
+            tree.get(view).is_none(),
+            "removed id must no longer resolve"
+        );
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn remove_node_recursively_removes_children() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let parent = tree.push_view(root, "").unwrap();
+        let child = tree.push_text(parent, "hi", TextVariant::Body, "").unwrap();
+        let grandchild = tree.push_view(child, "").unwrap();
+
+        tree.remove_node(parent);
+
+        assert!(tree.get(parent).is_none());
+        assert!(tree.get(child).is_none(), "child must be removed too");
+        assert!(
+            tree.get(grandchild).is_none(),
+            "grandchild must be removed too"
+        );
+        // root itself and its direct children list survive.
+        assert!(tree.get(root).unwrap().children.is_empty());
+    }
+
+    #[test]
+    fn remove_node_unregisters_a_buttons_on_press_action() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
+        let button = tree
+            .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
+            .unwrap();
+
+        tree.remove_node(button);
+
+        assert!(
+            tree.actions().get(action).is_none(),
+            "the button's action must be unregistered on node removal"
+        );
+    }
+
+    #[test]
+    fn remove_node_on_a_stale_id_returns_none() {
+        let mut tree = AppTree::new();
+        let stale = NodeId::from_raw(99, 0);
+        assert!(tree.remove_node(stale).is_none());
+    }
+
+    #[test]
+    fn remove_node_twice_on_the_same_id_is_idempotent() {
+        let mut tree = AppTree::new();
+        let view = tree.push_view(tree.root(), "").unwrap();
+        assert!(tree.remove_node(view).is_some());
+        assert!(
+            tree.remove_node(view).is_none(),
+            "a second remove on the same (now-stale) id must be a no-op"
+        );
+    }
+
+    #[test]
+    fn remove_node_rejects_the_root() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        assert!(
+            tree.remove_node(root).is_none(),
+            "the root has no parent to detach from and must be protected"
+        );
+        assert!(tree.get(root).is_some(), "root must still be live");
+    }
+
+    #[test]
+    fn removed_node_slot_is_recycled_with_a_bumped_generation() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let first = tree.push_view(root, "").unwrap();
+        tree.remove_node(first);
+
+        let second = tree.push_view(root, "").unwrap();
+        assert_eq!(
+            second.index(),
+            first.index(),
+            "the freed slot must be reused"
+        );
+        assert_ne!(
+            second.generation(),
+            first.generation(),
+            "the recycled slot must carry a new generation"
+        );
+        assert!(tree.get(first).is_none());
+        assert!(tree.get(second).is_some());
     }
 }
