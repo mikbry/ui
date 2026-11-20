@@ -14,6 +14,9 @@
 //!   without smuggling Rust closures through it).
 //! - [`StyleClass`] — utility-class strings and the [`ResolvedStyle`] they
 //!   parse to.
+//! - [`diff_keyed`] — minimal add/remove/reorder/update operations for a
+//!   shuffled keyed child list (#268); pairs with [`AppTree::reorder_children`]
+//!   to apply the result.
 //! - JSON snapshots (feature `snapshot`) — canonical, key-sorted
 //!   serializations used by the parity tests to prove Rust, C, and Python
 //!   constructions all produce the same tree.
@@ -37,6 +40,7 @@
 //! arrives.
 
 pub mod actions;
+pub mod diff;
 pub mod props;
 pub mod style;
 pub mod tree;
@@ -45,6 +49,7 @@ pub mod tree;
 pub mod snapshot;
 
 pub use actions::{ActionId, ActionRegistry, LocalAction, RuntimeCtx, RuntimeSignal};
+pub use diff::{diff_keyed, DiffOp};
 pub use props::{ButtonVariant, ButtonVariantParseError, TextVariant, TextVariantParseError};
 pub use style::{ClassParseError, ColorRole, ResolvedStyle, StateStyle, StyleClass};
 pub use tree::{AppTree, ButtonProps, Node, NodeId, NodeKind, TextProps, ViewProps};

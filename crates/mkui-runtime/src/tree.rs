@@ -455,6 +455,173 @@ impl AppTree {
         changed
     }
 
+    /// Replace a node's class string in place, re-resolving its style —
+    /// same no-op-on-equal, same-`NodeId`-survives contract as
+    /// [`AppTree::set_text`] (#268). Returns `false` (no mutation) when
+    /// `class` already matches `node.class.raw()`, when `id` is
+    /// stale/missing, or on a parse error (never today — see
+    /// [`StyleClass::parse`]).
+    pub fn set_class(&mut self, id: NodeId, class: &str) -> Result<bool, ClassParseError> {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return Ok(false);
+            };
+            if node.class.raw() == class {
+                false
+            } else {
+                node.class.set_raw(class);
+                node.resolved = node.class.parse()?;
+                true
+            }
+        };
+        if changed {
+            self.touch(id);
+        }
+        Ok(changed)
+    }
+
+    /// Wholesale replace a `Text` node's content *and* variant in one
+    /// touch — the "replace a node's props in place" half of #268, for
+    /// callers that need to change more than [`AppTree::set_text`]'s
+    /// single field without losing the node's identity. No-op-on-equal:
+    /// returns `false` if both fields already match (and does not touch
+    /// the tree), `false` if `id` is stale/missing or not a `Text` node.
+    pub fn set_text_props(&mut self, id: NodeId, content: &str, variant: TextVariant) -> bool {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::Text(text) = &mut node.kind else {
+                return false;
+            };
+            if text.content == content && text.variant == variant {
+                false
+            } else {
+                if text.content != content {
+                    text.content.clear();
+                    text.content.push_str(content);
+                }
+                text.variant = variant;
+                true
+            }
+        };
+        if changed {
+            self.touch(id);
+        }
+        changed
+    }
+
+    /// Wholesale replace a `Button` node's label, variant, and
+    /// `on_press` action in one touch. Same no-op-on-equal contract as
+    /// [`AppTree::set_text_props`].
+    pub fn set_button_props(
+        &mut self,
+        id: NodeId,
+        label: &str,
+        variant: ButtonVariant,
+        on_press: Option<ActionId>,
+    ) -> bool {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::Button(button) = &mut node.kind else {
+                return false;
+            };
+            if button.label == label && button.variant == variant && button.on_press == on_press {
+                false
+            } else {
+                if button.label != label {
+                    button.label.clear();
+                    button.label.push_str(label);
+                }
+                button.variant = variant;
+                button.on_press = on_press;
+                true
+            }
+        };
+        if changed {
+            self.touch(id);
+        }
+        changed
+    }
+
+    /// Wholesale replace a `Custom` node's `props` payload (`type_name`
+    /// stays fixed — swapping it is a different node kind, not a props
+    /// update). Same no-op-on-equal contract as [`AppTree::set_text_props`].
+    ///
+    /// Takes `props: &serde_json::Value` (not by value) for the same
+    /// reason [`AppTree::set_text`] takes `content: &str`: a host ticking
+    /// this every frame with an unchanged value must not pay for building
+    /// (or cloning) a `Value` just to discover it matches. The clone only
+    /// happens on the actually-changed path.
+    pub fn set_custom_props(&mut self, id: NodeId, props: &serde_json::Value) -> bool {
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::Custom { props: current, .. } = &mut node.kind else {
+                return false;
+            };
+            if current == props {
+                false
+            } else {
+                *current = props.clone();
+                true
+            }
+        };
+        if changed {
+            self.touch(id);
+        }
+        changed
+    }
+
+    /// Reorder `parent`'s children in place: `order` must be a
+    /// permutation of `parent`'s current children (same `NodeId`s, any
+    /// sequence) — every child keeps its identity, no node is removed or
+    /// re-added (#268). Returns `false` (no mutation) when `parent` is
+    /// stale/missing, `order` is not a permutation of the current
+    /// children (wrong length or a `NodeId` that doesn't belong), or
+    /// `order` already matches the current sequence.
+    ///
+    /// Only `parent` is touched — not its children — so a child's own
+    /// [`AppTree::subtree_revision`] is unaffected by its siblings moving
+    /// around it, which lets a per-subtree render cache (keyed by
+    /// `NodeId` + the child's own layout rect, e.g. `mkui-wgpu`'s
+    /// `WalkCache`) keep reusing that child's cached paint output after a
+    /// reorder.
+    pub fn reorder_children(&mut self, parent: NodeId, order: &[NodeId]) -> bool {
+        let Some(node) = self.get(parent) else {
+            return false;
+        };
+        if node.children == order {
+            return false;
+        }
+        if order.len() != node.children.len() {
+            return false;
+        }
+        // Validate `order` is a permutation of the current children
+        // before mutating anything (O(n^2) swap-remove match — fine for
+        // the small sibling lists this targets; a caller with thousands
+        // of siblings would want a different structure regardless).
+        let mut remaining = node.children.clone();
+        for id in order {
+            match remaining.iter().position(|c| c == id) {
+                Some(pos) => {
+                    remaining.swap_remove(pos);
+                }
+                None => return false,
+            }
+        }
+        let Some(node) = self.get_mut(parent) else {
+            return false;
+        };
+        node.children.clear();
+        node.children.extend_from_slice(order);
+        self.touch(parent);
+        true
+    }
+
     fn alloc_and_attach(&mut self, parent: NodeId, kind: NodeKind, class: StyleClass) -> NodeId {
         assert!(
             self.get(parent).is_some(),
@@ -808,6 +975,224 @@ mod tests {
 
         tree.mark_dirty();
         assert!(tree.epoch() > epoch_after_push);
+    }
+
+    // ---- reorder_children (#268) ----
+
+    #[test]
+    fn reorder_children_preserves_every_childs_identity() {
+        // Acceptance criterion 1: reordering must not remove/re-add any
+        // node — the same NodeIds come back, just in a new sequence.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_text(root, "a", TextVariant::Body, "").unwrap();
+        let b = tree.push_text(root, "b", TextVariant::Body, "").unwrap();
+        let c = tree.push_text(root, "c", TextVariant::Body, "").unwrap();
+        tree.clear_dirty();
+
+        assert!(tree.reorder_children(root, &[c, a, b]));
+
+        assert_eq!(tree.get(root).unwrap().children, vec![c, a, b]);
+        // Every id is exactly the same (index, generation) pair — no
+        // removal/recycle happened under the hood.
+        for (id, content) in [(a, "a"), (b, "b"), (c, "c")] {
+            let NodeKind::Text(t) = &tree.get(id).unwrap().kind else {
+                panic!("expected Text")
+            };
+            assert_eq!(t.content, content);
+        }
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn reorder_children_to_the_same_order_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_view(root, "").unwrap();
+        let b = tree.push_view(root, "").unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.reorder_children(root, &[a, b]));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn reorder_children_only_touches_the_parent_not_the_children() {
+        // A reordered child's own subtree_revision must not move — that's
+        // what lets a per-subtree render cache keep reusing its cached
+        // output after the reorder (see the method's docs).
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_view(root, "").unwrap();
+        let b = tree.push_view(root, "").unwrap();
+        let a_rev_before = tree.subtree_revision(a).unwrap();
+        let b_rev_before = tree.subtree_revision(b).unwrap();
+        let root_rev_before = tree.subtree_revision(root).unwrap();
+
+        assert!(tree.reorder_children(root, &[b, a]));
+
+        assert_eq!(tree.subtree_revision(a).unwrap(), a_rev_before);
+        assert_eq!(tree.subtree_revision(b).unwrap(), b_rev_before);
+        assert!(tree.subtree_revision(root).unwrap() > root_rev_before);
+    }
+
+    #[test]
+    fn reorder_children_rejects_a_foreign_node_id() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_view(root, "").unwrap();
+        let foreign = NodeId::from_raw(99, 0);
+        tree.clear_dirty();
+
+        assert!(!tree.reorder_children(root, &[a, foreign]));
+        assert!(!tree.is_dirty());
+        assert_eq!(tree.get(root).unwrap().children, vec![a]);
+    }
+
+    #[test]
+    fn reorder_children_rejects_wrong_length() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_view(root, "").unwrap();
+        let _b = tree.push_view(root, "").unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.reorder_children(root, &[a]));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn reorder_children_on_stale_parent_returns_false() {
+        let mut tree = AppTree::new();
+        let stale = NodeId::from_raw(99, 0);
+        assert!(!tree.reorder_children(stale, &[]));
+    }
+
+    // ---- set_class / set_*_props (#268) ----
+
+    #[test]
+    fn set_class_replaces_class_and_resolved_style_keeping_the_same_node_id() {
+        let mut tree = AppTree::new();
+        let view = tree.push_view(tree.root(), "flex").unwrap();
+        tree.clear_dirty();
+
+        assert!(tree.set_class(view, "flex-col items-center").unwrap());
+
+        let node = tree.get(view).unwrap();
+        assert_eq!(node.id, view, "same NodeId must survive the class replace");
+        assert_eq!(node.class.raw(), "flex-col items-center");
+        assert!(node.resolved.flex_column);
+        assert!(node.resolved.items_center);
+        assert!(!node.resolved.flex, "old class's tokens must not linger");
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn set_class_with_unchanged_value_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let view = tree.push_view(tree.root(), "flex").unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.set_class(view, "flex").unwrap());
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_text_props_replaces_content_and_variant_keeping_the_same_node_id() {
+        let mut tree = AppTree::new();
+        let text = tree
+            .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(tree.set_text_props(text, "GAME OVER", TextVariant::Heading1));
+
+        let node = tree.get(text).unwrap();
+        assert_eq!(node.id, text);
+        let NodeKind::Text(t) = &node.kind else {
+            panic!("expected Text")
+        };
+        assert_eq!(t.content, "GAME OVER");
+        assert_eq!(t.variant, TextVariant::Heading1);
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn set_text_props_with_unchanged_values_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let text = tree
+            .push_text(tree.root(), "hp: 100", TextVariant::Body, "")
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.set_text_props(text, "hp: 100", TextVariant::Body));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_button_props_replaces_label_variant_and_action_keeping_the_same_node_id() {
+        let mut tree = AppTree::new();
+        let button = tree
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
+            .unwrap();
+        let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
+        tree.clear_dirty();
+
+        assert!(tree.set_button_props(button, "Resume", ButtonVariant::Secondary, Some(action)));
+
+        let node = tree.get(button).unwrap();
+        assert_eq!(node.id, button);
+        let NodeKind::Button(b) = &node.kind else {
+            panic!("expected Button")
+        };
+        assert_eq!(b.label, "Resume");
+        assert_eq!(b.variant, ButtonVariant::Secondary);
+        assert_eq!(b.on_press, Some(action));
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn set_button_props_with_unchanged_values_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let button = tree
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.set_button_props(button, "Pause", ButtonVariant::Primary, None));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_custom_props_replaces_props_keeping_the_same_node_id_and_type_name() {
+        let mut tree = AppTree::new();
+        let custom = tree
+            .push_custom(tree.root(), "badge", serde_json::json!({"count": 1}), "")
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(tree.set_custom_props(custom, &serde_json::json!({"count": 2})));
+
+        let node = tree.get(custom).unwrap();
+        assert_eq!(node.id, custom);
+        let NodeKind::Custom { type_name, props } = &node.kind else {
+            panic!("expected Custom")
+        };
+        assert_eq!(type_name, "badge");
+        assert_eq!(props, &serde_json::json!({"count": 2}));
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn set_custom_props_with_unchanged_value_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let custom = tree
+            .push_custom(tree.root(), "badge", serde_json::json!({"count": 1}), "")
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.set_custom_props(custom, &serde_json::json!({"count": 1})));
+        assert!(!tree.is_dirty());
     }
 
     #[test]

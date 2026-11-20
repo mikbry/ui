@@ -7,6 +7,31 @@ breaking changes can land on minor bumps).
 
 ## [Unreleased]
 
+### Added
+- **`mkui-runtime::AppTree` gains dynamic-tree operations: child
+  reordering in place, wholesale class/prop replacement, and a keyed-
+  child diff algorithm (#268).** F2 of the mkui goal/course-correction
+  foundations: `AppTree::reorder_children` moves one or more children to
+  new positions within the same parent without removing/re-adding any of
+  them (so backend-side identity keyed to a `NodeId` survives);
+  `AppTree::set_class` replaces a node's class string (and re-resolved
+  style) in place, and `AppTree::set_text_props` /
+  `AppTree::set_button_props` / `AppTree::set_custom_props` replace a
+  node's kind-specific props wholesale — all four preserve the node's
+  `NodeId` and no-op (no allocation, no `touch`) when the new value
+  already matches. `mkui_runtime::diff_keyed` computes the minimal
+  add/remove/reorder/update operations between an old and a new keyed
+  child list (the virtual-DOM-style diffing problem, scoped to this
+  tree): a key that only moved produces exactly one `Move`, never a
+  `Remove`+`Insert` pair. `mkui-wgpu`'s existing `WalkCache` already
+  applies a reorder or a class/size change without a full subtree
+  re-render — its per-node cache key includes the node's own computed
+  rect, so only the affected node (and anything whose position actually
+  shifted) re-walks; two new tests prove the cached output exactly
+  matches an uncached walk after each. `mkui-web` and `mkui-console` have
+  no live re-render loop to make incremental yet (tracked separately in
+  #296) — out of scope here.
+
 ### Fixed
 - **`mkui-runtime`'s class parser no longer panics on an unrecognized
   utility — it's dropped (logged, and counted on
