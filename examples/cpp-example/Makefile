@@ -6,7 +6,7 @@ CXXFLAGS = -std=c++17 -Wall -Wextra -O2
 # Paths
 MKUI_ROOT = ../..
 MKUI_C_TARGET = $(MKUI_ROOT)/target/release
-MKUI_C_INCLUDE = $(MKUI_ROOT)/crates/mkui-c/include
+MKUI_C_INCLUDE = $(MKUI_ROOT)/crates/c/include
 MKUI_CPP_INCLUDE = $(MKUI_ROOT)/bindings/cpp
 
 # Source files

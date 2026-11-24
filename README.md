@@ -173,6 +173,10 @@ button:
 mkui is organized around a single contract crate that every backend consumes.
 Backend-specific code never leaks into the contract.
 
+Crate directories omit the `mkui-` prefix (for example, `mkui-core` lives in
+`crates/core`); the bridge remains in `crates/mkui`. Cargo package names, Rust
+imports, and `cargo -p mkui-…` commands keep their existing names.
+
 | Crate         | Responsibility                                                                                                                  | Maturity                                                      |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | `mkui-core`   | Shared contract: component model, headless logic, theme / layout / input / style / error. Zero backend deps.                    | Stable                                                        |
@@ -384,7 +388,7 @@ cargo run -p native-window --release
 cd examples/python-example
 
 # Build the Python bindings first
-cd ../../crates/mkui-py
+cd ../../crates/py
 uv venv && source .venv/bin/activate    # any Python 3.9–3.14
 maturin develop --release
 
@@ -449,7 +453,7 @@ cargo run -p native-window --release
 
 The web backend is exercised by `examples/web-showcase` via `wasm-pack`.
 For application-owned themes, see the opt-in [public Card and disabled Button
-CSS recipe](crates/mkui-web/README.md). The standalone
+CSS recipe](crates/web/README.md). The standalone
 [browser recipe smoke](examples/web-recipe-smoke/README.md) checks computed
 styling and overlapping disabled controls without showcase assets.
 The bridge-crate `cargo test` runs cover the contract + dispatch surface only.

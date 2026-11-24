@@ -42,7 +42,7 @@ cargo build --release -p mkui-c
 # Then build the C++ example
 cd examples/cpp-example
 g++ -std=c++17 -Wall -Wextra -O2 \
-    -I../../crates/mkui-c/target/include \
+    -I../../crates/c/include \
     -I../../bindings/cpp \
     main.cpp \
     -L../../target/release \

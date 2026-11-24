@@ -1,0 +1,30 @@
+[package]
+name = "mkui-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shared component, event, state, theme, and layout contracts for mkui backends"
+
+[dependencies]
+thiserror = { workspace = true }
+mkui-text = { path = "../text" }
+mkui-runtime = { path = "../runtime" }
+serde = { workspace = true, optional = true }
+# Real (non-dev) dependency: `components::MenuList` lowers through the
+# `NodeKind::Custom` extension slot, whose `props` field is a
+# `serde_json::Value` (#189).
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Parity tests need the runtime snapshot feature to compare the canonical
+# JSON across construction frontends. Snapshot is opt-in for production
+# builds (see ADR 0005); the dev-dep flips it on for tests.
+mkui-runtime = { path = "../runtime", features = ["snapshot"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]

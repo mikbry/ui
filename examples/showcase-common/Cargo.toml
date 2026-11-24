@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 mkui = { path = "../../crates/mkui" }
-mkui-core = { path = "../../crates/mkui-core" }
+mkui-core = { path = "../../crates/core" }
 
 # Optional web dependencies
 wasm-bindgen = { workspace = true, optional = true }

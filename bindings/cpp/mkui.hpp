@@ -3,7 +3,7 @@
 // Use the cbindgen-generated C header directly — the prior hand-maintained
 // forward declarations drifted from the FFI when the Sprint 4 handle API
 // landed. Include the generated header instead.
-#include "../../crates/mkui-c/include/mkui_c.h"
+#include "../../crates/c/include/mkui_c.h"
 
 #include <functional>
 #include <memory>

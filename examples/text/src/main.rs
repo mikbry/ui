@@ -10,8 +10,7 @@
 
 use mkui_text::{CompositeTextSystem, FontId, LayoutSpec, TextSystem};
 
-const ABEL: &[u8] =
-    include_bytes!("../../../crates/mkui-text/tests/fixtures/abel/Abel-Regular.ttf");
+const ABEL: &[u8] = include_bytes!("../../../crates/text/tests/fixtures/abel/Abel-Regular.ttf");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "slug")]

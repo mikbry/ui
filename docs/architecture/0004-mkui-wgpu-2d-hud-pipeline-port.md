@@ -22,7 +22,7 @@ cost of code paths mkui's HUD use case never executes.
 ## Decision
 
 Port the 2D HUD-specific subset of the upstream renderer into
-`mkui-wgpu/src/render/mod.rs` (~600 lines).
+`crates/wgpu/src/render/mod.rs` (~600 lines).
 
 - Drop the 3D-specific passes: scene pass, shadow map, ambient occlusion,
   selection outline, accumulator.

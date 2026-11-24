@@ -75,14 +75,14 @@ with the message above.
 
 - **`WgpuRenderable` trait + `WgpuRendererRegistry`** live in
   `mkui-wgpu`, **not** `mkui-runtime` or `mkui-core`. This mirrors
-  [`mkui-web::WebRendererRegistry`](../../crates/mkui-web/src/render.rs)
+  [`mkui-web::WebRendererRegistry`](../../crates/web/src/render.rs)
   and matches the Codex round-7 Q1 ratification (renderer traits are
   backend-local; the substrate stays renderer-agnostic).
-- **Walker** (`crates/mkui-wgpu/src/walker.rs`) — consumes
+- **Walker** (`crates/wgpu/src/walker.rs`) — consumes
   `mkui_runtime::AppTree` and emits scene primitives via the existing
   tessellation pipeline. No new GPU pipeline state is introduced; the
   pipeline boundary documented in ADR 0004 (`Scene` → HUD pass) holds.
-- **Input router** (`crates/mkui-wgpu/src/pointer.rs`) — cursor tracked
+- **Input router** (`crates/wgpu/src/pointer.rs`) — cursor tracked
   from `WindowEvent::CursorMoved`, hit-test in reverse paint order
   against the per-frame `Vec<HitTestEntry>` collected during the walk,
   click semantics on release. Logical/physical DPI conversion uses the
@@ -634,7 +634,7 @@ compositing target with the **linear** intermediate described above.
 resolve is a **plain linear→linear average** — there is no sRGB texture in the
 compositing path to decode or re-encode, so the double-encode failure mode
 Sprint 6 fixed by disabling MSAA is now structurally impossible, not merely
-avoided. `crates/mkui-wgpu/tests/msaa_no_regression.rs` (Lavapipe `gpu-tests`
+avoided. `crates/wgpu/tests/msaa_no_regression.rs` (Lavapipe `gpu-tests`
 lane) proves this on a real GPU: a 4×-MSAA-resolved clear matches its
 single-sample reference byte-for-byte (MSAA changes coverage, not color), the
 #149/#155 authored-sRGB-0.5→byte-~55 linear-intermediate invariant survives
@@ -706,7 +706,7 @@ re-architecting the walker.
   bridge layers **above** it — walker → `Scene` → tessellator → HUD
   pass — so any future tessellation work (Slug-style outline text per
   ADR 0002) drops in without disturbing the bridge.
-- `mkui-wgpu/Cargo.toml` gains a `mkui-runtime` dependency (Sprint 4
+- `crates/wgpu/Cargo.toml` gains a `mkui-runtime` dependency (Sprint 4
   deliberately deferred this edge — the wgpu backend was the only
   binding that hadn't taken the substrate).
 

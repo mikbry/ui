@@ -7,7 +7,7 @@ import sys
 # The maturin venv's site-packages is version-stamped (lib/python3.X);
 # glob so the example runs on any supported interpreter (3.9–3.14)
 # rather than a single hardcoded minor version.
-venv_globs = glob.glob("../../crates/mkui-py/.venv/lib/python3.*/site-packages")
+venv_globs = glob.glob("../../crates/py/.venv/lib/python3.*/site-packages")
 if venv_globs:
     sys.path.insert(0, venv_globs[0])
 else:
@@ -17,7 +17,7 @@ try:
     import mkui_py
 except ImportError:
     print("Error: mkui_py module not found.")
-    print("Build it with: cd ../../crates/mkui-py && maturin develop --release")
+    print("Build it with: cd ../../crates/py && maturin develop --release")
     sys.exit(1)
 
 

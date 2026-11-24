@@ -194,8 +194,7 @@ use mkui_wgpu::{
 /// only, never the library (#259). Only referenced under `slug`; an
 /// off-feature build never decodes it.
 #[cfg(feature = "slug")]
-const ABEL_TTF: &[u8] =
-    include_bytes!("../../../crates/mkui-text/tests/fixtures/abel/Abel-Regular.ttf");
+const ABEL_TTF: &[u8] = include_bytes!("../../../crates/text/tests/fixtures/abel/Abel-Regular.ttf");
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]

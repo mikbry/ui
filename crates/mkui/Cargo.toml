@@ -6,12 +6,12 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui-core = { path = "../mkui-core" }
+mkui-core = { path = "../core" }
 
 # Optional dependencies based on features
-mkui-web = { path = "../mkui-web", optional = true }
-mkui-console = { path = "../mkui-console", optional = true }
-mkui-wgpu = { path = "../mkui-wgpu", optional = true }
+mkui-web = { path = "../web", optional = true }
+mkui-console = { path = "../console", optional = true }
+mkui-wgpu = { path = "../wgpu", optional = true }
 
 # Web-specific deps (only when web feature is enabled)
 wasm-bindgen = { workspace = true, optional = true }

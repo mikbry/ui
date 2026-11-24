@@ -6,12 +6,12 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui-text = { path = "../../crates/mkui-text" }
+mkui-text = { path = "../../crates/text" }
 # Phase 2 GPU path: the Slug encoder + the wgpu backend with its Slug lane on.
 # Both are optional so a feature-off build contains NO Slug execution path and
 # never pulls in wgpu — it stays the Phase 1 CPU smoke.
-mkui-vector2d = { path = "../../crates/mkui-vector2d", optional = true }
-mkui-wgpu = { path = "../../crates/mkui-wgpu", optional = true }
+mkui-vector2d = { path = "../../crates/vector2d", optional = true }
+mkui-wgpu = { path = "../../crates/wgpu", optional = true }
 
 [features]
 # Turns the example into the GPU smoke: decodes Abel, encodes the outline

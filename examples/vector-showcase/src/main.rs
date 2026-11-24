@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     /// The faceting proof Codex's round-2 review asked for, mirroring
-    /// `mkui-wgpu/src/render/dot_vector_gpu.rs`'s own
+    /// `crates/wgpu/src/render/dot_vector_gpu.rs`'s own
     /// `dot_vector_vs_triangulated_diagonal_corner` methodology: a point
     /// inside the dot's bounding square but outside a *true* circle (the
     /// corner a circle doesn't have) must be **excluded** by this showcase's

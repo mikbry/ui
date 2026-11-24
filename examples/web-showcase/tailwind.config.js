@@ -3,7 +3,7 @@ module.exports = {
   content: [
     "./index.html",
     "./src/**/*.{js,ts,jsx,tsx,rs}",
-    "../../../crates/mkui-web/src/**/*.rs",
+    "../../crates/web/src/**/*.rs",
     "./pkg/**/*.js",
   ],
   safelist: [

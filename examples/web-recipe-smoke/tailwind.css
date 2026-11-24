@@ -1,7 +1,7 @@
-/* Same public import recipe as crates/mkui-web/README.md. */
+/* Same public import recipe as crates/web/README.md. */
 @layer theme, base, mkui-defaults, components, utilities;
 @import "tailwindcss" source(none);
-@import "../../crates/mkui-web/styles.css";
+@import "../../crates/web/styles.css";
 @source "./cascade.html";
 
 @layer components {

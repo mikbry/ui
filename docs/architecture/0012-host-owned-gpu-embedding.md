@@ -15,7 +15,7 @@ itself: a host-owned GPU and frame mode distinct from the existing
 winit-`ApplicationHandler`-owned "standalone" shell ([ADR 0004](0004-mkui-wgpu-2d-hud-pipeline-port.md),
 [ADR 0006](0006-wgpu-declarative-bridge.md)).
 
-[`Renderer`](../../crates/mkui-wgpu/src/render/mod.rs) creates its own
+[`Renderer`](../../crates/wgpu/src/render/mod.rs) creates its own
 `wgpu::Instance`, requests its own adapter / device / queue, negotiates its
 own `Surface` from an `Arc<winit::window::Window>`, and owns the per-frame
 command encoder, submission, and present call end-to-end. A host engine
@@ -37,7 +37,7 @@ discipline to the top of the stack — `mkui-wgpu` itself, when a host (not
 
 ## Decision
 
-Add [`EmbeddedRenderer`](../../crates/mkui-wgpu/src/render/embedded.rs) as a
+Add [`EmbeddedRenderer`](../../crates/wgpu/src/render/embedded.rs) as a
 second, parallel entry point alongside [`Renderer`] + [`WgpuApp`]'s
 `ApplicationHandler` shell. The existing winit-owned path is unchanged and
 stays the documented path for apps that don't embed in a host.
@@ -149,5 +149,5 @@ stays the documented path for apps that don't embed in a host.
   is separable, deferrable scope, not a prerequisite for the contract to be
   correct.
 
-[`Renderer`]: ../../crates/mkui-wgpu/src/render/mod.rs
-[`WgpuApp`]: ../../crates/mkui-wgpu/src/app.rs
+[`Renderer`]: ../../crates/wgpu/src/render/mod.rs
+[`WgpuApp`]: ../../crates/wgpu/src/app.rs

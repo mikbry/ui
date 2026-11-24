@@ -12,12 +12,12 @@ license.workspace = true
 slug = ["mkui-wgpu/slug"]
 
 [dependencies]
-mkui-core = { path = "../../crates/mkui-core" }
-mkui-runtime = { path = "../../crates/mkui-runtime" }
-mkui-wgpu = { path = "../../crates/mkui-wgpu" }
+mkui-core = { path = "../../crates/core" }
+mkui-runtime = { path = "../../crates/runtime" }
+mkui-wgpu = { path = "../../crates/wgpu" }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 # Needed only by the test below to construct a `WalkOptions` directly —
 # `WalkOptions::text_system` (#179) takes a `&dyn mkui_text::TextSystem`.
-mkui-text = { path = "../../crates/mkui-text" }
+mkui-text = { path = "../../crates/text" }

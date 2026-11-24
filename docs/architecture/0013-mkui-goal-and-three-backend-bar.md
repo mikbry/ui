@@ -79,7 +79,7 @@ crate.
 
 ## Appendix: the `mkui-hud` boundary test (2026-11-19, #290)
 
-`crates/mkui-hud` was scaffolded (#290) as an empty workspace member before
+`crates/hud` was scaffolded (#290) as an empty workspace member before
 any code moved into it. This section states the concrete test for what
 belongs there, since "what a second, different embedding host could reuse
 unchanged" (above) is not yet sharp enough to settle real cases on sight.
@@ -121,7 +121,7 @@ build against without implementing their scope (none move today):
   generic capture primitives this needs — `EmbeddedRenderer::render_into_timed`,
   `last_frame_ui_vertex_bytes`, `last_frame_slug_bytes` — and per test
   question 0 those land in `mkui-wgpu` itself
-  (`crates/mkui-wgpu/src/render/embedded.rs`), not `mkui-hud`, since they
+  (`crates/wgpu/src/render/embedded.rs`), not `mkui-hud`, since they
   extend a type `mkui-wgpu` already owns. What #230 still needs beyond
   that — the real-hardware runs, the budget check against *this* scene's
   "full HUD at 1080p" numbers, and profiling `Renderer::render`'s
@@ -136,7 +136,7 @@ build against without implementing their scope (none move today):
   example/CI concern regardless.
 - **#250** (host-embedded blur support + large-radius perf tier) — **stays
   in `mkui-core`/`mkui-wgpu`.** `BackdropBlur` and `EmbeddedRenderer` are
-  both `mkui-wgpu`'s own types (`crates/mkui-wgpu/src/render/backdrop.rs`,
+  both `mkui-wgpu`'s own types (`crates/wgpu/src/render/backdrop.rs`,
   `embedded.rs`); wiring `BackdropBlur` into `EmbeddedRenderer::render_into`
   and adding a downsample/upsample perf tier both extend `mkui-wgpu`'s
   existing render pipeline. Test question 0 resolves this one before

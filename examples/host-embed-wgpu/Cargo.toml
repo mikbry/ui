@@ -29,17 +29,17 @@ default = ["slug"]
 [dependencies]
 # The "host": owns its own wgpu instance/adapter/device/queue/surface and a
 # lit 3D cube pass, exactly like a real game/engine host would (#175).
-mkui-wgpu = { path = "../../crates/mkui-wgpu" }
-mkui-text = { path = "../../crates/mkui-text" }
+mkui-wgpu = { path = "../../crates/wgpu" }
+mkui-text = { path = "../../crates/text" }
 # Only for the `#[cfg(test)]` CPU proof that HUD text actually routes through
 # the Slug lane (`SlugBlobCache`/`SlugConfig`) — optional, forwarded by `slug`
 # above, same as `examples/text`'s own `mkui-vector2d` dependency.
-mkui-vector2d = { path = "../../crates/mkui-vector2d", optional = true }
+mkui-vector2d = { path = "../../crates/vector2d", optional = true }
 # `mkui_core::headless::MenuList` — the pause overlay's keyboard-navigable
 # menu list (#255); this crate's render functions have no menu-list atom of
 # their own (mkui-wgpu's components layer only draws it), so the headless
 # selection/navigation logic comes from mkui-core directly.
-mkui-core = { path = "../../crates/mkui-core" }
+mkui-core = { path = "../../crates/core" }
 wgpu = { workspace = true }
 winit = { workspace = true }
 bytemuck = { workspace = true }

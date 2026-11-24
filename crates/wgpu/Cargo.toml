@@ -1,0 +1,83 @@
+[package]
+name = "mkui-wgpu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WGPU-oriented scene primitives and declarative builders for mkui"
+
+[features]
+# Surfaceless offscreen GPU test harness (`render::offscreen`) + its readback
+# tests. Off by default so the displayless default CI `test` job needs no
+# Vulkan ICD installed; the dedicated Lavapipe GPU job (`.github/workflows`)
+# turns it on. The harness selects `Backends::VULKAN` and asserts a
+# Vulkan + CPU adapter, so it only runs where Mesa/Lavapipe is provisioned.
+# See issue #106.
+gpu-tests = []
+
+# Slug vector-glyph + VectorPath lane (#66, #140/#141/#142). Default ON as of
+# the mkui goal/course-correction review (2026-11-17, tracked internally) —
+# promoted per ADR 0007's own anticipated "Sprint 8+ promotion" criteria,
+# which are now met: the chevalier mkui-slug-rewrite mission (2026-07-28 to
+# 2026-07-31) validated the glyph lane against a ratified reference adapter
+# (max Δ ≤ 1/255 across 24 golden-image comparisons on real GPU hardware), and
+# `button`/`card`/`dot` each have a GPU-acceptance-tested VectorPath rendering
+# mode (#140/#141/#142). Builds that pass `--no-default-features` retain the
+# original bitmap-only / triangulated-`Quad` behavior unchanged — that path is
+# the permanent debug-fallback and visual-regression oracle per ADR 0002, not
+# removed by this promotion. Enabling `slug` pulls in the native
+# `mkui-vector2d-wgpu` adapter and turns on the ordered Slug render lane.
+# Native only — the adapter is a `cfg(not(wasm32))` dep, so browser/WASM
+# builds ignore the feature (browser WebGPU is out of scope, #66). #67 also
+# pulls in `mkui-vector2d` (the neutral encoder) so the renderer-side
+# `slug_text::place_slug_run` glue can turn an SFNT outline run into placed GPU
+# glyphs.
+slug = ["dep:mkui-vector2d-wgpu", "dep:mkui-vector2d"]
+default = ["slug"]
+
+[dependencies]
+mkui-core = { path = "../core" }
+mkui-runtime = { path = "../runtime" }
+mkui-text = { path = "../text" }
+# `walker.rs` calls `mkui_layout::compute_layout` for its layout pass (#287);
+# this was a dev-only dependency (see the removed comment below) while the
+# walker still owned its own hand-rolled layout math.
+mkui-layout = { path = "../layout" }
+serde_json = { workspace = true }
+
+# Native Slug adapter (#66), pulled in only by the `slug` feature. Kept out of
+# the `cfg(not(wasm32))` target table so the `slug` feature and its
+# `Primitive::SlugGlyph` variant resolve on every target; the dependency is
+# optional, so default (and all WASM) builds never compile it or its `wgpu`.
+[dependencies.mkui-vector2d-wgpu]
+path = "../vector2d-wgpu"
+optional = true
+
+# Backend-neutral Slug encoder (#65), pulled in only by the `slug` feature.
+# #67's `slug_text::place_slug_run` consumes it to turn an SFNT outline run into
+# a placed GPU glyph (outline → path → encoded blob → `PlacedSlugGlyph`). The
+# `slug` + `gpu-tests` offscreen acceptance tests (#66) also build their
+# hand-authored `SlugGlyph` blobs through it.
+[dependencies.mkui-vector2d]
+path = "../vector2d"
+optional = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wgpu = { workspace = true }
+winit = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+
+# `mkui-vector2d` is no longer a dev-dependency: since #67 it is an optional
+# normal dependency enabled by the `slug` feature (above), which already covers
+# every `slug`-gated test (the #66 hand-authored-record acceptance tests and
+# #67's font-backed ones).
+
+[dev-dependencies]
+# PNG decoding for the `gpu-tests,slug` reference-parity self-check (#157
+# Phase 1): reads the ratified reference-harness's committed known-good
+# goldens for a byte-level comparison. Same pin as
+# `docs/chevalier/mkui-slug-rewrite/reference-harness/Cargo.toml` so both
+# sides decode identically.
+png = "0.17.16"

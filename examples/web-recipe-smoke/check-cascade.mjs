@@ -15,7 +15,7 @@ const chrome = process.env.CHROME_BIN || (process.platform === 'darwin'
 const temp = mkdtempSync(join(tmpdir(), 'mkui-cascade-'));
 const fixture = join(temp, 'examples/web-recipe-smoke');
 mkdirSync(fixture, { recursive: true });
-mkdirSync(join(temp, 'crates/mkui-web'), { recursive: true });
+mkdirSync(join(temp, 'crates/web'), { recursive: true });
 const showcase = join(temp, 'examples/web-showcase');
 mkdirSync(showcase, { recursive: true });
 for (const file of readdirSync(join(root, 'examples/web-showcase')).filter(file => file.endsWith('.css'))) {
@@ -23,7 +23,7 @@ for (const file of readdirSync(join(root, 'examples/web-showcase')).filter(file 
 }
 // Absolute symlink exists only in the temporary fixture, never in the repository.
 symlinkSync(modules, join(temp, 'node_modules'), 'dir');
-copyFileSync(join(root, 'crates/mkui-web/styles.css'), join(temp, 'crates/mkui-web/styles.css'));
+copyFileSync(join(root, 'crates/web/styles.css'), join(temp, 'crates/web/styles.css'));
 copyFileSync(join(here, 'cascade.html'), join(fixture, 'cascade.html'));
 const input = readFileSync(join(here, 'tailwind.css'), 'utf8');
 const html = readFileSync(join(here, 'cascade.html'), 'utf8');
@@ -38,13 +38,13 @@ function run(command, args) {
 
 try {
   for (const mode of ['tailwind', 'showcase', 'plain', 'regressed']) {
-    let css = '../../crates/mkui-web/styles.css';
+    let css = '../../crates/web/styles.css';
     if (mode !== 'plain') {
       // Negative control reproduces the shipped ordering, without the prelude.
       let source = mode === 'regressed' ? input
         .replace('@layer theme, base, mkui-defaults, components, utilities;', '')
-        .replace('@import "tailwindcss" source(none);\n@import "../../crates/mkui-web/styles.css";',
-          '@import "../../crates/mkui-web/styles.css";\n@import "tailwindcss" source(none);') : input;
+        .replace('@import "tailwindcss" source(none);\n@import "../../crates/web/styles.css";',
+          '@import "../../crates/web/styles.css";\n@import "tailwindcss" source(none);') : input;
       if (mode === 'showcase') {
         source = '@import "../web-showcase/styles.css";\n@source "./cascade.html";\n' +
           input.slice(input.indexOf('@layer components'));

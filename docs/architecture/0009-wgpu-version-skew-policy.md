@@ -48,7 +48,7 @@ range spanning two `wgpu` releases, and today exposes no API that accepts a
 host-supplied `wgpu::Device`, `Queue`, `Surface`, or `Instance` at all — the
 only resource accessors in the crate are `OffscreenRenderer::device()` /
 `::queue()` getters for a device `mkui-wgpu` itself created
-(`crates/mkui-wgpu/src/render/offscreen.rs`). Building a constructor that lets
+(`crates/wgpu/src/render/offscreen.rs`). Building a constructor that lets
 a host inject its own `wgpu` resources is a separate, not-yet-built feature,
 tracked under parent issue #173 — this ADR only settles what `mkui-wgpu`'s
 own `wgpu` version promise is, so that future feature has a stable version
