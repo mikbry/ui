@@ -1,0 +1,10 @@
+/* Same public import recipe as crates/mkui-web/README.md. */
+@layer theme, base, mkui-defaults, components, utilities;
+@import "tailwindcss" source(none);
+@import "../../crates/mkui-web/styles.css";
+@source "./cascade.html";
+
+@layer components {
+  .component-card { border-width: 3px; }
+  .component-button { opacity: 0.75; }
+}

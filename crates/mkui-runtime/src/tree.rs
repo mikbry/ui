@@ -77,6 +77,14 @@ pub enum NodeKind {
     View(ViewProps),
     Text(TextProps),
     Button(ButtonProps),
+    /// A flex container with themed "card" chrome (bg/border/rounded
+    /// corners), rendered by every backend through its own native
+    /// surface primitive rather than through `mkui-wgpu`'s `bg-card`
+    /// class-sniffing escape hatch (#270 — the first component promoted
+    /// beyond `Button` per ADR 0015). Carries no intrinsic data of its
+    /// own, same as [`ViewProps`] — the chrome itself comes from each
+    /// backend's theme, not from a field here.
+    Card(CardProps),
     /// Extension slot. `type_name` identifies the component (`"test_widget"`,
     /// `"separator"`, …) and `props` is a renderer-readable JSON payload.
     Custom {
@@ -92,6 +100,15 @@ pub enum NodeKind {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ViewProps {}
 
+/// Payload for a `Card` node — a flex container with themed surface chrome.
+/// Empty for the same reason [`ViewProps`] is: every backend's card chrome
+/// (fill, border, corner radius) comes from its own theme, not from a field
+/// on the node. Kept as a distinct (non-empty-tuple) struct, rather than
+/// reusing `ViewProps`, so a future card-specific prop (e.g. a `selected`
+/// state) can be added without a breaking `NodeKind` shape change.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardProps {}
+
 /// Payload for a `Text` node: the string to render plus the semantic
 /// [`TextVariant`] that drives the renderer's typographic scale.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,13 +118,19 @@ pub struct TextProps {
 }
 
 /// Payload for a `Button` node: the visible `label`, its visual
-/// [`ButtonVariant`], and an optional `on_press` [`ActionId`] resolved against
-/// the [`ActionRegistry`] when the button fires.
+/// [`ButtonVariant`], an optional `on_press` [`ActionId`] resolved against
+/// the [`ActionRegistry`] when the button fires, and whether it is
+/// `disabled` (#245 — folded into the shared `NodeKind` contract, not just
+/// the low-level `mkui-wgpu` `components::button` layer). A `focused` field
+/// is deliberately not here yet: #245 scoped that half out until a real
+/// focus-traversal manager (#203) exists to drive it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonProps {
     pub label: String,
     pub variant: ButtonVariant,
     pub on_press: Option<ActionId>,
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 /// Arena-backed scene graph. Every binding builds into this same shape.
@@ -351,7 +374,7 @@ impl AppTree {
         self.alloc_and_attach(parent, kind, class)
     }
 
-    /// Append a `Button` under `parent`.
+    /// Append an enabled `Button` under `parent` (original API).
     pub fn push_button(
         &mut self,
         parent: NodeId,
@@ -360,11 +383,10 @@ impl AppTree {
         class: impl Into<String>,
         on_press: Option<ActionId>,
     ) -> Result<NodeId, ClassParseError> {
-        let style = StyleClass::from_str(class);
-        let _ = style.parse()?;
-        Ok(self.push_button_unchecked(parent, label, variant, style, on_press))
+        self.push_button_with_disabled(parent, label, variant, class, on_press, false)
     }
 
+    /// Append an enabled `Button` with an already-validated style.
     pub fn push_button_unchecked(
         &mut self,
         parent: NodeId,
@@ -373,11 +395,60 @@ impl AppTree {
         class: StyleClass,
         on_press: Option<ActionId>,
     ) -> NodeId {
+        self.push_button_with_disabled_unchecked(parent, label, variant, class, on_press, false)
+    }
+
+    /// Append a `Button` under `parent` with an explicit disabled state.
+    #[allow(clippy::too_many_arguments)] // `disabled` (#245/#270) joins the existing load-bearing axes; splitting into a param struct would diverge from every other `push_*` builder in this file.
+    pub fn push_button_with_disabled(
+        &mut self,
+        parent: NodeId,
+        label: impl Into<String>,
+        variant: ButtonVariant,
+        class: impl Into<String>,
+        on_press: Option<ActionId>,
+        disabled: bool,
+    ) -> Result<NodeId, ClassParseError> {
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(self
+            .push_button_with_disabled_unchecked(parent, label, variant, style, on_press, disabled))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_button_with_disabled_unchecked(
+        &mut self,
+        parent: NodeId,
+        label: impl Into<String>,
+        variant: ButtonVariant,
+        class: StyleClass,
+        on_press: Option<ActionId>,
+        disabled: bool,
+    ) -> NodeId {
         let kind = NodeKind::Button(ButtonProps {
             label: label.into(),
             variant,
             on_press,
+            disabled,
         });
+        self.alloc_and_attach(parent, kind, class)
+    }
+
+    /// Append a `Card` under `parent` — a flex container with themed card
+    /// chrome (#270). Mirrors [`AppTree::push_view`] exactly; the only
+    /// difference is the `NodeKind` tag a renderer dispatches on.
+    pub fn push_card(
+        &mut self,
+        parent: NodeId,
+        class: impl Into<String>,
+    ) -> Result<NodeId, ClassParseError> {
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(self.push_card_unchecked(parent, style))
+    }
+
+    pub fn push_card_unchecked(&mut self, parent: NodeId, class: StyleClass) -> NodeId {
+        let kind = NodeKind::Card(CardProps::default());
         self.alloc_and_attach(parent, kind, class)
     }
 
@@ -809,6 +880,68 @@ mod tests {
         assert_eq!(b.label, "ok");
         assert_eq!(b.variant, ButtonVariant::Primary);
         assert_eq!(b.on_press, Some(action));
+    }
+
+    #[test]
+    fn push_button_carries_the_disabled_flag() {
+        // #245: `disabled` is a first-class field on `ButtonProps`, not
+        // just a `mkui-wgpu`-local `components::button` parameter.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let idle = tree
+            .push_button(root, "Save", ButtonVariant::Primary, "", None)
+            .unwrap();
+        let disabled = tree
+            .push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
+            .unwrap();
+
+        let NodeKind::Button(b) = &tree.get(idle).unwrap().kind else {
+            panic!("expected Button")
+        };
+        assert!(!b.disabled);
+        let unchecked = tree.push_button_unchecked(
+            root,
+            "Save",
+            ButtonVariant::Primary,
+            StyleClass::from_str(""),
+            None,
+        );
+        assert_eq!(
+            tree.get(idle).unwrap().kind,
+            tree.get(unchecked).unwrap().kind
+        );
+
+        let NodeKind::Button(b) = &tree.get(disabled).unwrap().kind else {
+            panic!("expected Button")
+        };
+        assert!(b.disabled);
+    }
+
+    #[test]
+    fn push_card_attaches_to_parent_as_a_card_node() {
+        // #270: `Card` is a real `NodeKind` variant, not `View` + a `bg-card`
+        // class — a renderer dispatches on the tag, not on sniffing classes.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let card = tree.push_card(root, "p-6").unwrap();
+        let parent = tree.get(root).unwrap();
+        assert_eq!(parent.children, vec![card]);
+        let child = tree.get(card).unwrap();
+        assert_eq!(child.parent, Some(root));
+        assert!(matches!(child.kind, NodeKind::Card(_)));
+        assert_eq!(child.resolved.padding, Some(6));
+    }
+
+    #[test]
+    fn push_card_is_a_container_children_attach_under_it() {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let card = tree.push_card(root, "").unwrap();
+        let text = tree
+            .push_text(card, "inside the card", TextVariant::Body, "")
+            .unwrap();
+        assert_eq!(tree.get(card).unwrap().children, vec![text]);
+        assert_eq!(tree.get(text).unwrap().parent, Some(card));
     }
 
     #[test]

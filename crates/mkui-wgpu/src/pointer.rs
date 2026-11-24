@@ -220,7 +220,8 @@ pub struct ClickHit {
 
 /// Reverse paint-order hit-test. Iterates `hit_entries` from the end
 /// (latest-painted = topmost) and returns the first containing entry, if
-/// any.
+/// any. A disabled entry stops traversal and returns `None`, so controls
+/// beneath its painted silhouette cannot hover or activate.
 ///
 /// Uses [`rect_contains_rounded`] rather than a plain bounding-box test
 /// (#176): a rounded control's rendered silhouette is chamfered at the
@@ -233,14 +234,21 @@ pub struct ClickHit {
 /// chance of borrowing the per-frame vec across an action that itself
 /// rebuilds the tree.
 pub fn hit_test(hit_entries: &[HitTestEntry], cursor: Point) -> Option<ClickHit> {
-    hit_entries
-        .iter()
-        .rev()
-        .find(|entry| rect_contains_rounded(entry.rect, entry.corner_radii, cursor))
+    hit_entry(hit_entries, cursor)
+        .filter(|entry| !entry.disabled)
         .map(|entry| ClickHit {
             node: entry.node,
             action: entry.action,
         })
+}
+
+/// Topmost painted hit region, including inert blockers. Input routers use
+/// this to consume a blocked gesture without arming or exposing a hover.
+pub(crate) fn hit_entry(hit_entries: &[HitTestEntry], cursor: Point) -> Option<&HitTestEntry> {
+    hit_entries
+        .iter()
+        .rev()
+        .find(|entry| rect_contains_rounded(entry.rect, entry.corner_radii, cursor))
 }
 
 #[cfg(test)]
@@ -259,6 +267,7 @@ mod tests {
         action: Option<RtActionId>,
     ) -> HitTestEntry {
         HitTestEntry {
+            disabled: false,
             rect: Rect::new(Point::new(x, y), Size::new(w, h)),
             node: NodeId::from_raw(idx, 0),
             action,
@@ -272,6 +281,7 @@ mod tests {
 
     fn entry_with_radius(x: f32, y: f32, w: f32, h: f32, idx: u32, radius: f32) -> HitTestEntry {
         HitTestEntry {
+            disabled: false,
             corner_radii: CornerRadii::all(radius),
             ..entry(x, y, w, h, idx)
         }

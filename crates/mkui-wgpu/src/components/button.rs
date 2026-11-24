@@ -71,7 +71,7 @@ pub const MIN_TOUCH_TARGET_PX: f32 = 44.0;
 /// reads as visually distinct regardless of variant (#186). A widget-level
 /// geometry/look constant, not a themed color — same category as
 /// `DotSize::diameter` per the theme module's token-sourcing rule.
-const DISABLED_ALPHA_FACTOR: f32 = 0.45;
+pub(crate) const DISABLED_ALPHA_FACTOR: f32 = 0.45;
 
 /// Gap, in px, between the button's own border and the outer focus ring
 /// (#186). Widget-intrinsic geometry, not a themed token — see

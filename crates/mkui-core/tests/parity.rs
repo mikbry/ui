@@ -88,6 +88,37 @@ fn rust_ergonomic_builder_matches_direct_runtime_construction() {
     );
 }
 
+/// #270 + #245: `Card` and a disabled `Button` must lower identically
+/// whether built through the direct runtime API or the ergonomic builder —
+/// the same parity gate every other `NodeKind` already has to clear.
+#[test]
+fn card_and_disabled_button_ergonomic_builder_matches_direct_runtime_construction() {
+    let direct = {
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let card = tree.push_card(root, "p-6").unwrap();
+        tree.push_button_with_disabled(card, "Save", ButtonVariant::Primary, "", None, true)
+            .unwrap();
+        tree
+    };
+    let direct_json = TreeSnapshot::of(&direct).to_json();
+
+    use mkui_core::components::{Button, Card, Mkui};
+    let app = Mkui::new().child(
+        Card::new()
+            .class("p-6")
+            .child(Button::new("Save").disabled(true)),
+    );
+    let ergonomic_json = TreeSnapshot::of(app.tree()).to_json();
+
+    assert_eq!(
+        direct_json, ergonomic_json,
+        "Card + disabled Button must snapshot identically through both paths"
+    );
+    assert!(ergonomic_json.contains("\"kind\":\"card\""));
+    assert!(ergonomic_json.contains("\"disabled\":true"));
+}
+
 /// Tiny custom test component. NOT a real shadcn component (Separator /
 /// Tabs / Checkbox / … are Sprint 6+ scope). This exists to satisfy
 /// acceptance criterion #10 — prove the `NodeKind::Custom` extension slot

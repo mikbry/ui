@@ -108,6 +108,7 @@ impl LoweringRegistry {
         reg.register::<View>();
         reg.register::<Text>();
         reg.register::<Button>();
+        reg.register::<Card>();
         reg.register::<MenuList>();
         reg
     }
@@ -435,6 +436,7 @@ pub struct Button {
     class: String,
     variant: ButtonVariant,
     on_press: Option<Rc<dyn Fn()>>,
+    disabled: bool,
 }
 
 impl Button {
@@ -444,6 +446,7 @@ impl Button {
             class: String::new(),
             variant: ButtonVariant::Primary,
             on_press: None,
+            disabled: false,
         }
     }
 
@@ -454,6 +457,15 @@ impl Button {
 
     pub fn variant(mut self, variant: ButtonVariant) -> Self {
         self.variant = variant;
+        self
+    }
+
+    /// Mark this button disabled (#245): backends suppress UI activation
+    /// even if `on_press` was set. Wgpu and the public web CSS recipe dim
+    /// its chrome and keep its painted surface blocking controls beneath it.
+    /// Direct action-registry dispatch remains available.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -484,6 +496,10 @@ impl Button {
     pub fn on_press_handler(&self) -> &Option<Rc<dyn Fn()>> {
         &self.on_press
     }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
 }
 
 impl Component for Button {}
@@ -499,6 +515,7 @@ impl LowerToTree for Button {
         let class = std::mem::take(&mut self.class);
         let variant = self.variant;
         let on_press = self.on_press.take();
+        let disabled = self.disabled;
         let style = StyleClass::from_str(class);
         let _ = style.parse()?;
         let action_id: Option<ActionId> = on_press.map(|handler| {
@@ -511,7 +528,76 @@ impl LowerToTree for Button {
                 ctx.mark_dirty();
             })
         });
-        Ok(tree.push_button_unchecked(parent, content, variant, style, action_id))
+        Ok(tree.push_button_with_disabled_unchecked(
+            parent, content, variant, style, action_id, disabled,
+        ))
+    }
+}
+
+// -------------------------------------------------------------------------
+// Card — flex container with themed surface chrome (#270)
+// -------------------------------------------------------------------------
+
+/// Cross-platform `Card` container — a [`View`]-shaped flex container with
+/// themed card chrome (fill, border, rounded corners) every backend paints
+/// through its own native surface primitive. See ADR 0015 for the
+/// promotion process this is the first proof of beyond `Button`.
+pub struct Card {
+    class: String,
+    children: Vec<Box<dyn Component>>,
+}
+
+impl Card {
+    pub fn new() -> Self {
+        Self {
+            class: String::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    pub fn child(mut self, child: impl Component + 'static) -> Self {
+        self.children.push(Box::new(child));
+        self
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class
+    }
+
+    pub fn children_len(&self) -> usize {
+        self.children.len()
+    }
+}
+
+impl Default for Card {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Component for Card {}
+
+impl LowerToTree for Card {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let class = std::mem::take(&mut self.class);
+        let children = std::mem::take(&mut self.children);
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        let id = tree.push_card_unchecked(parent, style);
+        for child in children {
+            registry.lower_boxed(child, tree, id)?;
+        }
+        Ok(id)
     }
 }
 
@@ -723,6 +809,43 @@ mod tests {
         let ctx = app.tree().actions().fire(action);
         assert!(pressed.get(), "user closure must fire");
         assert!(ctx.is_dirty(), "every action must mark dirty (§7)");
+    }
+
+    #[test]
+    fn button_disabled_lowers_into_the_tree() {
+        let app = Mkui::new().child(Button::new("Save").disabled(true));
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let button = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Button(b) = &button.kind else {
+            panic!("expected Button")
+        };
+        assert!(b.disabled);
+    }
+
+    #[test]
+    fn button_defaults_to_not_disabled() {
+        let app = Mkui::new().child(Button::new("Save"));
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let button = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Button(b) = &button.kind else {
+            panic!("expected Button")
+        };
+        assert!(!b.disabled);
+    }
+
+    #[test]
+    fn card_lowers_to_a_card_node_with_its_children() {
+        let app = Mkui::new().child(
+            Card::new()
+                .class("p-6")
+                .child(Text::new("a"))
+                .child(Button::new("ok")),
+        );
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let card = app.tree().get(root.children[0]).unwrap();
+        assert!(matches!(card.kind, NodeKind::Card(_)));
+        assert_eq!(card.class.raw(), "p-6");
+        assert_eq!(card.children.len(), 2);
     }
 
     #[test]

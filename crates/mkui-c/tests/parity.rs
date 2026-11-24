@@ -272,6 +272,51 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
     }
 }
 
+/// #245: a `disabled` button must snapshot byte-identically whether it's
+/// built through the Rust runtime API or the C FFI surface — the same
+/// parity gate every other `ButtonProps` field already has to clear.
+#[test]
+fn disabled_button_produces_byte_identical_snapshots_in_rust_and_c() {
+    let rust_json = {
+        let mut tree = mkui_runtime::AppTree::new();
+        let root = tree.root();
+        tree.push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
+            .unwrap();
+        TreeSnapshot::of(&tree).to_json()
+    };
+
+    // SAFETY: single-threaded test; every pointer comes from a
+    // `Box::into_raw`/`CString` we own and free/drop within this scope.
+    let c_json = unsafe {
+        let app = mkui_app_new();
+        let root = mkui_app_root(app);
+        let label = CString::new("Save").unwrap();
+        let empty = CString::new("").unwrap();
+        let no_callback = MkuiActionId {
+            index: u32::MAX,
+            generation: u32::MAX,
+        };
+        mkui_app_button_child_with_disabled(
+            app,
+            root,
+            label.as_ptr(),
+            MKUI_BUTTON_PRIMARY,
+            empty.as_ptr(),
+            no_callback,
+            1,
+        );
+        let json_ptr = mkui_app_snapshot_json(app);
+        assert!(!json_ptr.is_null());
+        let json = CStr::from_ptr(json_ptr).to_str().unwrap().to_string();
+        mkui_free_error_message(json_ptr);
+        mkui_app_free(app);
+        json
+    };
+
+    assert_eq!(rust_json, c_json);
+    assert!(c_json.contains("\"disabled\":true"));
+}
+
 #[test]
 fn snapshot_is_deterministic_across_repeated_construction() {
     // Sanity: building the same tree twice must produce the same JSON.

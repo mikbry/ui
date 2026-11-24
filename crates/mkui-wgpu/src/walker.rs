@@ -129,7 +129,7 @@ use mkui_runtime::{
 use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
-use crate::components::MIN_TOUCH_TARGET_PX;
+use crate::components::{card, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX};
 use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
@@ -139,9 +139,9 @@ use crate::types::{
     TextStyle,
 };
 
-/// One interactive region collected during the walk. The input router
-/// hit-tests `rect` and fires `action` (looked up in the tree's
-/// `ActionRegistry`).
+/// One interactive region or inert blocker collected during the walk. The
+/// input router hit-tests the rounded silhouette and fires `action` only for
+/// enabled entries (looked up in the tree's `ActionRegistry`).
 ///
 /// Per-frame collection is `Vec` rather than a long-lived map because
 /// the walker rebuilds the list each frame (eager rebuild on dirty
@@ -154,6 +154,10 @@ pub struct HitTestEntry {
     pub node: NodeId,
     pub rect: Rect,
     pub action: Option<ActionId>,
+    /// An inert painted silhouette: stops hit traversal without hover,
+    /// arming, activation, or touch-target expansion. Enabled entries with
+    /// no action remain interactive (for example, hover-only controls).
+    pub disabled: bool,
     /// Corner radii of the rendered silhouette this entry hit-tests against
     /// (#176). Hit-testing against `rect` alone would accept clicks in the
     /// triangular slivers the renderer chamfers away from a rounded quad;
@@ -776,6 +780,16 @@ fn walk_node(
             cache,
             stats,
         )?,
+        NodeKind::Card(_) => render_card(
+            tree,
+            node,
+            ctx,
+            layout,
+            rect.unwrap_or_else(fallback_rect),
+            layouts,
+            cache,
+            stats,
+        )?,
         NodeKind::Text(t) => render_text(node, t, ctx, rect.unwrap_or_else(fallback_rect), layouts),
         NodeKind::Button(b) => {
             render_button(node, b, ctx, rect.unwrap_or_else(fallback_rect), layouts)
@@ -879,6 +893,64 @@ fn render_view(
     Ok(())
 }
 
+/// Renders [`mkui_runtime::NodeKind::Card`] (#270): `mkui-wgpu` as a
+/// *renderer of the contract's representation*, not the sole owner of the
+/// card's existence — this calls [`crate::components::card`], the same
+/// theme-driven chrome function `render_view`'s `bg-card` escape hatch
+/// (#205) painted a plain `Quad` version of by hand (ADR 0015). The two
+/// are not byte-for-byte identical: under this crate's own default `slug`
+/// feature, `components::card` paints the anti-aliased vector-path lane
+/// (#141) instead of a faceted `Quad`, so a `Card` node's pixels differ
+/// from the pre-#270 `bg-card` View under that default. `mkui-web`/
+/// `mkui-console` finally gain a real card too, which neither ever had.
+/// Unlike `bg-card` on a `View` (opt-in, class-driven), a `Card` node
+/// always paints its chrome — that's the whole point of a dedicated node
+/// kind.
+#[allow(clippy::too_many_arguments)] // mirrors `render_view`'s own escape hatch.
+fn render_card(
+    tree: &AppTree,
+    node: &mkui_runtime::Node,
+    ctx: &mut WgpuRenderCtx<'_>,
+    layout: &mkui_layout::LayoutResult,
+    rect: Rect,
+    layouts: &mut Vec<NodeLayout>,
+    cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
+) -> Result<(), MkuiError> {
+    card(ctx.scene, rect, ctx.theme.card());
+
+    // Children inherit the card's foreground the same way a `bg-card` View
+    // cascades `text-card-foreground` to descendants that set no color of
+    // their own (see `render_view`).
+    let saved_foreground = ctx.current_foreground;
+    ctx.current_foreground = node
+        .resolved
+        .foreground
+        .map_or(ctx.theme.tokens.surface_foreground, |role| {
+            color_role_foreground(role, ctx.theme)
+        });
+
+    walk_children(
+        tree,
+        &node.children,
+        ctx,
+        layout,
+        rect.origin.x,
+        layouts,
+        cache,
+        stats,
+    )?;
+
+    ctx.current_foreground = saved_foreground;
+
+    layouts.push(NodeLayout {
+        node: node.id,
+        rect,
+    });
+
+    Ok(())
+}
+
 fn render_text(
     node: &mkui_runtime::Node,
     text: &mkui_runtime::TextProps,
@@ -945,19 +1017,33 @@ fn render_button(
     let variant = map_button_variant(button.variant);
     let style = theme.button_style(variant, ButtonSize::Default);
 
+    // #245: a disabled button dims fill/stroke/label by the exact same
+    // factor `components::button::button_with` applies, and — below —
+    // retains an inert silhouette to block controls painted underneath.
+    // Only enabled buttons get the expanded touch-target strips.
+    let (fill, stroke_color, label_color) = if button.disabled {
+        (
+            style.idle_fill.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            style.idle_stroke.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            style.idle_label.multiply_alpha(DISABLED_ALPHA_FACTOR),
+        )
+    } else {
+        (style.idle_fill, style.idle_stroke, style.idle_label)
+    };
+
     let corner_radii = CornerRadii::all(style.corner_radius);
     ctx.scene.quad(Quad {
         rect,
-        fill: style.idle_fill,
+        fill,
         corner_radii,
         stroke: Some(Stroke {
-            color: style.idle_stroke,
+            color: stroke_color,
             width: style.stroke_width.max(1.0),
         }),
     });
 
     let label_style = TextStyle {
-        color: style.idle_label,
+        color: label_color,
         align: TextAlign::Center,
         ..style.label_style
     };
@@ -995,20 +1081,28 @@ fn render_button(
     ctx.hits.push(HitTestEntry {
         rect,
         node: node.id,
-        action: button.on_press,
+        action: if button.disabled {
+            None
+        } else {
+            button.on_press
+        },
+        disabled: button.disabled,
         corner_radii,
     });
-    let hit_rect = rect.expand_to_min_size(Size::new(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX));
-    for padding in touch_target_padding_strips(rect, hit_rect)
-        .into_iter()
-        .flatten()
-    {
-        ctx.hits.push(HitTestEntry {
-            rect: padding,
-            node: node.id,
-            action: button.on_press,
-            corner_radii: CornerRadii::all(0.0),
-        });
+    if !button.disabled {
+        let hit_rect = rect.expand_to_min_size(Size::new(MIN_TOUCH_TARGET_PX, MIN_TOUCH_TARGET_PX));
+        for padding in touch_target_padding_strips(rect, hit_rect)
+            .into_iter()
+            .flatten()
+        {
+            ctx.hits.push(HitTestEntry {
+                rect: padding,
+                node: node.id,
+                action: button.on_press,
+                disabled: false,
+                corner_radii: CornerRadii::all(0.0),
+            });
+        }
     }
     layouts.push(NodeLayout {
         node: node.id,
@@ -1166,7 +1260,7 @@ mod tests {
     use crate::bridge::WgpuRendererRegistry;
     use crate::pointer;
     use crate::types::{Primitive, Size, Text as PrimitiveText};
-    use mkui_core::components::{Button, Mkui as CoreMkui, Text as CoreText, View};
+    use mkui_core::components::{Button, Card, Mkui as CoreMkui, Text as CoreText, View};
     use mkui_text::BitmapTextSystem;
 
     /// Mirrors `WgpuTheme::default().tokens.spacing.button_height` (#287
@@ -1403,6 +1497,172 @@ mod tests {
             (layout_center_y - bounds_center_y).abs() < 1e-4,
             "the widened hit-entry union must stay centered on the painted button"
         );
+    }
+
+    /// #270: `NodeKind::Card` paints the same themed chrome
+    /// `render_view`'s `bg-card` escape hatch painted, and recurses into
+    /// its children — it is a container, not a leaf (mkui-layout treats it
+    /// identically to `View`).
+    #[test]
+    fn card_node_paints_chrome_and_recurses_into_children() {
+        let core = CoreMkui::new().child(Card::new().class("p-6").child(CoreText::new("inside")));
+        let out = walk(&core);
+
+        // `components::card` paints a `Quad` or (under the `slug` feature,
+        // which is this crate's own default) a `PlacedVectorPath` pair —
+        // either way, chrome primitives beyond the child's own `Text` must
+        // have been pushed.
+        let non_text_primitives = out
+            .scene
+            .primitives
+            .iter()
+            .filter(|p| !matches!(p, Primitive::Text(_)))
+            .count();
+        assert!(
+            non_text_primitives >= 1,
+            "card must paint its chrome as at least one non-text primitive"
+        );
+
+        let texts = text_primitives(&out.scene);
+        assert_eq!(texts.len(), 1, "card's child text must still render");
+        assert_eq!(texts[0].content, "inside");
+
+        // Card itself + the text child = 2 layout entries.
+        assert_eq!(out.layouts.len(), 2);
+    }
+
+    /// Disabled chrome keeps one inert silhouette in paint order, without
+    /// the active button's expanded touch target.
+    #[test]
+    fn disabled_button_paints_dimmed_chrome_and_registers_a_blocker() {
+        let idle = CoreMkui::new().child(
+            Button::new("Save")
+                .variant(ButtonVariant::Primary)
+                .on_press(|| {}),
+        );
+        let idle_out = walk(&idle);
+        let idle_quad = idle_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => Some(*q),
+                _ => None,
+            })
+            .expect("idle button must paint a quad");
+
+        let disabled = CoreMkui::new().child(
+            Button::new("Save")
+                .variant(ButtonVariant::Primary)
+                .on_press(|| {})
+                .disabled(true),
+        );
+        let disabled_out = walk(&disabled);
+        let disabled_quad = disabled_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => Some(*q),
+                _ => None,
+            })
+            .expect("disabled button must still paint a quad");
+
+        assert_ne!(
+            idle_quad.fill, disabled_quad.fill,
+            "disabled must dim the button's fill"
+        );
+        assert_eq!(disabled_out.hit_tests.len(), 1);
+        let blocker = disabled_out.hit_tests[0];
+        assert!(blocker.disabled);
+        assert_eq!(blocker.action, None);
+        assert_eq!(blocker.rect, disabled_quad.rect);
+        assert_eq!(blocker.corner_radii, disabled_quad.corner_radii);
+        assert!(
+            !idle_out.hit_tests.is_empty(),
+            "sanity: the idle twin must still register hit entries"
+        );
+    }
+
+    #[test]
+    fn disabled_silhouette_blocks_underlying_action_but_not_clipped_corners() {
+        use std::{cell::Cell, rc::Rc};
+        let fired = Rc::new(Cell::new(0));
+        let counter = fired.clone();
+        let core = CoreMkui::new()
+            .child(Button::new("Behind").on_press(move || counter.set(counter.get() + 1)))
+            .child(
+                Button::new("Disabled")
+                    .disabled(true)
+                    .on_press(|| panic!("disabled")),
+            );
+        let out = walk(&core);
+        let blocker = *out.hit_tests.iter().find(|entry| entry.disabled).unwrap();
+        let mut behind = *out.hit_tests.iter().find(|entry| !entry.disabled).unwrap();
+        // Compose overlapping painted regions as an embedding/overlay host
+        // can, retaining the walker's actual disabled silhouette and radii.
+        behind.rect = Rect::new(
+            Point::new(blocker.rect.origin.x - 10.0, blocker.rect.origin.y - 10.0),
+            Size::new(
+                blocker.rect.size.width + 20.0,
+                blocker.rect.size.height + 20.0,
+            ),
+        );
+        behind.corner_radii = CornerRadii::all(0.0);
+        let entries = [behind, blocker];
+        let center = Point::new(
+            blocker.rect.origin.x + blocker.rect.size.width * 0.5,
+            blocker.rect.origin.y + blocker.rect.size.height * 0.5,
+        );
+        let corner = Point::new(blocker.rect.origin.x + 0.1, blocker.rect.origin.y + 0.1);
+        let outside = Point::new(blocker.rect.origin.x + 10.0, blocker.rect.origin.y - 1.0);
+        let mut pointer = pointer::PointerState::default();
+        assert!(pointer::hit_test(&entries, center).is_none());
+        assert!(pointer.on_press(&entries, center).is_none());
+        assert!(pointer.on_release(&entries, center).is_none());
+        assert_eq!(fired.get(), 0);
+        // The underlying action remains reachable through unpainted corners
+        // and outside the disabled silhouette (no disabled touch padding).
+        for point in [corner, outside] {
+            assert_eq!(pointer.on_press(&entries, point), Some(behind.node));
+            let hit = pointer.on_release(&entries, point).unwrap();
+            core.tree().actions().fire(hit.action.unwrap());
+        }
+        assert_eq!(fired.get(), 2);
+        // A press armed underneath before the blocker appears cannot fire.
+        pointer.on_press(&[behind], center);
+        assert!(pointer.on_release(&entries, center).is_none());
+        // A later active entry still wins in paint order.
+        assert_eq!(
+            pointer::hit_test(&[blocker, behind], center).unwrap().node,
+            behind.node
+        );
+    }
+
+    #[test]
+    fn card_foreground_inherits_explicit_role_and_restores_siblings() {
+        let core = CoreMkui::new()
+            .child(
+                Card::new()
+                    .class("text-muted-foreground")
+                    .child(View::new().child(CoreText::new("inherited")))
+                    .child(CoreText::new("own").class("text-foreground")),
+            )
+            .child(Card::new().child(CoreText::new("default")))
+            .child(CoreText::new("outside"));
+        let out = walk(&core);
+        let texts = text_primitives(&out.scene);
+        let theme = WgpuTheme::default();
+        assert_eq!(
+            texts[0].style.color,
+            color_role_foreground(ColorRole::MutedForeground, &theme)
+        );
+        assert_eq!(
+            texts[1].style.color,
+            color_role_foreground(ColorRole::Foreground, &theme)
+        );
+        assert_eq!(texts[2].style.color, theme.tokens.surface_foreground);
+        assert_eq!(texts[3].style.color, theme.body_style().color);
     }
 
     /// Regression (#186 review): widening the touch target must not widen

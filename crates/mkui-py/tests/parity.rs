@@ -73,6 +73,7 @@ fn build_py_tree_json() -> String {
         ButtonVariant::Primary.to_ffi(),
         "p-6",
         Some(action),
+        false,
     )
     .unwrap();
 
@@ -108,6 +109,35 @@ fn py_app_and_rust_runtime_produce_byte_identical_snapshots() {
         );
     }
     assert_eq!(rust_json, py_json);
+}
+
+/// #245: a `disabled` button must snapshot byte-identically whether it's
+/// built through the Rust runtime API or the Python-shaped `App` surface.
+#[test]
+fn disabled_button_produces_byte_identical_snapshots_in_rust_and_py() {
+    let rust_json = {
+        let mut tree = mkui_runtime::AppTree::new();
+        let root = tree.root();
+        tree.push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
+            .unwrap();
+        TreeSnapshot::of(&tree).to_json()
+    };
+
+    let app = App::new_for_test();
+    let root = app.root();
+    app.button_child(
+        root,
+        "Save",
+        ButtonVariant::Primary.to_ffi(),
+        "",
+        None,
+        true,
+    )
+    .unwrap();
+    let py_json = app.snapshot_json();
+
+    assert_eq!(rust_json, py_json);
+    assert!(py_json.contains("\"disabled\":true"));
 }
 
 #[test]
@@ -150,6 +180,7 @@ fn removing_a_buttons_node_stops_its_action_from_firing() {
             ButtonVariant::Primary.to_ffi(),
             "",
             Some(action),
+            false,
         )
         .unwrap();
 

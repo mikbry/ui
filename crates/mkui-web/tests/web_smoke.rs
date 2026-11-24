@@ -42,3 +42,28 @@ fn nested_view_tree_lowers_into_runtime_with_correct_counts() {
     assert_eq!(texts, 1);
     assert_eq!(buttons, 2);
 }
+
+#[test]
+fn card_and_disabled_button_lower_into_runtime_correctly() {
+    // #270 + #245: the Card promotion and the button-disabled fold-in,
+    // exercised through the same lowering path `render_tree` consumes
+    // (DOM construction itself needs a real browser — see the module doc).
+    let core = mkui_core::components::Mkui::new().child(
+        Card::new()
+            .class("p-6")
+            .child(Text::new("inside"))
+            .child(Button::new("Disabled").disabled(true)),
+    );
+
+    let mut cards = 0;
+    let mut disabled_buttons = 0;
+    for node in core.tree().nodes() {
+        match &node.kind {
+            NodeKind::Card(_) => cards += 1,
+            NodeKind::Button(b) if b.disabled => disabled_buttons += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(cards, 1);
+    assert_eq!(disabled_buttons, 1);
+}

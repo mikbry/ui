@@ -137,14 +137,17 @@ public:
             className.empty() ? nullptr : className.c_str()));
     }
 
-    /// Append a `Button` under `parent`.
+    /// Append a `Button` under `parent`. A disabled button (#245) dims on
+    /// every backend and suppresses UI activation; explicit action firing is unchanged.
     NodeId buttonChild(NodeId parent, const std::string& label,
                        ButtonVariant variant = ButtonVariant::Primary,
                        const std::string& className = "",
-                       MkuiActionId onPress = kNoAction) {
-        return NodeId(mkui_app_button_child(
+                       MkuiActionId onPress = kNoAction,
+                       bool disabled = false) {
+        return NodeId(mkui_app_button_child_with_disabled(
             app_, parent.raw(), label.c_str(), static_cast<int>(variant),
-            className.empty() ? nullptr : className.c_str(), onPress));
+            className.empty() ? nullptr : className.c_str(), onPress,
+            disabled ? 1 : 0));
     }
 
     /// Register a C++ callable as an action callback. The returned id

@@ -8,6 +8,66 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`NodeKind::Card` — the second component promoted into the shared
+  contract, plus `Button`'s `disabled` field folded in as the first
+  completed case (#270, #245).** `mkui-runtime::tree::NodeKind` gains a
+  `Card(CardProps)` variant (`CardProps` is empty, like `ViewProps` — fill/
+  border/corner-radius come from each backend's own theme, never a field
+  on the node) and a matching `AppTree::push_card`/`push_card_unchecked`,
+  mirroring `push_view` exactly; `mkui-core::components::Card` is the
+  ergonomic builder, registered in `LoweringRegistry::with_defaults`.
+  `mkui-layout` treats `Card` as a flex container identically to `View`.
+  Every backend renders it through its own native primitive: `mkui-wgpu`'s
+  `walker::render_card` calls `components::card`, the same theme-driven
+  chrome function `render_view`'s `bg-card` class escape hatch (#205)
+  painted a plain `Quad` version of by hand — not byte-identical, since
+  `components::card` forks onto the anti-aliased vector-path lane under
+  this crate's own default `slug` feature; `mkui-web`
+  emits a real `<div class="card">` styled by the opt-in public
+  `mkui-web/styles.css` / `DEFAULT_COMPONENT_CSS` recipe (application-owned
+  variables and classes override defaults; no global theme is installed);
+  `mkui-console` wraps the card's flattened lines in a box-drawing
+  `┌───┐`/`└───┘` border, the terminal's native "there is no nested-box
+  model" primitive. `examples/showcase-common`'s "Button Components"
+  section now builds a real `Card` instead of a `View` carrying
+  `bg-card`/`border`/`rounded-lg` classes by hand — the canonical
+  three-backend proof, not just a unit test. Also folded in: `ButtonProps`
+  gains `disabled: bool`, threaded through new `push_button_with_disabled`/
+  `push_button_with_disabled_unchecked` and
+  `mkui-c`'s `mkui_app_button_child_with_disabled`, with a trailing `int disabled`,
+  and its C++ wrapper (defaulted for ordinary calls; exact member-pointer types
+  need migration as noted below). The original six-argument
+  `mkui_app_button_child` symbol and enabled semantics are preserved, as are
+  Rust's enabled-only `push_button`/`push_button_unchecked` methods. Also updated:
+  `mkui-py`'s `button_child` (defaulted via `#[pyo3(signature = ...)]`, so
+  existing Python callers are unaffected), every binding's parity-test
+  fixture, and `mkui-wgpu::walker::render_button` (reuses
+  `components::button`'s existing dim-by-`DISABLED_ALPHA_FACTOR`, retaining
+  an inert rounded silhouette that blocks controls underneath without hover,
+  activation, or touch-target expansion) / `mkui-web` (native `disabled`
+  attribute, public opacity recipe, and pointer blocking) / `mkui-console`
+  (dims the row, `Selectable::on_activate` refuses to hand back the action).
+  Explicit action dispatch remains available. Wgpu Card descendants inherit
+  the Card's explicit supported foreground utility ahead of its default token.
+  A standalone `examples/web-recipe-smoke` browser consumer checks computed
+  recipe styling, application overrides, inheritance, and disabled overlap.
+  See `docs/architecture/0015-component-promotion-process.md` for the
+  repeatable checklist this is the second and first-folded-in instance of,
+  a status table of the ~20 still-unpromoted components, and why Tooltip
+  is the next candidate but carries real anchor/overlay design debt Card
+  did not.
+- **Source migration for Card and disabled Button:** exhaustive Rust matches on
+  `mkui_runtime::tree::NodeKind` must handle `NodeKind::Card(_)` (as a container
+  where appropriate). Direct `mkui_runtime::tree::ButtonProps` and
+  `mkui_wgpu::walker::HitTestEntry` struct literals must add `disabled: false`
+  for existing enabled controls, or `true` for disabled controls. Destructuring
+  patterns must include the field or use `..`. The serde default for old
+  `ButtonProps` data does not make Rust struct literals source-compatible.
+  Existing enabled-only Rust constructors and the six-argument C function
+  remain available. C++ ordinary `App::buttonChild` calls still compile via
+  the default argument, but exact member-function-pointer types must append
+  `bool` and pointer-based calls must pass it explicitly; see
+  [`bindings/README.md`](bindings/README.md).
 - **Node removal API: `ActionRegistry::remove`, `AppTree::remove_node`,
   FFI `mkui_app_remove_node`, and PyO3 `App.remove_node` (#83).** Option A
   from #70: the generation-reservation infrastructure #70 left dormant is

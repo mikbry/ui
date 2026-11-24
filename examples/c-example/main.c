@@ -61,6 +61,7 @@ int main(void) {
     mkui_app_button_child(app, button_row, "Destructive", MKUI_BUTTON_DESTRUCTIVE, "", NO_CALLBACK);
     mkui_app_button_child(app, button_row, "Outline", MKUI_BUTTON_OUTLINE, "", NO_CALLBACK);
     mkui_app_button_child(app, button_row, "Ghost", MKUI_BUTTON_GHOST, "", NO_CALLBACK);
+    mkui_app_button_child_with_disabled(app, button_row, "Disabled", MKUI_BUTTON_SECONDARY, "", NO_CALLBACK, 1);
 
     /* Run */
     printf("Starting mkui application...\n");

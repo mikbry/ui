@@ -177,6 +177,14 @@ impl Mkui {
                     current_row += 1;
                 }
                 Line::Spacer => current_row += 1,
+                Line::CardTop => {
+                    renderer.print_styled(2, current_row, card_border_row(true).dark_grey())?;
+                    current_row += 1;
+                }
+                Line::CardBottom => {
+                    renderer.print_styled(2, current_row, card_border_row(false).dark_grey())?;
+                    current_row += 1;
+                }
                 Line::Button(index) => {
                     if let Some(Selectable::Button(button)) = self.selectables.get(*index) {
                         let is_selected = self.app.selected_index() == *index;
@@ -229,6 +237,26 @@ impl Mkui {
     }
 }
 
+/// Width (in box-drawing characters, excluding the two corner glyphs) of
+/// the horizontal rule [`Line::CardTop`]/[`Line::CardBottom`] render as the
+/// console's native "card" border primitive (#270). A plain fixed-width
+/// row, not a measurement of the card's actual content — the console
+/// backend has no per-row width tracking today (every other row prints at
+/// a fixed `x` offset too, see `render()`), so this is the same kind of
+/// "good enough to read as boxed" choice `button_styled_content`'s `[ ]`
+/// bracketing already makes for a button.
+const CARD_BORDER_WIDTH: usize = 40;
+
+/// One border row of a `Card`'s bordered box: `┌────┐` for the top,
+/// `└────┘` for the bottom.
+fn card_border_row(top: bool) -> String {
+    let (left, right) = if top { ('┌', '┐') } else { ('└', '┘') };
+    format!(
+        "{left}{}{right}",
+        "─".repeat(CARD_BORDER_WIDTH.saturating_sub(2))
+    )
+}
+
 /// Decide the styled text for one `Button` row.
 ///
 /// Pulled out of `render()` so the `hover:` state-variant branch (#269) is
@@ -242,6 +270,22 @@ fn button_styled_content(
     is_selected: bool,
 ) -> StyledContent<String> {
     let text = format!("[ {} ]", button.label);
+
+    // #245: a disabled button dims to a flat grey, the console's own
+    // native "visually distinct, regardless of variant" primitive —
+    // mirroring `mkui-wgpu`'s alpha dim and `mkui-web`'s
+    // `disabled:opacity-50`. `hover:`/variant styling never applies to a
+    // disabled row, but the keyboard cursor still needs a visible cue
+    // while parked on it (underline) — a selected disabled row must not
+    // render pixel-identical to an unselected one, same reasoning as
+    // `MenuListItem`'s leading `"> "` marker.
+    if button.disabled {
+        return if is_selected {
+            text.dark_grey().underlined()
+        } else {
+            text.dark_grey()
+        };
+    }
 
     if is_selected {
         if let Some((bg, fg)) = button.style.hover_colors() {
@@ -513,6 +557,53 @@ mod tests {
             Some(color_role_to_crossterm(ColorRole::Card)),
             "hover: override must not apply while a different row is selected"
         );
+    }
+
+    /// #245: a disabled button renders dimmed regardless of variant or
+    /// selection state, and never applies a `hover:` override.
+    #[test]
+    fn disabled_button_renders_dimmed_regardless_of_variant_or_selection() {
+        let mut app = Mkui::new().expect("init mkui-console");
+        app = app.child(
+            CoreButton::new("Save")
+                .variant(ButtonVariant::Primary)
+                .class("hover:bg-card")
+                .disabled(true),
+        );
+        app.build_layout();
+
+        let Selectable::Button(button) = &app.selectables[0] else {
+            panic!("expected a Button selectable")
+        };
+        assert!(button.disabled);
+
+        for selected in [true, false] {
+            let styled = button_styled_content(button, selected);
+            assert_eq!(styled.style().background_color, None);
+            assert_eq!(styled.style().foreground_color, Some(Color::DarkGrey));
+        }
+
+        // The keyboard cursor must still be visible while parked on a
+        // disabled row — a selected disabled button must not render
+        // pixel-identical to an unselected one.
+        let selected = button_styled_content(button, true);
+        let unselected = button_styled_content(button, false);
+        assert_ne!(
+            selected.style().attributes,
+            unselected.style().attributes,
+            "selected and unselected disabled rows must differ (the cursor cue)"
+        );
+    }
+
+    /// #270: the console's native card border primitive renders a
+    /// top/bottom rule with matching corner glyphs.
+    #[test]
+    fn card_border_row_renders_matching_corners() {
+        let top = card_border_row(true);
+        let bottom = card_border_row(false);
+        assert!(top.starts_with('┌') && top.ends_with('┐'));
+        assert!(bottom.starts_with('└') && bottom.ends_with('┘'));
+        assert_eq!(top.chars().count(), bottom.chars().count());
     }
 
     /// A button with no `hover:` class keeps today's variant-based look —

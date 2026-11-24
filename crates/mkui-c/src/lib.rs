@@ -400,8 +400,9 @@ pub unsafe extern "C" fn mkui_app_text_child(
     })
 }
 
-/// Append a `Button` under `parent`. Pass `MkuiActionId{UINT_MAX, UINT_MAX}`
-/// for no callback, or an id from [`mkui_app_register_callback`].
+/// Append an enabled `Button` under `parent`. Pass `MkuiActionId{UINT_MAX,
+/// UINT_MAX}` for no callback, or an id from [`mkui_app_register_callback`].
+/// This original six-argument entry point preserves its C ABI and semantics.
 #[no_mangle]
 pub unsafe extern "C" fn mkui_app_button_child(
     app: *mut MkuiApp,
@@ -410,6 +411,26 @@ pub unsafe extern "C" fn mkui_app_button_child(
     variant: c_int,
     class_name: *const c_char,
     on_press: MkuiActionId,
+) -> MkuiNodeId {
+    // SAFETY: identical pointer requirements to the disabled-aware entry point.
+    unsafe {
+        mkui_app_button_child_with_disabled(app, parent, label, variant, class_name, on_press, 0)
+    }
+}
+
+/// Append a `Button` with an explicit disabled state. Zero means enabled;
+/// any nonzero `disabled` value means disabled. Disabled buttons dim and do
+/// not activate through UI input, even when `on_press` is registered. Direct
+/// calls to `mkui_app_fire_action` still invoke registered actions.
+#[no_mangle]
+pub unsafe extern "C" fn mkui_app_button_child_with_disabled(
+    app: *mut MkuiApp,
+    parent: MkuiNodeId,
+    label: *const c_char,
+    variant: c_int,
+    class_name: *const c_char,
+    on_press: MkuiActionId,
+    disabled: c_int,
 ) -> MkuiNodeId {
     ffi_guard(invalid_node(), || {
         if app.is_null() {
@@ -443,7 +464,14 @@ pub unsafe extern "C" fn mkui_app_button_child(
         if !parent_is_live(&tree, parent) {
             return invalid_node();
         }
-        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action);
+        let id = tree.push_button_with_disabled_unchecked(
+            parent.into(),
+            label,
+            variant,
+            style,
+            action,
+            disabled != 0,
+        );
         id.into()
     })
 }

@@ -18,6 +18,7 @@ members = [
     "examples/headless-showcase", # Headless components demo
     "examples/console-showcase", # Console/Terminal UI demo
     "examples/web-showcase",   # Web/WASM showcase
+    "examples/web-recipe-smoke", # Standalone public web recipe browser smoke
     "examples/native-window",  # Native winit + wgpu window
     "examples/atoms-on-wgpu",  # Wgpu badge + dot atoms via AppTree (Sprint 5)
     "examples/native-showcase", # Cross-binding showcase on the wgpu backend (Sprint 5)

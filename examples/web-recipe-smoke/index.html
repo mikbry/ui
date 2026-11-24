@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>mkui-web public recipe smoke</title>
+<style>
+  /* These application-owned rules intentionally precede the imported recipe. */
+  .consumer-card { background-color: rgb(1, 2, 3); color: rgb(4, 5, 6); border-radius: 12px; }
+  .overlap { position: relative; height: 100px; margin-top: 20px; }
+  .overlap button { position: absolute; width: 200px; height: 60px; left: 0; top: 0; }
+  .overlap .over { width: 100px; border-radius: 16px; }
+</style>
+<div id="app"></div>
+<pre id="events"></pre>
+<pre id="result">RUNNING</pre>
+<script type="module">
+  const result = document.querySelector('#result');
+  const assert = (ok, message) => { if (!ok) throw new Error(message); };
+  try {
+    const { default: init } = await import('./pkg/web_recipe_smoke.js');
+    await init();
+    const card = document.querySelector('.card');
+    let css = getComputedStyle(card);
+    assert(css.backgroundColor === 'rgb(255, 255, 255)', 'default fill');
+    assert(css.color === 'rgb(24, 24, 27)', 'default foreground');
+    assert(css.borderTopWidth === '1px' && css.borderTopStyle === 'solid', 'border');
+    assert(css.borderTopColor === 'rgb(228, 228, 231)', 'border color');
+    assert(css.borderTopLeftRadius === '8px' && css.boxShadow !== 'none', 'radius/shadow');
+    assert(getComputedStyle(card.firstElementChild).color === css.color, 'child inherits');
+    const override = getComputedStyle(document.querySelector('.consumer-card'));
+    assert(override.backgroundColor === 'rgb(1, 2, 3)' && override.color === 'rgb(4, 5, 6)' && override.borderTopLeftRadius === '12px', 'consumer class overrides');
+    card.style.setProperty('--card', 'rgb(11, 22, 33)');
+    card.style.setProperty('--card-foreground', 'rgb(44, 55, 66)');
+    card.style.setProperty('--border', 'rgb(77, 88, 99)');
+    card.style.setProperty('--radius', '20px');
+    css = getComputedStyle(card);
+    assert(css.backgroundColor === 'rgb(11, 22, 33)' && css.color === 'rgb(44, 55, 66)' && css.borderTopColor === 'rgb(77, 88, 99)' && css.borderTopLeftRadius === '20px', 'application theme variables');
+    assert(getComputedStyle(card.firstElementChild).color === 'rgb(44, 55, 66)', 'themed inheritance');
+    const over = document.querySelector('.over');
+    const under = document.querySelector('.under');
+    assert(over.disabled && getComputedStyle(over).opacity === '0.5', 'disabled appearance');
+    assert(getComputedStyle(over).pointerEvents === 'auto', 'disabled blocks pointer hits');
+    const rect = over.getBoundingClientRect();
+    const target = document.elementFromPoint(rect.x + 50, rect.y + 30);
+    assert(target === over, 'disabled silhouette owns the overlap');
+    target.click();
+    assert(document.querySelector('#events').textContent === '', 'disabled click cannot activate either button');
+    const exposed = document.elementFromPoint(rect.x + 150, rect.y + 30);
+    assert(exposed === under, 'exposed enabled region remains reachable');
+    exposed.click();
+    assert(document.querySelector('#events').textContent === 'enabled;', 'enabled dispatch works');
+    result.textContent = 'PASS: default recipe, theme and class overrides, inheritance, disabled overlap and dispatch';
+    document.documentElement.dataset.smoke = 'pass';
+  } catch (error) {
+    result.textContent = `FAIL: ${error.stack ?? error}`;
+    document.documentElement.dataset.smoke = 'fail';
+    throw error;
+  }
+</script>
+</html>

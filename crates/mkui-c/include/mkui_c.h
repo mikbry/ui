@@ -121,8 +121,9 @@ struct MkuiNodeId mkui_app_text_child(struct MkuiApp *app,
                                       const char *class_name);
 
 /**
- * Append a `Button` under `parent`. Pass `MkuiActionId{UINT_MAX, UINT_MAX}`
- * for no callback, or an id from [`mkui_app_register_callback`].
+ * Append an enabled `Button` under `parent`. Pass `MkuiActionId{UINT_MAX,
+ * UINT_MAX}` for no callback, or an id from [`mkui_app_register_callback`].
+ * This original six-argument entry point preserves its C ABI and semantics.
  */
 struct MkuiNodeId mkui_app_button_child(struct MkuiApp *app,
                                         struct MkuiNodeId parent,
@@ -130,6 +131,20 @@ struct MkuiNodeId mkui_app_button_child(struct MkuiApp *app,
                                         int variant,
                                         const char *class_name,
                                         struct MkuiActionId on_press);
+
+/**
+ * Append a `Button` with an explicit disabled state. Zero means enabled;
+ * any nonzero `disabled` value means disabled. Disabled buttons dim and do
+ * not activate through UI input, even when `on_press` is registered. Direct
+ * calls to `mkui_app_fire_action` still invoke registered actions.
+ */
+struct MkuiNodeId mkui_app_button_child_with_disabled(struct MkuiApp *app,
+                                                      struct MkuiNodeId parent,
+                                                      const char *label,
+                                                      int variant,
+                                                      const char *class_name,
+                                                      struct MkuiActionId on_press,
+                                                      int disabled);
 
 /**
  * Remove `node` and every descendant from the tree, unregistering any
