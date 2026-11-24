@@ -56,12 +56,12 @@ int main(void) {
     /* Button showcase */
     MkuiActionId on_click = mkui_app_register_callback(app, on_primary_click, NULL);
     MkuiNodeId button_row = mkui_app_view_child(app, content, "flex flex-wrap gap-4");
-    mkui_app_button_child(app, button_row, "Primary", MKUI_BUTTON_PRIMARY, "", on_click, 0);
-    mkui_app_button_child(app, button_row, "Secondary", MKUI_BUTTON_SECONDARY, "", NO_CALLBACK, 0);
-    mkui_app_button_child(app, button_row, "Destructive", MKUI_BUTTON_DESTRUCTIVE, "", NO_CALLBACK, 0);
-    mkui_app_button_child(app, button_row, "Outline", MKUI_BUTTON_OUTLINE, "", NO_CALLBACK, 0);
-    mkui_app_button_child(app, button_row, "Ghost", MKUI_BUTTON_GHOST, "", NO_CALLBACK, 0);
-    mkui_app_button_child(app, button_row, "Disabled", MKUI_BUTTON_SECONDARY, "", NO_CALLBACK, 1);
+    mkui_app_button_child(app, button_row, "Primary", MKUI_BUTTON_PRIMARY, "", on_click);
+    mkui_app_button_child(app, button_row, "Secondary", MKUI_BUTTON_SECONDARY, "", NO_CALLBACK);
+    mkui_app_button_child(app, button_row, "Destructive", MKUI_BUTTON_DESTRUCTIVE, "", NO_CALLBACK);
+    mkui_app_button_child(app, button_row, "Outline", MKUI_BUTTON_OUTLINE, "", NO_CALLBACK);
+    mkui_app_button_child(app, button_row, "Ghost", MKUI_BUTTON_GHOST, "", NO_CALLBACK);
+    mkui_app_button_child_with_disabled(app, button_row, "Disabled", MKUI_BUTTON_SECONDARY, "", NO_CALLBACK, 1);
 
     /* Run */
     printf("Starting mkui application...\n");

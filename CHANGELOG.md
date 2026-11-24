@@ -35,7 +35,8 @@ breaking changes can land on minor bumps).
   gains `disabled: bool`, threaded through new `push_button_with_disabled`/
   `push_button_with_disabled_unchecked` and
   `mkui-c`'s `mkui_app_button_child_with_disabled`, with a trailing `int disabled`,
-  and its C++ wrapper (defaulted, source-compatible). The original six-argument
+  and its C++ wrapper (defaulted for ordinary calls; exact member-pointer types
+  need migration as noted below). The original six-argument
   `mkui_app_button_child` symbol and enabled semantics are preserved, as are
   Rust's enabled-only `push_button`/`push_button_unchecked` methods. Also updated:
   `mkui-py`'s `button_child` (defaulted via `#[pyo3(signature = ...)]`, so
@@ -55,6 +56,18 @@ breaking changes can land on minor bumps).
   a status table of the ~20 still-unpromoted components, and why Tooltip
   is the next candidate but carries real anchor/overlay design debt Card
   did not.
+- **Source migration for Card and disabled Button:** exhaustive Rust matches on
+  `mkui_runtime::tree::NodeKind` must handle `NodeKind::Card(_)` (as a container
+  where appropriate). Direct `mkui_runtime::tree::ButtonProps` and
+  `mkui_wgpu::walker::HitTestEntry` struct literals must add `disabled: false`
+  for existing enabled controls, or `true` for disabled controls. Destructuring
+  patterns must include the field or use `..`. The serde default for old
+  `ButtonProps` data does not make Rust struct literals source-compatible.
+  Existing enabled-only Rust constructors and the six-argument C function
+  remain available. C++ ordinary `App::buttonChild` calls still compile via
+  the default argument, but exact member-function-pointer types must append
+  `bool` and pointer-based calls must pass it explicitly; see
+  [`bindings/README.md`](bindings/README.md).
 - **Node removal API: `ActionRegistry::remove`, `AppTree::remove_node`,
   FFI `mkui_app_remove_node`, and PyO3 `App.remove_node` (#83).** Option A
   from #70: the generation-reservation infrastructure #70 left dormant is

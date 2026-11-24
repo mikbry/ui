@@ -1,5 +1,7 @@
-@import "../../crates/mkui-web/styles.css";
+/* Establish precedence before any imports first declare these layers. */
+@layer theme, base, mkui-defaults, components, utilities;
 @import "tailwindcss";
+@import "../../crates/mkui-web/styles.css";
 @import "tw-animate-css";
 
 @import "./app.css";

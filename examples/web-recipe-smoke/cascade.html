@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Public recipe cascade regression</title>
+<style>
+  /* Unlayered consumer rules win even when loaded before the recipe. */
+  .consumer-card { border-width: 5px; }
+  .consumer-button { opacity: 0.9; }
+</style>
+<link rel="stylesheet" href="__CSS__">
+<div id="card" class="card"><span>Inherited foreground</span></div>
+<button id="disabled" class="btn" disabled>Disabled</button>
+<button id="enabled" class="btn">Enabled</button>
+<div id="consumer-card" class="card consumer-card">Consumer</div>
+<button id="consumer-button" class="btn consumer-button" disabled>Consumer</button>
+<div id="component-card" class="card component-card">Component</div>
+<button id="component-button" class="btn component-button" disabled>Component</button>
+<div id="utility-card" class="card border-4">Utility</div>
+<button id="utility-button" class="btn opacity-100" disabled>Utility</button>
+<pre id="result">RUNNING</pre>
+<script>
+  const assert = (ok, message) => { if (!ok) throw new Error(message); };
+  const style = id => getComputedStyle(document.getElementById(id));
+  try {
+    const card = document.getElementById('card');
+    const css = style('card');
+    assert(css.borderTopWidth === '1px' && css.borderTopStyle === 'solid', 'Card border survives base reset');
+    assert(css.borderTopColor === 'rgb(228, 228, 231)', 'Card border color');
+    assert(css.backgroundColor === 'rgb(255, 255, 255)', 'Card fill');
+    assert(css.color === 'rgb(24, 24, 27)', 'Card foreground');
+    assert(css.borderTopLeftRadius === '8px' && css.boxShadow !== 'none', 'Card radius/shadow');
+    assert(getComputedStyle(card.firstElementChild).color === css.color, 'child inheritance');
+    assert(style('disabled').opacity === '0.5', 'disabled dimming survives base reset');
+    assert(style('disabled').pointerEvents === 'auto', 'disabled pointer blocking');
+    assert(style('enabled').opacity === '1', 'enabled opacity');
+    assert(style('consumer-card').borderTopWidth === '5px', 'unlayered Card override');
+    assert(style('consumer-button').opacity === '0.9', 'unlayered Button override');
+    if (__TAILWIND__) {
+      assert(style('component-card').borderTopWidth === '3px', 'component layer Card override');
+      assert(style('component-button').opacity === '0.75', 'component layer Button override');
+      assert(style('utility-card').borderTopWidth === '4px', 'Tailwind border utility override');
+      assert(style('utility-button').opacity === '1', 'Tailwind opacity utility override');
+    }
+    card.style.setProperty('--card', 'rgb(11, 22, 33)');
+    card.style.setProperty('--border', 'rgb(44, 55, 66)');
+    assert(style('card').backgroundColor === 'rgb(11, 22, 33)', 'theme fill override');
+    assert(style('card').borderTopColor === 'rgb(44, 55, 66)', 'theme border override');
+    document.documentElement.dataset.smoke = 'pass';
+    document.getElementById('result').textContent = 'PASS';
+  } catch (error) {
+    document.documentElement.dataset.smoke = 'fail';
+    document.getElementById('result').textContent = 'FAIL: ' + error.stack;
+  }
+</script>
+</html>

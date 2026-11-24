@@ -145,6 +145,21 @@ trailing `bool disabled = false`; Python `App.button_child` likewise defaults
 `push_button`/`push_button_unchecked` as enabled-only constructors and adds
 `push_button_with_disabled`/`push_button_with_disabled_unchecked`.
 
+C++ migration: ordinary calls keep working through the default argument, but
+`App::buttonChild` now has six parameters rather than five. Code storing its
+exact member-function-pointer type must append `bool`; default arguments do
+not apply when calling through the pointer:
+
+```cpp
+using ButtonChild = mkui::NodeId (mkui::App::*)(
+    mkui::NodeId, const std::string&, mkui::ButtonVariant,
+    const std::string&, MkuiActionId, bool);
+ButtonChild addButton = &mkui::App::buttonChild;
+// Given a mkui::App object named app:
+// (app.*addButton)(app.root(), "Enabled", mkui::ButtonVariant::Primary,
+//                  "", mkui::kNoAction, false);
+```
+
 The generated C header and both exported entry points can be exercised on macOS:
 
 ```sh

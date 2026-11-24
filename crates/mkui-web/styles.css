@@ -1,4 +1,6 @@
-/* Opt-in component defaults. Import before application styles. No reset or
+/* Opt-in component defaults. Order mkui-defaults after reset/base layers and
+   before application override layers (including Tailwind utilities).
+   See README.md for the layer-order declaration. No reset or
    global theme: variables are read from the application, with neutral fallbacks.
    A low-priority layer and zero-specificity selectors allow consumer overrides. */
 @layer mkui-defaults {

@@ -48,8 +48,9 @@
 //! [`mkui_wgpu`]: https://docs.rs/mkui-wgpu
 
 /// Opt-in default Card chrome and disabled Button styling, without a global
-/// reset or theme mutation. Load before application styles; CSS variables
-/// and consumer rules override the defaults. See the crate README.
+/// reset or theme mutation. Order `mkui-defaults` after reset/base layers and
+/// before application override layers; CSS variables and consumer rules override
+/// the defaults. See the crate README for Tailwind layer ordering.
 pub const DEFAULT_COMPONENT_CSS: &str = include_str!("../styles.css");
 
 pub mod app;

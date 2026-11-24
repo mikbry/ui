@@ -5,8 +5,9 @@ native `<button class="btn ...">`. Applications own the theme and may supply
 all CSS themselves. Rendering does not install CSS or change theme variables.
 
 For default Card chrome and disabled Button styling, import the public
-[`styles.css`](styles.css) before your application styles (and before Tailwind
-when using it), or embed the exact same stylesheet from Rust:
+[`styles.css`](styles.css) before your application styles, or embed the exact
+same stylesheet from Rust. When using reset/base layers such as Tailwind
+Preflight, declare the layer order first as shown below.
 
 ```rust
 fn install_component_recipe() -> Result<(), wasm_bindgen::JsValue> {
@@ -35,7 +36,27 @@ unlayered classes appear earlier in the stylesheet. For example:
 ```
 
 Use `Card::new().class("featured-card")` to retain both classes. A consumer using
-its own cascade layers should declare `mkui-defaults` before its override layers.
+its own cascade layers should declare `mkui-defaults` after reset/base layers
+and before its override layers.
+
+With Tailwind 4, establish this order **before any imports or injected styles
+first declare the layers** (adjust the recipe path for your application):
+
+```css
+@layer theme, base, mkui-defaults, components, utilities;
+@import "tailwindcss";
+@import "../../crates/mkui-web/styles.css";
+@import "./app.css";
+```
+
+This places the recipe above [Tailwind Preflight](https://tailwindcss.com/docs/preflight)
+in `base`, which resets borders and button opacity, while keeping application
+`components`, Tailwind `utilities`, and unlayered rules able to override it.
+Importing the recipe before Tailwind without that declaration lets Preflight
+erase the defaults; importing it after Tailwind without the declaration puts
+defaults above utilities. The same ordering applies when embedding
+`DEFAULT_COMPONENT_CSS` from Rust. Tailwind-free consumers need no additional
+layer declaration unless they use their own reset or override layers.
 
 Disabled buttons keep native `disabled` semantics and `pointer-events: auto`:
 they dim and block pointer hits on their painted surface without activating.
@@ -44,4 +65,7 @@ must remain blocked. Scope custom hover effects to `:enabled:hover`.
 
 The standalone [browser smoke fixture](../../examples/web-recipe-smoke/README.md)
 checks actual computed styles, consumer overrides, inheritance, and overlapping
-disabled/active button dispatch through the public web entry point.
+disabled/active button dispatch through the public web entry point. Its separate
+[Tailwind cascade check](../../examples/web-recipe-smoke/README.md#tailwind-cascade-regression)
+compiles the public import recipe and showcase CSS, checks browser computed
+styles and overrides, and rejects the old ordering as a negative control.
