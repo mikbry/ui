@@ -200,8 +200,8 @@ impl App {
     }
 
     /// Append a `Button` under `parent`. `disabled` (#245) dims the button
-    /// on every backend and keeps `on_press` from ever firing, even if one
-    /// was registered — defaulted so existing callers are unaffected.
+    /// on every backend and suppresses UI activation of `on_press`.
+    /// Explicit `fire_action` calls still work. Defaults to enabled.
     #[pyo3(signature = (parent, label, variant, class_name="", on_press=None, disabled=false))]
     #[allow(clippy::too_many_arguments)]
     pub fn button_child(
@@ -227,7 +227,14 @@ impl App {
                 "stale or invalid parent NodeId",
             ));
         }
-        let id = tree.push_button_unchecked(parent.into(), label, variant, style, action, disabled);
+        let id = tree.push_button_with_disabled_unchecked(
+            parent.into(),
+            label,
+            variant,
+            style,
+            action,
+            disabled,
+        );
         Ok(id.into())
     }
 

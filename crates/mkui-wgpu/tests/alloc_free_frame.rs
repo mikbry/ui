@@ -183,7 +183,6 @@ fn set_button_props_with_unchanged_values_allocates_nothing() {
             mkui_runtime::ButtonVariant::Primary,
             "",
             None,
-            false,
         )
         .unwrap();
 

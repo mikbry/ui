@@ -107,7 +107,7 @@ int main() {
 - **`App::root()`**: Return the runtime tree's root `NodeId`.
 - **`App::viewChild(parent, className)`**: Append a view under `parent`.
 - **`App::textChild(parent, content, variant, className)`**: Append text.
-- **`App::buttonChild(parent, label, variant, className, onPress)`**: Append button. Pass `mkui::kNoAction` for no callback.
+- **`App::buttonChild(parent, label, variant, className, onPress)`**: Append an enabled button (original six-argument C ABI). Pass `mkui::kNoAction` for no callback.
 - **`App::registerCallback(callable)`**: Register a `std::function<void()>` and get an `MkuiActionId`.
 - **`App::runConsole()`**: Start the real interactive console backend (Sprint 4 restored — pre-Sprint-4 round-7 shipped a stub).
 - **`App::snapshotJson()`**: Canonical JSON snapshot of the tree (parity test fixture).
@@ -132,10 +132,28 @@ int main() {
 - **`mkui_app_root(app)`**: Return root `NodeId`.
 - **`mkui_app_view_child(app, parent, class_name)`**: Append view under `parent`.
 - **`mkui_app_text_child(app, parent, content, variant, class_name)`**: Append text.
-- **`mkui_app_button_child(app, parent, label, variant, class_name, on_press)`**: Append button.
+- **`mkui_app_button_child(app, parent, label, variant, class_name, on_press)`**: Append an enabled button (original six-argument C ABI).
+- **`mkui_app_button_child_with_disabled(app, parent, label, variant, class_name, on_press, disabled)`**: Append a button with explicit state (`0` enabled, any nonzero value disabled).
 - **`mkui_app_register_callback(app, fn, user_data)`**: Register C callback, returns `MkuiActionId`.
 - **`mkui_app_run_console(app)`**: Run the real interactive console backend.
 - **`mkui_app_snapshot_json(app)`**: Allocates a JSON snapshot string (host frees with `mkui_free_error_message`).
+
+The C++ `App::buttonChild` wrapper uses the disabled-aware entry point with a
+trailing `bool disabled = false`; Python `App.button_child` likewise defaults
+`disabled=False`. Disabled buttons dim and suppress UI activation. Explicit
+`fire_action` calls still invoke registered callbacks. The Rust runtime keeps
+`push_button`/`push_button_unchecked` as enabled-only constructors and adds
+`push_button_with_disabled`/`push_button_with_disabled_unchecked`.
+
+The generated C header and both exported entry points can be exercised on macOS:
+
+```sh
+cargo build -p mkui-c --locked
+cc -std=c11 -Wall -Wextra -Werror -I crates/mkui-c/include \
+  crates/mkui-c/tests/button_abi.c -L target/debug -lmkui_c \
+  -Wl,-rpath,"$PWD/target/debug" -o /tmp/mkui-button-abi
+/tmp/mkui-button-abi
+```
 
 ## Styling
 

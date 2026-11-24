@@ -1,0 +1,14 @@
+[package]
+name = "web-recipe-smoke"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mkui-core = { path = "../../crates/mkui-core" }
+mkui-web = { path = "../../crates/mkui-web" }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }

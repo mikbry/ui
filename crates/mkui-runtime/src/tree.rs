@@ -374,9 +374,33 @@ impl AppTree {
         self.alloc_and_attach(parent, kind, class)
     }
 
-    /// Append a `Button` under `parent`.
-    #[allow(clippy::too_many_arguments)] // `disabled` (#245/#270) joins the existing load-bearing axes; splitting into a param struct would diverge from every other `push_*` builder in this file.
+    /// Append an enabled `Button` under `parent` (original API).
     pub fn push_button(
+        &mut self,
+        parent: NodeId,
+        label: impl Into<String>,
+        variant: ButtonVariant,
+        class: impl Into<String>,
+        on_press: Option<ActionId>,
+    ) -> Result<NodeId, ClassParseError> {
+        self.push_button_with_disabled(parent, label, variant, class, on_press, false)
+    }
+
+    /// Append an enabled `Button` with an already-validated style.
+    pub fn push_button_unchecked(
+        &mut self,
+        parent: NodeId,
+        label: impl Into<String>,
+        variant: ButtonVariant,
+        class: StyleClass,
+        on_press: Option<ActionId>,
+    ) -> NodeId {
+        self.push_button_with_disabled_unchecked(parent, label, variant, class, on_press, false)
+    }
+
+    /// Append a `Button` under `parent` with an explicit disabled state.
+    #[allow(clippy::too_many_arguments)] // `disabled` (#245/#270) joins the existing load-bearing axes; splitting into a param struct would diverge from every other `push_*` builder in this file.
+    pub fn push_button_with_disabled(
         &mut self,
         parent: NodeId,
         label: impl Into<String>,
@@ -387,11 +411,12 @@ impl AppTree {
     ) -> Result<NodeId, ClassParseError> {
         let style = StyleClass::from_str(class);
         let _ = style.parse()?;
-        Ok(self.push_button_unchecked(parent, label, variant, style, on_press, disabled))
+        Ok(self
+            .push_button_with_disabled_unchecked(parent, label, variant, style, on_press, disabled))
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn push_button_unchecked(
+    pub fn push_button_with_disabled_unchecked(
         &mut self,
         parent: NodeId,
         label: impl Into<String>,
@@ -840,7 +865,7 @@ mod tests {
             .unwrap();
         let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
         let button = tree
-            .push_button(root, "ok", ButtonVariant::Primary, "", Some(action), false)
+            .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
             .unwrap();
 
         let NodeKind::Text(t) = &tree.get(text).unwrap().kind else {
@@ -864,16 +889,27 @@ mod tests {
         let mut tree = AppTree::new();
         let root = tree.root();
         let idle = tree
-            .push_button(root, "Save", ButtonVariant::Primary, "", None, false)
+            .push_button(root, "Save", ButtonVariant::Primary, "", None)
             .unwrap();
         let disabled = tree
-            .push_button(root, "Save", ButtonVariant::Primary, "", None, true)
+            .push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
             .unwrap();
 
         let NodeKind::Button(b) = &tree.get(idle).unwrap().kind else {
             panic!("expected Button")
         };
         assert!(!b.disabled);
+        let unchecked = tree.push_button_unchecked(
+            root,
+            "Save",
+            ButtonVariant::Primary,
+            StyleClass::from_str(""),
+            None,
+        );
+        assert_eq!(
+            tree.get(idle).unwrap().kind,
+            tree.get(unchecked).unwrap().kind
+        );
 
         let NodeKind::Button(b) = &tree.get(disabled).unwrap().kind else {
             panic!("expected Button")
@@ -1022,14 +1058,7 @@ mod tests {
     fn set_button_label_with_unchanged_value_is_a_no_op() {
         let mut tree = AppTree::new();
         let button = tree
-            .push_button(
-                tree.root(),
-                "Pause",
-                ButtonVariant::Primary,
-                "",
-                None,
-                false,
-            )
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
             .unwrap();
         tree.clear_dirty();
         assert!(!tree.set_button_label(button, "Pause"));
@@ -1040,14 +1069,7 @@ mod tests {
     fn set_button_label_with_new_value_marks_dirty_and_updates() {
         let mut tree = AppTree::new();
         let button = tree
-            .push_button(
-                tree.root(),
-                "Pause",
-                ButtonVariant::Primary,
-                "",
-                None,
-                false,
-            )
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
             .unwrap();
         tree.clear_dirty();
         assert!(tree.set_button_label(button, "Resume"));
@@ -1311,14 +1333,7 @@ mod tests {
     fn set_button_props_replaces_label_variant_and_action_keeping_the_same_node_id() {
         let mut tree = AppTree::new();
         let button = tree
-            .push_button(
-                tree.root(),
-                "Pause",
-                ButtonVariant::Primary,
-                "",
-                None,
-                false,
-            )
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
             .unwrap();
         let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
         tree.clear_dirty();
@@ -1340,14 +1355,7 @@ mod tests {
     fn set_button_props_with_unchanged_values_is_a_no_op() {
         let mut tree = AppTree::new();
         let button = tree
-            .push_button(
-                tree.root(),
-                "Pause",
-                ButtonVariant::Primary,
-                "",
-                None,
-                false,
-            )
+            .push_button(tree.root(), "Pause", ButtonVariant::Primary, "", None)
             .unwrap();
         tree.clear_dirty();
 
@@ -1439,7 +1447,7 @@ mod tests {
         let root = tree.root();
         let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
         let button = tree
-            .push_button(root, "ok", ButtonVariant::Primary, "", Some(action), false)
+            .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
             .unwrap();
 
         tree.remove_node(button);

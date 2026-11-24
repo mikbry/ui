@@ -44,15 +44,8 @@ fn build_reference_tree_json() -> String {
     // Register the action **before** the button so its id is (0, 0) — the
     // FFI side does the same thing, so the snapshotted ids match.
     let action = tree.actions_mut().register_remote();
-    tree.push_button(
-        header,
-        "OK",
-        ButtonVariant::Primary,
-        "p-6",
-        Some(action),
-        false,
-    )
-    .unwrap();
+    tree.push_button(header, "OK", ButtonVariant::Primary, "p-6", Some(action))
+        .unwrap();
 
     let content = tree.push_view(root, "flex-1").unwrap();
     tree.push_text(content, "Body", TextVariant::Body, "text-foreground")
@@ -96,7 +89,6 @@ unsafe fn build_c_tree_json() -> String {
         MKUI_BUTTON_PRIMARY,
         ok_class.as_ptr(),
         action,
-        0,
     );
 
     let content_class = CString::new("flex-1").unwrap();
@@ -222,7 +214,7 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
     let root = tree.root();
     let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
     let button = tree
-        .push_button(root, "ok", ButtonVariant::Primary, "", Some(action), false)
+        .push_button(root, "ok", ButtonVariant::Primary, "", Some(action))
         .unwrap();
     assert!(tree.remove_node(button).is_some());
     assert!(
@@ -260,7 +252,6 @@ fn removing_a_buttons_node_rejects_its_action_identically_in_rust_and_c() {
             MKUI_BUTTON_PRIMARY,
             class.as_ptr(),
             action,
-            0,
         );
 
         let removal = mkui_app_remove_node(app, button);
@@ -289,7 +280,7 @@ fn disabled_button_produces_byte_identical_snapshots_in_rust_and_c() {
     let rust_json = {
         let mut tree = mkui_runtime::AppTree::new();
         let root = tree.root();
-        tree.push_button(root, "Save", ButtonVariant::Primary, "", None, true)
+        tree.push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
             .unwrap();
         TreeSnapshot::of(&tree).to_json()
     };
@@ -305,7 +296,7 @@ fn disabled_button_produces_byte_identical_snapshots_in_rust_and_c() {
             index: u32::MAX,
             generation: u32::MAX,
         };
-        mkui_app_button_child(
+        mkui_app_button_child_with_disabled(
             app,
             root,
             label.as_ptr(),

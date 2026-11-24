@@ -447,8 +447,12 @@ Native WGPU smoke (opens a winit window, paints a single quad via the HUD
 cargo run -p native-window --release
 ```
 
-The web backend is exercised by `examples/web-showcase` via `wasm-pack`;
-the bridge-crate `cargo test` runs cover the contract + dispatch surface only.
+The web backend is exercised by `examples/web-showcase` via `wasm-pack`.
+For application-owned themes, see the opt-in [public Card and disabled Button
+CSS recipe](crates/mkui-web/README.md). The standalone
+[browser recipe smoke](examples/web-recipe-smoke/README.md) checks computed
+styling and overlapping disabled controls without showcase assets.
+The bridge-crate `cargo test` runs cover the contract + dispatch surface only.
 
 ---
 

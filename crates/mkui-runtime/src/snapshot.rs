@@ -144,15 +144,8 @@ mod tests {
         tree.push_text(container, "hello", TextVariant::Heading1, "text-2xl")
             .unwrap();
         let action = tree.actions_mut().register_local(|ctx| ctx.mark_dirty());
-        tree.push_button(
-            container,
-            "ok",
-            ButtonVariant::Primary,
-            "p-6",
-            Some(action),
-            false,
-        )
-        .unwrap();
+        tree.push_button(container, "ok", ButtonVariant::Primary, "p-6", Some(action))
+            .unwrap();
         tree
     }
 

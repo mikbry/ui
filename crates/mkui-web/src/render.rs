@@ -211,11 +211,8 @@ fn render_node(
             el
         }
         NodeKind::Card(_) => {
-            // #270: a real `<div class="card ...">` through `mkui-web`'s own
-            // native primitive — the `.card` rule lives in the showcase's
-            // CSS (`bg-card`/`text-card-foreground`/`rounded-lg`/`border`
-            // already resolve through the existing `--card`/`--card-foreground`
-            // CSS variables), mirroring the `View` arm's class-merge shape.
+            // Card chrome comes from the opt-in public DEFAULT_COMPONENT_CSS
+            // recipe or application-owned `.card` styles. Preserve user classes.
             let el = document.create_element("div")?;
             let class = if node.class.raw().is_empty() {
                 "card".to_string()
@@ -269,11 +266,9 @@ fn render_button(
     };
     button.set_class_name(&class);
 
-    // #245: the native `disabled` attribute both dims the button (the
-    // showcase's `.btn` rule already has `disabled:pointer-events-none
-    // disabled:opacity-50`) and makes the browser itself refuse pointer
-    // input — so a disabled button's `onclick` is never wired at all,
-    // mirroring `mkui-wgpu`'s "no hit rect while disabled" contract.
+    // Native disabled semantics suppress activation. The public recipe keeps
+    // pointer-events enabled so the painted button blocks controls beneath it;
+    // no onclick handler is installed on disabled buttons.
     button.set_disabled(b.disabled);
 
     if !b.disabled {

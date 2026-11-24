@@ -35,15 +35,8 @@ fn build_parity_tree() -> AppTree {
     tree.push_text(header, "Title", TextVariant::Heading1, "text-2xl font-bold")
         .unwrap();
     let action = tree.actions_mut().register_remote();
-    tree.push_button(
-        header,
-        "OK",
-        ButtonVariant::Primary,
-        "p-6",
-        Some(action),
-        false,
-    )
-    .unwrap();
+    tree.push_button(header, "OK", ButtonVariant::Primary, "p-6", Some(action))
+        .unwrap();
     tree
 }
 
@@ -104,7 +97,7 @@ fn card_and_disabled_button_ergonomic_builder_matches_direct_runtime_constructio
         let mut tree = AppTree::new();
         let root = tree.root();
         let card = tree.push_card(root, "p-6").unwrap();
-        tree.push_button(card, "Save", ButtonVariant::Primary, "", None, true)
+        tree.push_button_with_disabled(card, "Save", ButtonVariant::Primary, "", None, true)
             .unwrap();
         tree
     };

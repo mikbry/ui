@@ -460,9 +460,10 @@ impl Button {
         self
     }
 
-    /// Mark this button disabled (#245): every backend dims its chrome and
-    /// refuses to register a hit/click target for it, even if `on_press`
-    /// was set.
+    /// Mark this button disabled (#245): backends suppress UI activation
+    /// even if `on_press` was set. Wgpu and the public web CSS recipe dim
+    /// its chrome and keep its painted surface blocking controls beneath it.
+    /// Direct action-registry dispatch remains available.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -527,7 +528,9 @@ impl LowerToTree for Button {
                 ctx.mark_dirty();
             })
         });
-        Ok(tree.push_button_unchecked(parent, content, variant, style, action_id, disabled))
+        Ok(tree.push_button_with_disabled_unchecked(
+            parent, content, variant, style, action_id, disabled,
+        ))
     }
 }
 

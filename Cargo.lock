@@ -2596,6 +2596,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "web-recipe-smoke"
+version = "0.10.0"
+dependencies = [
+ "mkui-core",
+ "mkui-web",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "web-showcase"
 version = "0.10.0"
 dependencies = [

@@ -42,15 +42,8 @@ fn build_reference_tree_json() -> String {
     tree.push_text(header, "Title", TextVariant::Heading1, "text-2xl font-bold")
         .unwrap();
     let action = tree.actions_mut().register_remote();
-    tree.push_button(
-        header,
-        "OK",
-        ButtonVariant::Primary,
-        "p-6",
-        Some(action),
-        false,
-    )
-    .unwrap();
+    tree.push_button(header, "OK", ButtonVariant::Primary, "p-6", Some(action))
+        .unwrap();
 
     let content = tree.push_view(root, "flex-1").unwrap();
     tree.push_text(content, "Body", TextVariant::Body, "text-foreground")
@@ -125,7 +118,7 @@ fn disabled_button_produces_byte_identical_snapshots_in_rust_and_py() {
     let rust_json = {
         let mut tree = mkui_runtime::AppTree::new();
         let root = tree.root();
-        tree.push_button(root, "Save", ButtonVariant::Primary, "", None, true)
+        tree.push_button_with_disabled(root, "Save", ButtonVariant::Primary, "", None, true)
             .unwrap();
         TreeSnapshot::of(&tree).to_json()
     };

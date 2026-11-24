@@ -71,7 +71,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use mkui_core::input::Routed;
 use mkui_runtime::NodeId;
 
-use crate::pointer::{left_button_state, ClickHit, PointerState};
+use crate::pointer::{hit_entry, left_button_state, ClickHit, PointerState};
 use crate::types::{rect_contains, Rect};
 use crate::walker::HitTestEntry;
 
@@ -437,19 +437,22 @@ impl InputRouter {
                     // dismisses the topmost modal — or a click on the
                     // dialog's otherwise-inert interior (inside the
                     // panel), which is swallowed without closing anything.
-                    if armed.is_none() && !rect_contains(panel_rect, cursor) {
+                    if armed.is_none()
+                        && hit_entry(&scoped, cursor).is_none()
+                        && !rect_contains(panel_rect, cursor)
+                    {
                         self.pop_modal();
                     }
                     self.gesture_owned = true;
                     return RouteOutcome::from_consumed(true);
                 }
 
-                let armed = self.pointer.on_press(hit_entries, cursor);
+                self.pointer.on_press(hit_entries, cursor);
                 // Always re-derive from this press — a fresh press defines
                 // whether the new gesture is mkui's, regardless of
                 // whatever `gesture_owned` was left at by an earlier,
                 // already-concluded gesture.
-                self.gesture_owned = armed.is_some();
+                self.gesture_owned = hit_entry(hit_entries, cursor).is_some();
                 RouteOutcome::from_consumed(self.gesture_owned)
             }
             ElementState::Released => {
@@ -567,8 +570,7 @@ impl InputRouter {
 
     /// Tab focus-trap cycling (#188): while a modal is open, Tab/Shift+Tab
     /// move [`InputRouter::trapped_focus_node`] forward/backward through
-    /// the topmost dialog's own focusable entries — every `HitTestEntry`
-    /// whose rect center falls inside its panel rect — wrapping at both
+    /// the topmost dialog's own enabled entries (by node identity), wrapping at both
     /// ends so focus can never land on a node outside the dialog. Returns
     /// `None` when no modal is open, so the caller falls through to the
     /// ordinary (non-trapped) key-routing path; Tab is otherwise untouched
@@ -582,7 +584,7 @@ impl InputRouter {
         let owned = self.top_modal_owned();
         let focusable: Vec<NodeId> = hit_entries
             .iter()
-            .filter(|entry| owned.contains(&entry.node))
+            .filter(|entry| !entry.disabled && owned.contains(&entry.node))
             .map(|entry| entry.node)
             .collect();
 
@@ -647,6 +649,7 @@ mod tests {
 
     fn hud_button(idx: u32) -> HitTestEntry {
         HitTestEntry {
+            disabled: false,
             rect: Rect::new(Point::new(0.0, 0.0), Size::new(100.0, 40.0)),
             node: NodeId::from_raw(idx, 0),
             action: None,
@@ -658,6 +661,7 @@ mod tests {
     /// focusable-set tests that need more than one distinguishable control.
     fn button_at(idx: u32, rect: Rect) -> HitTestEntry {
         HitTestEntry {
+            disabled: false,
             rect,
             node: NodeId::from_raw(idx, 0),
             action: None,
@@ -693,6 +697,27 @@ mod tests {
             state,
             button: MouseButton::Left,
         }
+    }
+
+    #[test]
+    fn disabled_overlap_consumes_gesture_without_hover_activation_or_focus() {
+        let bottom = hud_button(1);
+        let mut top = hud_button(2);
+        top.disabled = true;
+        let entries = [bottom, top];
+        let mut router = InputRouter::new();
+        router.route(&cursor_moved(50.0, 20.0), &entries, 1.0);
+        assert_eq!(router.hovered_node(&entries, 1.0), None);
+        let press = router.route(&mouse_input(ElementState::Pressed), &entries, 1.0);
+        assert_eq!(press.routed, Routed::Consumed);
+        assert_eq!(router.armed(), None);
+        let release = router.route(&mouse_input(ElementState::Released), &entries, 1.0);
+        assert_eq!(release.routed, Routed::Consumed);
+        assert!(release.click.is_none());
+
+        router.push_modal(NodeId::from_raw(3, 0), top.rect, vec![top.node]);
+        router.decide_tab_press(&entries);
+        assert_eq!(router.trapped_focus_node(), None);
     }
 
     // ---- hover query (#192 tooltip trigger) ----
