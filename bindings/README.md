@@ -164,8 +164,8 @@ The generated C header and both exported entry points can be exercised on macOS:
 
 ```sh
 cargo build -p mkui-c --locked
-cc -std=c11 -Wall -Wextra -Werror -I crates/mkui-c/include \
-  crates/mkui-c/tests/button_abi.c -L target/debug -lmkui_c \
+cc -std=c11 -Wall -Wextra -Werror -I crates/c/include \
+  crates/c/tests/button_abi.c -L target/debug -lmkui_c \
   -Wl,-rpath,"$PWD/target/debug" -o /tmp/mkui-button-abi
 /tmp/mkui-button-abi
 ```

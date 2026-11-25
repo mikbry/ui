@@ -1,0 +1,14 @@
+[package]
+name = "mkui-console"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mkui-core = { path = "../core" }
+mkui-runtime = { path = "../runtime" }
+crossterm = { workspace = true }
+thiserror = { workspace = true }
+# `"menu_list"` `NodeKind::Custom` props decoding (#189).
+serde_json = { workspace = true }

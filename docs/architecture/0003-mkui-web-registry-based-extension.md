@@ -40,7 +40,7 @@ dispatch table.
   case for built-ins.
 
 The pattern is documented and exercised by an integration smoke test at
-`crates/mkui-web/tests/custom_component_extension.rs`.
+`crates/web/tests/custom_component_extension.rs`.
 
 ## Consequences
 

@@ -1,0 +1,16 @@
+[package]
+name = "mkui-layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Backend-neutral flex layout engine for mkui: consumes AppTree + ResolvedStyle, measures leaves through a caller-supplied callback, and returns computed rects keyed by NodeId."
+
+[dependencies]
+mkui-runtime = { path = "../runtime" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+mkui-text = { path = "../text" }

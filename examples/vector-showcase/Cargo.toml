@@ -6,11 +6,11 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui-wgpu = { path = "../../crates/mkui-wgpu" }
+mkui-wgpu = { path = "../../crates/wgpu" }
 # Path-construction types for the vector column (`VectorPath`/`Stroke`/
 # `PathCommand`). Optional: a feature-off build never names a vector type,
 # matching the `slug`-off fallback's zero-API-break contract.
-mkui-vector2d = { path = "../../crates/mkui-vector2d", optional = true }
+mkui-vector2d = { path = "../../crates/vector2d", optional = true }
 
 [features]
 # Sprint 8 Wave 2 (#143): draws the right-hand column through

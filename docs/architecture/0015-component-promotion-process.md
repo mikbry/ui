@@ -46,7 +46,7 @@ the tree.
    `mkui_layout::LeafMeasure` and has no children in practice. A container
    (`View`, now `Card`) participates in `mkui-layout`'s flex algorithm the
    same way `View` does — add it to every `NodeKind::Root | NodeKind::View(_)`
-   site in `mkui-layout/src/flex.rs` (`is_container`, `natural_width`,
+   site in `crates/layout/src/flex.rs` (`is_container`, `natural_width`,
    `layout_subtree`), not to `LeafMeasure`.
 3. **Keep props minimal.** `NodeKind` derives `Eq`, so a props struct
    cannot hold a raw `f32`. Prefer an empty/near-empty struct (chrome comes
@@ -123,14 +123,14 @@ now renders with smoother corners on wgpu than the pre-#270 `bg-card` View
 did. What's unconditionally new is that `mkui-web` and `mkui-console`,
 which never implemented `bg-card` at all, now render a real card too.
 
-Web consumers opt into `mkui-web/styles.css` or the identical public
+Web consumers opt into `crates/web/styles.css` or the identical public
 `mkui_web::DEFAULT_COMPONENT_CSS` constant. The recipe supplies default Card
 fill, foreground, border, radius, and shadow without installing a global theme.
 It reads application-owned CSS variables and uses a low-priority cascade layer
 and zero-specificity selectors so consumer classes can override it. The showcase
 imports this same recipe; `examples/web-recipe-smoke` independently checks its
 computed styles and overrides through the public web entry point. See the
-[web recipe documentation](../../crates/mkui-web/README.md).
+[web recipe documentation](../../crates/web/README.md).
 
 On wgpu, a Card's supported explicit foreground utility (for example,
 `text-muted-foreground`) wins over the default `surface_foreground` token.

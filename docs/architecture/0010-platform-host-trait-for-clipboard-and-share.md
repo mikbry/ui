@@ -79,7 +79,7 @@ OS API call from inside mkui.
 - Unit tests exercise the full round-trip (a `Button::on_press` closure
   firing through `ActionRegistry` into a recording `PlatformHost` test
   double) entirely inside `mkui-core`, with no OS, filesystem, or network
-  calls — see `crates/mkui-core/src/platform.rs`.
+  calls — see `crates/core/src/platform.rs`.
 
 ## Alternatives considered
 

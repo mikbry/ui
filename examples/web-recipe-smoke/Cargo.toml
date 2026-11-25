@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-mkui-core = { path = "../../crates/mkui-core" }
-mkui-web = { path = "../../crates/mkui-web" }
+mkui-core = { path = "../../crates/core" }
+mkui-web = { path = "../../crates/web" }
 wasm-bindgen = { workspace = true }
 web-sys = { workspace = true }

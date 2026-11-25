@@ -622,7 +622,7 @@ jobs:
         run: cargo build -p mkui-core --target wasm32-unknown-unknown --locked
       # `--no-run`: wasm32 tests need a JS/Node/browser host to execute, which
       # this job doesn't set up. Compiling them still catches a regression in
-      # the wasm-only `JsValue` conversion tests in `mkui-core/src/error.rs`.
+      # the wasm-only `JsValue` conversion tests in `crates/core/src/error.rs`.
       - name: Compile mkui-core tests (wasm32-unknown-unknown)
         run: cargo test -p mkui-core --target wasm32-unknown-unknown --no-run --locked
       - name: Build mkui-web (wasm32-unknown-unknown)
@@ -765,7 +765,7 @@ jobs:
     # the `parity-test` feature:
     #   * `tests/parity.rs`  — byte-identical Rust/C/Py snapshot parity
     #     (Codex round-8 P1 #1). The Rust and C halves run in the main
-    #     `test` job (mkui-c parity test in `crates/mkui-c/tests/parity.rs`);
+    #     `test` job (mkui-c parity test in `crates/c/tests/parity.rs`);
     #     this asserts the `mkui_py::App` JSON snapshot equals the same tree
     #     built directly through `mkui_runtime::AppTree`.
     #   * `tests/smoke_py.rs` — a live `import mkui_py` smoke (#5): registers
@@ -777,7 +777,7 @@ jobs:
     # `#[cfg(not(target_os = "macos"))]` where relevant.
     #
     # Path-gated (#151, Win 4). The interpreter-linked binding suite only
-    # exercises `crates/mkui-py` (+ its parity oracle); a docs-only change can't
+    # exercises `crates/py` (+ its parity oracle); a docs-only change can't
     # move it, so it skips when no code paths are touched. NOTE: the issue's Win
     # 4 targets a macOS-3-core variant of this job as the dominant cost driver —
     # this repo's `ci.yml` runs the bindings on `ubuntu-latest` only (no macOS
@@ -820,7 +820,7 @@ jobs:
 
   cbindgen-header-clean:
     # Codex round-8 P2 follow-up: prove the checked-in
-    # `crates/mkui-c/include/mkui_c.h` matches what cbindgen would
+    # `crates/c/include/mkui_c.h` matches what cbindgen would
     # generate from source. If `build.rs` rewrites the header and
     # `git diff` is non-empty, the FFI surface drifted and the diff
     # surfaces it loudly instead of being noticed by a downstream
@@ -846,8 +846,8 @@ jobs:
         run: cargo build -p mkui-c --locked
       - name: Assert mkui_c.h is up to date with cbindgen output
         run: |
-          if ! git diff --exit-code crates/mkui-c/include/mkui_c.h; then
-            echo "::error::crates/mkui-c/include/mkui_c.h is out of date — run \`cargo build -p mkui-c\` locally and commit the regenerated header"
+          if ! git diff --exit-code crates/c/include/mkui_c.h; then
+            echo "::error::crates/c/include/mkui_c.h is out of date — run \`cargo build -p mkui-c\` locally and commit the regenerated header"
             exit 1
           fi
 

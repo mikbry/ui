@@ -41,7 +41,7 @@ cargo build --release -p mkui-c
 # Then build the C example
 cd examples/c-example
 gcc -std=c11 -Wall -Wextra -O2 \
-    -I../../crates/mkui-c/target/include \
+    -I../../crates/c/include \
     main.c \
     -L../../target/release \
     -lmkui_c -ldl -lpthread -lm \

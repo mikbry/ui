@@ -14,7 +14,7 @@ runtime API.
 
 1. **Build the Python bindings**:
    ```bash
-   cd ../../crates/mkui-py
+   cd ../../crates/py
    uv venv
    source .venv/bin/activate
    maturin develop --release

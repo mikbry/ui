@@ -87,18 +87,18 @@ took when it carved `mkui-runtime` out from under `mkui-core`).
   render-and-measure pass, not on an already-computed rect. Swapping in a
   separate layout pass means redesigning that cache, which deserves its
   own reviewed PR rather than riding along inside this one.
-  `crates/mkui-wgpu/tests/mkui_layout_interop.rs` proves the two are
+  `crates/wgpu/tests/mkui_layout_interop.rs` proves the two are
   *compatible* (a `mkui-layout` consumer can emit `mkui_wgpu::types::Rect`
   from `mkui-layout`'s output) without making that swap yet.
 - **`mkui-console` and `mkui-web` can adopt the same engine** once a
   `LeafMeasure` exists for their own text systems — this crate has no
-  wgpu-specific assumption baked in anywhere (verified: `grep -rn "wgpu::\|web_sys::\|crossterm::" crates/mkui-layout/src` is empty).
+  wgpu-specific assumption baked in anywhere (verified: `grep -rn "wgpu::\|web_sys::\|crossterm::" crates/layout/src` is empty).
 - **`ResolvedStyle`'s JSON shape gained one field** (`justify_center`).
   `grep -rn "justify_between" crates examples bindings` (run 2026-11-18)
   found no mirror of the struct outside `mkui-runtime::style` itself and no
   checked-in golden snapshot JSON, so this is a size-only change to the
   `snapshot` feature's output — no other file needed updating.
-- **Falsifiable claim, dated 2026-11-18:** `grep -n "mkui_layout" crates/mkui-wgpu/src/walker.rs`
+- **Falsifiable claim, dated 2026-11-18:** `grep -n "mkui_layout" crates/wgpu/src/walker.rs`
   returns nothing below its module doc comment. Re-run that grep to check
   whether issue #287 has landed.
 

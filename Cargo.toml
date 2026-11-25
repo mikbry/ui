@@ -1,18 +1,18 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/mkui-runtime",     # Portable AppTree substrate (Sprint 4)
-    "crates/mkui-core",        # Core types, traits, and headless logic
-    "crates/mkui-text",        # Text-system trait + from-scratch bitmap prototype
-    "crates/mkui-layout",      # Backend-neutral flex layout engine over AppTree (#63)
-    "crates/mkui-vector2d",    # Backend-neutral 2D paths/curves + Slug glyph encoder (Sprint 7)
-    "crates/mkui-vector2d-wgpu", # Native WGPU adapter for Slug glyph blobs (Sprint 7, #66)
-    "crates/mkui-wgpu",        # WGPU-facing scene primitives and declarative builders
-    "crates/mkui-hud",         # Second-class, host-reusable HUD plumbing (ADR 0013, #290)
-    "crates/mkui-web",         # Web/WASM renderer
-    "crates/mkui-console",     # Terminal/TUI renderer
-    "crates/mkui-c",           # C/C++ bindings
-    "crates/mkui-py",          # Python bindings
+    "crates/runtime",          # Portable AppTree substrate (Sprint 4)
+    "crates/core",             # Core types, traits, and headless logic
+    "crates/text",             # Text-system trait + from-scratch bitmap prototype
+    "crates/layout",           # Backend-neutral flex layout engine over AppTree (#63)
+    "crates/vector2d",         # Backend-neutral 2D paths/curves + Slug glyph encoder (Sprint 7)
+    "crates/vector2d-wgpu",      # Native WGPU adapter for Slug glyph blobs (Sprint 7, #66)
+    "crates/wgpu",             # WGPU-facing scene primitives and declarative builders
+    "crates/hud",              # Second-class, host-reusable HUD plumbing (ADR 0013, #290)
+    "crates/web",              # Web/WASM renderer
+    "crates/console",          # Terminal/TUI renderer
+    "crates/c",                # C/C++ bindings
+    "crates/py",               # Python bindings
     "crates/mkui",             # Bridge crate
     "examples/showcase-common", # Common showcase components
     "examples/headless-showcase", # Headless components demo
@@ -42,17 +42,17 @@ members = [
 # wider package-aware feature matrix; this list only keeps the default build
 # green under the one-backend invariant.
 default-members = [
-    "crates/mkui-runtime",
-    "crates/mkui-core",
-    "crates/mkui-text",
-    "crates/mkui-layout",
-    "crates/mkui-vector2d",
-    "crates/mkui-wgpu",
-    "crates/mkui-hud",
-    "crates/mkui-web",
-    "crates/mkui-console",
-    "crates/mkui-c",
-    "crates/mkui-py",
+    "crates/runtime",
+    "crates/core",
+    "crates/text",
+    "crates/layout",
+    "crates/vector2d",
+    "crates/wgpu",
+    "crates/hud",
+    "crates/web",
+    "crates/console",
+    "crates/c",
+    "crates/py",
     "crates/mkui",
     "examples/showcase-common",
     "examples/headless-showcase",

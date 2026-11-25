@@ -1,0 +1,34 @@
+[package]
+name = "mkui-c"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "C/C++ bindings for mkui UI library"
+
+[lib]
+name = "mkui_c"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+mkui = { path = "../mkui" }
+mkui-core = { path = "../core" }
+mkui-runtime = { path = "../runtime", features = ["snapshot"] }
+mkui-console = { path = "../console", optional = true }
+
+# For C string handling
+libc = { workspace = true }
+
+[features]
+default = ["console"]
+web = ["mkui/web"]
+console = ["mkui/console", "dep:mkui-console"]
+
+[dev-dependencies]
+# Parity tests need the runtime snapshot feature directly even though the
+# main crate dep already enables it — `cargo test` re-resolves features per
+# graph node.
+mkui-runtime = { path = "../runtime", features = ["snapshot"] }
+
+[build-dependencies]
+cbindgen = { workspace = true }
