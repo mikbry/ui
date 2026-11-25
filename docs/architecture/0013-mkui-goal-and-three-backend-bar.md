@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (2026-11-16).
+Accepted (2026-11-16). Web rendering decision amended on 2026-11-25.
 
 ## Context
 
@@ -61,6 +61,27 @@ For any proposed feature, in order:
 second host could reuse it unchanged — never in `mkui-core` or a backend
 crate.
 
+### Web rendering
+
+`mkui-web` uses DOM rendering by default in production. Browser applications
+can use semantic elements, CSS theming, native focus and text input, and the
+browser accessibility tree. DOM rendering counts as the web implementation
+for the three-backend bar.
+
+[#277](https://github.com/mikbry/ui/issues/277) adds an explicitly selected
+WebGPU canvas path for embedded HUDs, editors, and graphics-heavy surfaces.
+It shares the component contract and reuses the `mkui-wgpu` rendering
+pipeline. The default DOM path works in browsers without WebGPU. An
+application that opts into the canvas path handles unavailable WebGPU using
+the adapter's error or fallback contract. Validate the canvas path with
+browser tests and the physical-device acceptance criteria in
+[#180](https://github.com/mikbry/ui/issues/180).
+
+[#278](https://github.com/mikbry/ui/issues/278) adds a standalone shadcn/ui
+parity example using the production DOM renderer. It compares the same
+fixture in mkui and a pinned shadcn/ui reference, starting with Card and Button.
+The example can ship independently of the WebGPU path.
+
 ## Consequences
 
 - New issues against `mkui-core`/`mkui-wgpu`/`mkui-web`/`mkui-console` are
@@ -68,10 +89,9 @@ crate.
 - `mkui-hud` is a new, explicitly second-class crate: useful to
   embedding-game hosts, never a dependency of `mkui-core` or any backend,
   and not held to the three-backend bar.
-- `mkui-web`'s target architecture changes from DOM rendering to a WebGPU
-  canvas sharing `mkui-wgpu`'s renderer — a larger change than it looks,
-  since the current DOM backend (static, mount-once) is not a smaller
-  version of the canvas target, it's a different one.
+- Improvements to production DOM rendering, including live updates in
+  [#296](https://github.com/mikbry/ui/issues/296), can land independently
+  of WebGPU development.
 - Existing issues scoped around one host's specific needs are re-triaged:
   some stay (they serve any application), some move to `mkui-hud`, some
   close outright (they turned out to need no bespoke mkui component at
@@ -162,8 +182,6 @@ build against without implementing their scope (none move today):
   a positioning helper) discoverable and reusable without re-litigating,
   per issue, whether it's "host enough" to live elsewhere entirely.
 - **Define "done" as any two back ends rendering a component.** Rejected
-  — `mkui-web`'s planned architecture (a WebGPU canvas sharing
-  `mkui-wgpu`'s renderer) means two GPU-rendered call sites could satisfy
-  "two back ends" without ever exercising `mkui-console`'s very different
-  rendering model. All three is the bar that actually proves
-  cross-backend portability.
+  because each of wgpu, the browser DOM, and the terminal exercises different
+  layout and interaction capabilities. All three are needed to verify the
+  shared component contract.
