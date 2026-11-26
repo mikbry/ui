@@ -1096,8 +1096,22 @@ impl WgpuApp {
             return false;
         };
         let wheel_delta = match delta {
+            // Dimensionless notches, not a physical quantity — no DPI
+            // conversion needed; `WHEEL_LINE_HEIGHT_PX` below is already a
+            // fixed logical-pixel constant.
             MouseScrollDelta::LineDelta(_, y) => crate::scroll::WheelDelta::Lines(-y),
-            MouseScrollDelta::PixelDelta(pos) => crate::scroll::WheelDelta::Pixels(-pos.y as f32),
+            // #341: winit reports `PixelDelta` (precision trackpad) in
+            // *physical* pixels, but every other quantity here — cursor
+            // position, layout rects, `ScrollState`'s own offset — is in
+            // logical pixels (the same space `cursor_scale_factor()`
+            // converts into for hit-testing just above). Dividing by that
+            // same effective factor keeps a wheel-driven scroll the same
+            // visual distance regardless of display/UI scaling; without
+            // it, a 20px trackpad delta at 2x scaling moved content 40
+            // logical pixels instead of 20.
+            MouseScrollDelta::PixelDelta(pos) => {
+                crate::scroll::WheelDelta::Pixels(-(pos.y / self.cursor_scale_factor()) as f32)
+            }
         };
         let current = self.scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0);
         let mut state = crate::scroll::ScrollState::new(f32::MAX / 4.0, 0.0);
@@ -2268,6 +2282,67 @@ mod tests {
              move anything visible yet: at max {} after one notch back {}",
             hit_at_max.rect.origin.y,
             hit_after_scrolling_back.rect.origin.y
+        );
+    }
+
+    /// #341 regression: `winit` reports `MouseScrollDelta::PixelDelta`
+    /// (precision trackpad input) in *physical* pixels, but everything
+    /// else here — the latched cursor, layout rects, `ScrollState`'s own
+    /// offset — is logical. At `ui_scale` 2.0, a 20-physical-pixel delta
+    /// must move content by 10 logical pixels, not 20.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pixel_delta_wheel_input_converts_physical_pixels_to_logical_before_scrolling() {
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui, ScrollArea, Text as CoreText, View};
+
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.set_surface_size(1600, 1200, 1.0);
+        app.set_ui_scale(2.0);
+        assert!(app.update_frame());
+
+        let (scroll_id, scroll_rect) = *app
+            .scroll_areas
+            .first()
+            .expect("the ScrollArea must produce a scroll_areas entry");
+        let effective = app.cursor_scale_factor();
+        assert!(
+            (effective - 2.0).abs() < 0.001,
+            "this test only means anything at a non-1.0 effective scale \
+             factor, got {effective}"
+        );
+        let cursor_over_scroll_area = Point::new(
+            scroll_rect.origin.x + scroll_rect.size.width / 2.0,
+            scroll_rect.origin.y + scroll_rect.size.height / 2.0,
+        );
+        app.pointer.update_cursor_raw(
+            cursor_over_scroll_area.x as f64 * effective,
+            cursor_over_scroll_area.y as f64 * effective,
+        );
+
+        // 20 *physical* pixels "down" in this method's own sign
+        // convention — negative `y`, matching the `LineDelta` arm's `-y`
+        // (see the other wheel tests, which use e.g. `LineDelta(0.0,
+        // -3.0)` to increase the stored offset).
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::PixelDelta(
+            winit::dpi::PhysicalPosition::new(0.0, -20.0)
+        )));
+        let stored = app.scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0);
+        assert!(
+            (stored - 10.0).abs() < 0.01,
+            "a 20-physical-pixel PixelDelta at a 2.0 effective scale factor \
+             must store a 10-logical-pixel offset, not 20: got {stored}"
         );
     }
 

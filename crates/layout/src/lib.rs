@@ -621,6 +621,43 @@ mod tests {
     }
 
     #[test]
+    fn explicit_height_scroll_area_keeps_its_shrunk_size_not_its_h_class() {
+        // #341 regression: a `ScrollArea` with an explicit `h-16` (64px)
+        // class, shrunk to 36px by `distribute_main_axis` because a 64px
+        // sibling leaves only 36px of a 100px viewport, must report its
+        // own box at 36px — not silently revert to the explicit 64px on
+        // `layout_column_children`'s re-resolve pass, which would push
+        // its bottom edge 28px past the viewport.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let sibling_rect = result.get(sibling).unwrap();
+        let scroll_rect = result.get(scroll).unwrap();
+
+        assert!(
+            (sibling_rect.size.height - 64.0).abs() < 0.01,
+            "the plain View sibling's own explicit height must be unaffected: got {}",
+            sibling_rect.size.height
+        );
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the ScrollArea must keep the shrunk 36px the column assigned it, \
+             not revert to its own explicit h-16 (64px): got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            scroll_rect.bottom() <= 100.0 + 0.01,
+            "the ScrollArea's box must stay within the 100px viewport: bottom at {}",
+            scroll_rect.bottom()
+        );
+    }
+
+    #[test]
     fn scroll_area_shrink_floor_is_zero_unlike_a_plain_view_sibling() {
         // #328: the one case where `ChildPlan::shrink_to_zero` actually
         // changes the outcome. A `View` sibling (natural height ~60px: 3

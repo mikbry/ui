@@ -760,9 +760,29 @@ fn layout_column_children(
 
         // Re-resolve any child whose height actually changed, so nested
         // content (e.g. a `flex-1` descendant) sees its real final height.
+        //
+        // `heights[i]` is this column's own authoritative decision for
+        // the child's final main-size (grown or shrunk by
+        // `distribute_main_axis` above) — it must win outright over
+        // whatever `layout_subtree`'s own internal precedence (an
+        // explicit `h-*` on the child always wins there, since from a
+        // single call's perspective it has no way to distinguish "an
+        // ambient budget the parent merely offers" from "the parent's
+        // flex algorithm already decided this exact size") would
+        // otherwise report. Without forcing `.size.height` here too, a
+        // `ScrollArea.h-16` shrunk to 36px by the column above (because a
+        // sibling needed the rest of the viewport) would re-resolve back
+        // to its explicit 64px — the box renders past wherever the
+        // shrink accounting assumed it would end (#341). This is a no-op
+        // for every other case: a plain `View`/`Card` never reaches this
+        // branch at all (its floor is already its own natural height, so
+        // `heights[i]` never actually changes for it), and ordinary
+        // growth with no explicit height already has `layout_subtree`
+        // agree with `heights[i]` on its own.
         for (i, (plan, &w)) in plans.iter().zip(&child_widths).enumerate() {
             if (heights[i] - computed[i].size.height).abs() > f32::EPSILON {
                 computed[i] = layout_subtree(tree, measure, plan.id, w, Some(heights[i]));
+                computed[i].size.height = heights[i];
             }
         }
     }

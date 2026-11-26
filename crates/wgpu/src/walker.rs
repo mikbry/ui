@@ -665,11 +665,19 @@ fn apply_scroll_offsets(
         let Some(own_rect) = node_rect(layout, scroll_id) else {
             continue;
         };
-        let content_len = node
-            .children
+        // #341: the real content extent can be deeper than the immediate
+        // children — e.g. a `View.h-16` direct child whose own box is
+        // clamped to 64px but whose *own* children (text lines) overflow
+        // past that, per this crate's own overflow-not-overlap contract
+        // (#328's flex-shrink fix). Measuring only `node.children` would
+        // report that 64px as the whole content length and conclude
+        // there's nothing to scroll to, even though real content extends
+        // further. Walk the whole subtree instead.
+        let descendant_ids = subtree_node_ids(tree, scroll_id);
+        let content_len = descendant_ids
             .iter()
-            .filter_map(|id| node_rect(layout, *id))
-            .map(|child_rect| child_rect.height_end() - own_rect.origin.y)
+            .filter_map(|&id| node_rect(layout, id))
+            .map(|descendant_rect| descendant_rect.height_end() - own_rect.origin.y)
             .fold(own_rect.size.height, f32::max);
         let max_offset = (content_len - own_rect.size.height).max(0.0);
         let clamped = raw_offset.clamp(0.0, max_offset);
@@ -677,7 +685,7 @@ fn apply_scroll_offsets(
         if clamped == 0.0 {
             continue;
         }
-        for descendant_id in subtree_node_ids(tree, scroll_id) {
+        for descendant_id in descendant_ids {
             layout.translate(descendant_id, mkui_layout::Point::new(0.0, -clamped));
         }
     }
@@ -1202,17 +1210,21 @@ fn render_scroll_area(
     // whatever was painted at the previous offset.
     stats.saw_custom = true;
 
-    // `rect.origin.y` is this box's own (untranslated) top; a child's
+    // `rect.origin.y` is this box's own (untranslated) top; a descendant's
     // rect was already shifted up by the clamped offset in
     // `apply_scroll_offsets`, so adding that offset back here recovers
-    // each child's *unscrolled* bottom — content length must reflect the
-    // full content regardless of how far it's currently scrolled.
+    // each descendant's *unscrolled* bottom — content length must reflect
+    // the full content regardless of how far it's currently scrolled.
+    // Walking the whole subtree (not just direct children, #341) is what
+    // lets a nested, already-overflowing box (e.g. a `View.h-16` child
+    // whose own text overflows past its own 64px per #328's overflow-not-
+    // overlap contract) actually register as scrollable content instead
+    // of being measured only at its own clamped 64px.
     let offset = ctx.scroll_offsets.get(&node.id).copied().unwrap_or(0.0);
-    let content_len = node
-        .children
-        .iter()
-        .filter_map(|id| node_rect(layout, *id))
-        .map(|child_rect| child_rect.height_end() - rect.origin.y + offset)
+    let content_len = subtree_node_ids(tree, node.id)
+        .into_iter()
+        .filter_map(|id| node_rect(layout, id))
+        .map(|descendant_rect| descendant_rect.height_end() - rect.origin.y + offset)
         .fold(rect.size.height, f32::max);
     let mut state = ScrollState::new(content_len, rect.size.height);
     state.scroll_to(offset);
@@ -2211,6 +2223,87 @@ mod tests {
             scroll_offsets,
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
+    }
+
+    /// #341 regression: a `ScrollArea.h-16` (64px) whose one child is a
+    /// `View.h-16` (also 64px, clamped) must still register as scrollable
+    /// when that `View`'s *own* children overflow past its 64px box
+    /// (#328's overflow-not-overlap contract) — measuring only the
+    /// `ScrollArea`'s immediate child's clamped box reports a content
+    /// length of 64px, the same as the viewport, so nothing is ever
+    /// scrollable even though the real content extends much further.
+    #[test]
+    fn scroll_offset_sees_overflow_nested_past_an_immediate_childs_clamped_box() {
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .class("h-16")
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(CoreText::new("line five")),
+            ),
+        );
+        let scroll_id = core.tree().get(core.tree().root()).unwrap().children[0];
+        let inner_view_id = core.tree().get(scroll_id).unwrap().children[0];
+
+        // Sanity: the inner View really is clamped to 64px while its own
+        // text content is naturally much taller — otherwise this test
+        // isn't exercising the nested-overflow case at all.
+        let unscrolled = walk(&core);
+        let inner_view_rect = unscrolled
+            .layouts
+            .iter()
+            .find(|l| l.node == inner_view_id)
+            .unwrap()
+            .rect;
+        assert!(
+            (inner_view_rect.size.height - 64.0).abs() < 0.01,
+            "the inner View must itself be clamped to 64px, got {}",
+            inner_view_rect.size.height
+        );
+        let last_text_bottom = unscrolled
+            .layouts
+            .iter()
+            .filter(|l| l.node != scroll_id && l.node != inner_view_id)
+            .map(|l| l.rect.height_end())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            last_text_bottom > inner_view_rect.height_end() + 0.01,
+            "the inner View's own text must overflow past its 64px box, \
+             got last text bottom {} vs View bottom {}",
+            last_text_bottom,
+            inner_view_rect.height_end()
+        );
+
+        // A small, well-within-range scroll request must actually move
+        // content — if the bug were present, `content_len` would read as
+        // 64px (the immediate child's own clamped box), `max_offset`
+        // would clamp to `(64 - 64).max(0.0) == 0`, and this would stay
+        // at 0 regardless of the requested offset.
+        let scroll_offsets = HashMap::from([(scroll_id, 10.0)]);
+        let scrolled = walk_with_scroll_offsets(&core, &scroll_offsets);
+        let scrolled_text_top = scrolled
+            .layouts
+            .iter()
+            .filter(|l| l.node != scroll_id && l.node != inner_view_id)
+            .map(|l| l.rect.origin.y)
+            .fold(f32::MAX, f32::min);
+        let unscrolled_text_top = unscrolled
+            .layouts
+            .iter()
+            .filter(|l| l.node != scroll_id && l.node != inner_view_id)
+            .map(|l| l.rect.origin.y)
+            .fold(f32::MAX, f32::min);
+        assert!(
+            (unscrolled_text_top - scrolled_text_top - 10.0).abs() < 0.01,
+            "a 10px scroll request within the real (nested) overflow must \
+             move content by 10px, not clamp to zero: unscrolled top {} \
+             scrolled top {}",
+            unscrolled_text_top,
+            scrolled_text_top
+        );
     }
 
     /// #328: a live scroll offset must move both a descendant's own rect
