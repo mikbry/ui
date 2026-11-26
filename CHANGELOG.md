@@ -251,6 +251,39 @@ breaking changes can land on minor bumps).
   features` retains the original v0.10.0 behavior unchanged — that path
   stays the permanent debug-fallback / visual-regression oracle per ADR
   0002, not dropped. See ADR 0007 for the full rationale.
+- **Slug promoted *explicitly* through the declarative bridge: `mkui` →
+  `examples/showcase-common` → `examples/native-showcase` (#311).** Before
+  this change, `cargo run -p native-showcase --release` already happened
+  to render through the Slug lane — but only as a side effect of nothing
+  in the chain pinning `default-features = false` on `mkui-wgpu`, so the
+  2026-11-17 crate-level default leaked through by accident. There was no
+  way to turn it back off: `native-showcase` had no `[features]` table of
+  its own at all, so `--no-default-features --features wgpu` was not even
+  a valid invocation (`cargo` rejected it — "the package 'native-showcase'
+  does not contain this feature: wgpu"). This replaces that accident with
+  a real, designed default: `mkui`, `examples/showcase-common`, and
+  `examples/native-showcase` each gain their own `slug` feature,
+  default-on (mirroring `mkui-wgpu`'s own default one layer down) via a
+  *weak* dependency forward at the `mkui` layer (`slug =
+  ["mkui-wgpu?/slug"]`, so `slug` being part of `mkui`'s own `default`
+  stays a no-op for `web`/`console` consumers that never enable `wgpu`),
+  and each crate pins `default-features = false` on its downstream
+  dependency so the opt-out is real at *every* layer, not just wherever
+  `mkui-wgpu` happens to sit. `cargo run -p native-showcase
+  --no-default-features --features wgpu --release` now genuinely renders
+  bitmap, CI-verified by resolving the actual `--cfg feature="slug"` flag
+  `rustc` receives (not just a successful compile) in a dedicated
+  `mkui-examples` job step, plus a new `mkui-bridge-wgpu-slug` test leg at
+  the bridge-crate layer — the pre-existing `mkui-bridge-wgpu` leg's own
+  behavior flips from implicit slug-on to real slug-off as part of this
+  change, since it passes `--no-default-features`.
+  `console-showcase`/`web-showcase` are unaffected (no Slug lane on either
+  backend, and `mkui-wgpu` never enters their build graph); `atoms-on-wgpu`'s
+  and `examples/text`'s own independent `slug` features are unchanged
+  (`atoms-on-wgpu`'s own `--no-default-features` opt-out has the same
+  accidental-leak bug this PR fixes at the bridge layer — tracked
+  separately as #323, out of scope here). ADR 0007 amended with the dated
+  rationale.
 
 ### Added
 - **New crate `mkui-hud` — second-class, host-reusable HUD plumbing
