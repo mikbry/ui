@@ -147,12 +147,19 @@ pub struct WgpuApp {
     #[cfg(not(target_arch = "wasm32"))]
     shift_held: bool,
     /// Live Ctrl-key state (#312), same provenance as `shift_held` — drives
-    /// Ctrl+A select-all on a focused `TextField`. Deliberately not Cmd on
-    /// macOS; a platform-conventional modifier mapping is a documented
-    /// follow-up, not part of this promotion (clipboard/IME stay
-    /// backend-platform concerns per the issue's own scope note).
+    /// Ctrl+A select-all on a focused `TextField`.
     #[cfg(not(target_arch = "wasm32"))]
     ctrl_held: bool,
+    /// Live Cmd/Super-key state (#329) — macOS's Command key, read from the
+    /// same `ModifiersChanged` event as `ctrl_held`. Not wired to any
+    /// shortcut of its own yet (that's still a documented follow-up,
+    /// clipboard/IME stay backend-platform concerns per #312's scope
+    /// note); tracked solely so `apply_focused_text_field_key` can treat a
+    /// Cmd-held key the same as a Ctrl-held one for insertion-suppression
+    /// purposes — macOS users hold Cmd, not Ctrl, for the shortcuts this
+    /// guards against.
+    #[cfg(not(target_arch = "wasm32"))]
+    cmd_held: bool,
 }
 
 /// Lower bound [`WgpuApp::set_ui_scale`] clamps to — small enough to still
@@ -272,6 +279,8 @@ impl WgpuApp {
             shift_held: false,
             #[cfg(not(target_arch = "wasm32"))]
             ctrl_held: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            cmd_held: false,
         }
     }
 
@@ -1030,6 +1039,13 @@ impl WgpuApp {
             PhysicalKey::Code(KeyCode::Backspace) => state.backspace(),
             PhysicalKey::Code(KeyCode::Delete) => state.delete(),
             PhysicalKey::Code(KeyCode::KeyA) if self.ctrl_held => state.select_all(),
+            // #329: a Ctrl/Cmd-held key with no assigned shortcut above
+            // must be a no-op, not fall through to insertion. Without
+            // this guard, e.g. Ctrl+C still carries composed text "c"
+            // (winit doesn't suppress it just because Ctrl is held), so
+            // an unimplemented shortcut silently overwrote the field
+            // instead of doing nothing.
+            _ if self.ctrl_held || self.cmd_held => return false,
             _ => match text {
                 // A "control character" composed text (Tab, Enter, Esc,
                 // Backspace itself on some layouts) isn't an insertion —
@@ -1234,9 +1250,12 @@ impl ApplicationHandler for WgpuApp {
                 // #312: tracked only so a focused `TextField`'s
                 // Shift+Left/Right (extend selection) and Ctrl+A
                 // (select-all) have modifier state to read — nothing on
-                // this declarative-tree path needed it before.
+                // this declarative-tree path needed it before. #329 adds
+                // `cmd_held` (macOS's Command/Super key) so insertion
+                // suppression also covers Cmd-modified keys.
                 self.shift_held = modifiers.state().shift_key();
                 self.ctrl_held = modifiers.state().control_key();
+                self.cmd_held = modifiers.state().super_key();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
@@ -2511,6 +2530,54 @@ mod tests {
         };
         assert_eq!(f.caret, 2);
         assert_eq!(f.anchor, Some(3));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn ctrl_a_then_ctrl_c_selects_all_then_leaves_the_value_untouched() {
+        // #329 regression: Ctrl+A (select-all) followed by Ctrl+C
+        // (intended as copy, not yet wired to the OS clipboard) must not
+        // fall through to inserting "c" and overwriting the selection —
+        // Ctrl+C has no assigned shortcut today, so it must be a no-op.
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("ab"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+        app.ctrl_held = true;
+
+        assert!(app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyA), Some("a")));
+        assert!(!app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyC), Some("c")));
+
+        let core = app.core.as_ref().unwrap().borrow();
+        let NodeKind::TextField(f) = &core.tree().get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(f.value, "ab");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_unassigned_cmd_held_key_does_not_insert_either() {
+        // Same guard, Cmd side (#329's "including Command on macOS"):
+        // `cmd_held` has no shortcut of its own yet, but it must still
+        // suppress insertion rather than let the composed text through.
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("ab"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+        app.cmd_held = true;
+
+        assert!(!app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyC), Some("c")));
+
+        let core = app.core.as_ref().unwrap().borrow();
+        let NodeKind::TextField(f) = &core.tree().get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(f.value, "ab");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
