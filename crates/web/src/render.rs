@@ -373,11 +373,30 @@ fn utf16_offset_to_byte_offset(s: &str, utf16_offset: usize) -> usize {
     s.len()
 }
 
+/// The inverse of [`utf16_offset_to_byte_offset`] (#329): convert a UTF-8
+/// byte offset — the unit `mkui_runtime::TextFieldProps::caret`/`anchor`
+/// carry — into the UTF-16 code-unit offset `setSelectionRange` expects.
+/// Needed to restore a field's supplied `caret`/`anchor` on render, the
+/// mirror image of [`sync_text_field`] reading them back out.
+fn byte_offset_to_utf16_offset(s: &str, byte_offset: usize) -> usize {
+    let mut utf16_count = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if byte_idx >= byte_offset {
+            return utf16_count;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    utf16_count
+}
+
 /// Read `input`'s current value and selection and write them into
 /// `owner`'s `TextField` node at `(index, generation)` (#312). Called from
 /// a `TextField`'s `oninput`/`onblur` closures installed in
 /// [`render_text_field`] — same per-mount `owner` clone [`fire_action`]
-/// uses, for the same `'static` closure-capture reason (#305).
+/// uses, for the same `'static` closure-capture reason (#305). #329 adds
+/// `selectionchange`/`keyup`/`mouseup` to that same closure set so a
+/// selection-only change (no value edit) also round-trips, not just the
+/// value-changing `input`/`blur` pair.
 ///
 /// `selectionStart`/`selectionEnd` are always reported in UTF-16 order
 /// (`start <= end`) regardless of which end the user is actually dragging
@@ -438,12 +457,15 @@ fn blur_text_field(owner: &Rc<RefCell<AppTree>>) -> bool {
 /// becomes a renderer of the contract" promise ADR 0015 describes for
 /// `Card`, now for an interactive leaf instead of a static container.
 /// `disabled`/`invalid` map to the real `disabled` attribute and the
-/// shadcn `aria-invalid` convention; `oninput`/`onfocus`/`onblur` write the
-/// live value/caret/selection (and the tree's singleton
-/// `focused_text_field`) back into the exact tree this node was rendered
-/// from — a cloned `owner` [`render_button`]'s `onclick` already uses,
-/// not the pre-#305 thread-local dance, so two mounted trees that happen
-/// to allocate the same raw `NodeId` never cross-write each other's state.
+/// shadcn `aria-invalid` convention; `oninput`/`onfocus`/`onblur` (plus
+/// #329's `selectionchange`/`keyup`/`mouseup`) write the live
+/// value/caret/selection (and the tree's singleton `focused_text_field`)
+/// back into the exact tree this node was rendered from — a cloned
+/// `owner` [`render_button`]'s `onclick` already uses, not the pre-#305
+/// thread-local dance, so two mounted trees that happen to allocate the
+/// same raw `NodeId` never cross-write each other's state. #329 also
+/// restores the supplied `caret`/`anchor` on the native element at render
+/// time — `set_value` alone always leaves the caret at the end.
 fn render_text_field(
     node: &mkui_runtime::Node,
     field: &mkui_runtime::TextFieldProps,
@@ -457,6 +479,26 @@ fn render_text_field(
     input.set_value(&field.value);
     input.set_placeholder(&field.placeholder);
     input.set_disabled(field.disabled);
+
+    // #329: restore the supplied `caret`/`anchor`, not just `value` —
+    // `set_value` alone always leaves the native caret at the end.
+    // `caret`/`anchor` mirror `sync_text_field`'s read-back: equal (or no
+    // `anchor`) is a collapsed caret; otherwise the smaller of the two is
+    // `selectionStart` and `selectionDirection` says which end `caret`
+    // actually is.
+    let caret_utf16 = byte_offset_to_utf16_offset(&field.value, field.caret) as u32;
+    match field.anchor {
+        Some(anchor) => {
+            let anchor_utf16 = byte_offset_to_utf16_offset(&field.value, anchor) as u32;
+            let (start, end, direction) = if field.caret <= anchor {
+                (caret_utf16, anchor_utf16, "backward")
+            } else {
+                (anchor_utf16, caret_utf16, "forward")
+            };
+            input.set_selection_range_with_direction(start, end, direction)?;
+        }
+        None => input.set_selection_range(caret_utf16, caret_utf16)?,
+    }
 
     let class = if node.class.raw().is_empty() {
         "text-field".to_string()
@@ -502,6 +544,51 @@ fn render_text_field(
         }) as Box<dyn FnMut(_)>);
         input.set_onblur(Some(onblur.as_ref().unchecked_ref()));
         onblur.forget();
+
+        // #329: `input`/`blur` only fire on a value change, so a
+        // selection-only change (arrow-key caret movement, a mouse-driven
+        // selection) never reached the tree before. The DOM's `select`
+        // event turns out *not* to cover this — verified in a real
+        // browser, it only fires once a non-empty range exists (a
+        // Shift+Arrow or a drag), not on a bare caret move — so caret-only
+        // navigation needs `selectionchange` instead: unlike
+        // `Document::onselectionchange` (no IDL property on the element
+        // itself, hence `add_event_listener_with_callback` rather than a
+        // `set_on*` setter), it fires directly on the `<input>` for both a
+        // keyboard caret move and a mouse click/drag. `keyup`/`mouseup`
+        // ride along as a fallback for engines that don't dispatch
+        // `selectionchange` on the element itself.
+        let owner_for_selection = Rc::clone(owner);
+        let input_for_selection = input.clone();
+        let onselectionchange = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            sync_text_field(
+                &owner_for_selection,
+                node_idx,
+                node_gen,
+                &input_for_selection,
+            );
+        }) as Box<dyn FnMut(_)>);
+        input.add_event_listener_with_callback(
+            "selectionchange",
+            onselectionchange.as_ref().unchecked_ref(),
+        )?;
+        onselectionchange.forget();
+
+        let owner_for_keyup = Rc::clone(owner);
+        let input_for_keyup = input.clone();
+        let onkeyup = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            sync_text_field(&owner_for_keyup, node_idx, node_gen, &input_for_keyup);
+        }) as Box<dyn FnMut(_)>);
+        input.set_onkeyup(Some(onkeyup.as_ref().unchecked_ref()));
+        onkeyup.forget();
+
+        let owner_for_mouseup = Rc::clone(owner);
+        let input_for_mouseup = input.clone();
+        let onmouseup = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            sync_text_field(&owner_for_mouseup, node_idx, node_gen, &input_for_mouseup);
+        }) as Box<dyn FnMut(_)>);
+        input.set_onmouseup(Some(onmouseup.as_ref().unchecked_ref()));
+        onmouseup.forget();
     }
 
     Ok(input.into())
@@ -653,6 +740,47 @@ mod tests {
         assert_eq!(utf16_offset_to_byte_offset(s, 0), 0);
         assert_eq!(utf16_offset_to_byte_offset(s, 1), 4);
         assert_eq!(utf16_offset_to_byte_offset(s, 2), 4);
+    }
+
+    // `byte_offset_to_utf16_offset` (#329) is `utf16_offset_to_byte_offset`'s
+    // inverse — restoring a field's `caret`/`anchor` on render needs the
+    // same byte<->UTF-16 conversion in the opposite direction.
+
+    #[test]
+    fn ascii_byte_and_utf16_offsets_coincide() {
+        assert_eq!(byte_offset_to_utf16_offset("hello", 3), 3);
+    }
+
+    #[test]
+    fn multi_byte_char_before_the_offset_shifts_the_utf16_offset_backward() {
+        // "é" is 2 UTF-8 bytes but 1 UTF-16 code unit.
+        assert_eq!(byte_offset_to_utf16_offset("é is nice", 2), 1);
+        assert_eq!(byte_offset_to_utf16_offset("é is nice", 0), 0);
+    }
+
+    #[test]
+    fn a_byte_offset_at_the_strings_end_yields_its_full_utf16_length() {
+        assert_eq!(byte_offset_to_utf16_offset("hi", 2), 2);
+    }
+
+    #[test]
+    fn a_surrogate_pair_char_counts_as_two_utf16_units_going_backward_too() {
+        // "😀" (U+1F600) is one Unicode scalar, 4 UTF-8 bytes, 2 UTF-16
+        // code units — the byte offset right after it (4) must land past
+        // both of those code units (2), not just one.
+        let s = "😀x";
+        assert_eq!(byte_offset_to_utf16_offset(s, 0), 0);
+        assert_eq!(byte_offset_to_utf16_offset(s, 4), 2);
+        assert_eq!(byte_offset_to_utf16_offset(s, 5), 3);
+    }
+
+    #[test]
+    fn round_trips_with_utf16_offset_to_byte_offset() {
+        let s = "é😀hello";
+        for byte_offset in [0, 2, 6, 7, 8, s.len()] {
+            let utf16 = byte_offset_to_utf16_offset(s, byte_offset);
+            assert_eq!(utf16_offset_to_byte_offset(s, utf16), byte_offset);
+        }
     }
 
     #[test]
