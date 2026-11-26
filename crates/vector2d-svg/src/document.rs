@@ -635,7 +635,18 @@ fn lower_shape(
     // caller that reads `Shape::path`/`fill_path` without ever calling
     // `encode_vector_path` (there is no in-tree consumer yet, see #325)
     // would otherwise see this only as silently-wrong (infinite) geometry.
-    if !transformed_points_are_finite(&commands, state.ctm) {
+    //
+    // Gated on `state.rendered`: when the composed CTM itself is already
+    // non-finite or singular (e.g. `scale(3e38) scale(2)`, which overflows
+    // `3e38 * 2` at the *matrix-composition* step, before any shape point
+    // is ever touched), `walk_shapes` has already decided this subtree is
+    // simply not rendered — that is a document-wide-success, this-element-
+    // invisible outcome (same as a zero-size shape), not a hard top-level
+    // rejection, and it must not take unrelated sibling elements down with
+    // it. Only a CTM that *is* otherwise renderable, but still overflows
+    // when actually applied to this specific shape's points, is the new
+    // failure mode this check exists for.
+    if state.rendered && !transformed_points_are_finite(&commands, state.ctm) {
         return Err(SvgError::NonFiniteGeometry(name.to_string()));
     }
 
@@ -669,7 +680,11 @@ fn lower_shape(
                 // that can overflow the same way raw geometry can: a
                 // `linearGradient x2="3e38"` against a 2-unit-wide `rect`
                 // computes `0 + 3e38 * 2`, which overflows to infinity.
-                if !gradient_kind_is_finite(&g.kind) {
+                // Gated on `state.rendered` for the same reason as the
+                // transformed-point check above: an already-not-rendered
+                // subtree (singular/non-finite CTM) must stay a silent
+                // suppression, not escalate into a hard document failure.
+                if state.rendered && !gradient_kind_is_finite(&g.kind) {
                     return Err(SvgError::NonFiniteGeometry(name.to_string()));
                 }
                 for stop in &mut g.stops {
@@ -1365,6 +1380,32 @@ mod tests {
         </svg>"##;
         let doc = parse_svg(xml).unwrap();
         assert!(doc.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_composed_transform_that_overflows_to_non_finite_suppresses_only_its_own_subtree() {
+        // Regression (review round 3): `scale(3e38) scale(2)` overflows
+        // `3e38 * 2` at the *matrix-composition* step inside
+        // `parse_transform_list` itself, before any shape point is
+        // touched — so the CTM `walk_shapes` ends up with for this `<g>`
+        // has non-finite entries. That must take the same "not rendered"
+        // path as a singular transform (this subtree's shapes are simply
+        // absent), not a hard top-level rejection — and, critically, must
+        // not take an unrelated, otherwise-valid sibling element down
+        // with it.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(3e38) scale(2)">
+                <rect width="2" height="1"/>
+            </g>
+            <circle cx="5" cy="5" r="5" fill="#000000"/>
+        </svg>"##;
+        let doc = parse_svg(xml)
+            .expect("an overflowing composed transform must not fail the whole document");
+        assert_eq!(
+            doc.shapes.len(),
+            1,
+            "only the sibling circle renders; the overflowing group's rect does not"
+        );
     }
 
     #[test]

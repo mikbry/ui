@@ -14,6 +14,23 @@ use mkui_vector2d::Vec2;
 /// whatever the caller's pen position already is.
 pub type CubicSegment = (Vec2, Vec2, Vec2);
 
+/// Radii beyond this are clamped before any arc math runs, same philosophy
+/// as this parser's other anti-adversarial-input caps (nesting depth, XML
+/// node count): no realistic icon/portrait asset draws a curve with a
+/// multi-million-unit radius, and at a large enough radius *no* amount of
+/// floating-point precision fixes the underlying problem. Resolving a
+/// center offset that differs from the radius by the curve's sagitta
+/// (`chord² / (8·radius)`) needs roughly `radius²` worth of precision
+/// relative to the chord; even `f64`'s ~15-16 decimal digits run out well
+/// before `radius = 1e18` for any chord length this subset's shapes
+/// plausibly have (observed: a `1e18`-radius arc over a 10-unit chord
+/// reached the correct *endpoint* — that's pinned exactly, see
+/// [`arc_to_cubics`] — but its control points, and so the curve's
+/// interior, bulged out to roughly 5x the chord length). `1e6` is
+/// comfortably above any plausible authored radius and comfortably below
+/// where `f64` stops resolving a reasonable chord's sagitta.
+const MAX_ARC_RADIUS: f64 = 1e6;
+
 /// Convert an SVG elliptical arc from `start` to `end` into a chain of cubic
 /// Bézier segments, all in the same (SVG, y-down) coordinate space as
 /// `start`/`end`. `x_axis_rotation_deg` is the ellipse's own rotation.
@@ -47,8 +64,8 @@ pub fn arc_to_cubics(
     // digits comfortably separates the two scales. Only the final control
     // points/endpoint are narrowed back to `f32`, at the public API
     // boundary (`Vec2` is `f32`).
-    let rx = (rx as f64).abs();
-    let ry = (ry as f64).abs();
+    let rx = (rx as f64).abs().min(MAX_ARC_RADIUS);
+    let ry = (ry as f64).abs().min(MAX_ARC_RADIUS);
     let phi = (x_axis_rotation_deg as f64).to_radians();
     let (sin_phi, cos_phi) = phi.sin_cos();
     let (x1, y1) = (start.x as f64, start.y as f64);
@@ -364,6 +381,40 @@ mod tests {
             assert!(c1.x.is_finite() && c1.y.is_finite());
             assert!(c2.x.is_finite() && c2.y.is_finite());
             assert!(end.x.is_finite() && end.y.is_finite());
+        }
+    }
+
+    #[test]
+    fn an_absurd_radius_is_clamped_to_a_sane_arc_not_a_bulging_curve() {
+        // Regression (review round 3): endpoint pinning alone doesn't fix
+        // the *interior* of the curve. At radius 1e18 over a 10-unit
+        // chord, even `f64` can't resolve the sagitta relative to the
+        // radius, so the (unclamped) center/control-point math degenerated
+        // into numerical noise — observed control points landing around
+        // x≈66, well past the chord's own [0, 10] span, with the curve's
+        // interior overshooting to roughly x=51 before returning to
+        // (10, 0). `MAX_ARC_RADIUS` clamps the radius before any of that
+        // math runs, so the result is a sane, nearly-flat arc instead.
+        let start = Vec2::new(0.0, 0.0);
+        let end = Vec2::new(10.0, 0.0);
+        let segs = arc_to_cubics(start, 1e18, 1e18, 0.0, false, true, end);
+        assert_eq!(
+            segs.len(),
+            1,
+            "a clamped radius keeps this a shallow, single-segment arc"
+        );
+        let (c1, c2, reached_end) = segs[0];
+        assert_eq!(reached_end, end);
+        // Every point - including the control points, which the endpoint
+        // pin alone does nothing for - stays within a sane margin of the
+        // chord's own span, nowhere near the ~66 the unclamped bulge
+        // reached.
+        for p in [c1, c2, reached_end] {
+            assert!(
+                (-1.0..=11.0).contains(&p.x),
+                "point {p:?} is far outside the chord's [0, 10] span"
+            );
+            assert!(p.y.abs() < 1.0, "point {p:?} bulges far off the chord");
         }
     }
 }
