@@ -188,6 +188,7 @@ imports, and `cargo -p mkui-…` commands keep their existing names.
 | `mkui-runtime`| Portable application-tree substrate (`AppTree`, `NodeId`, `ActionId`, class parser, JSON snapshots). Every binding builds into this same arena. | Stable (Sprint 4) |
 | `mkui-vector2d` | Backend-neutral 2D path model + deterministic Slug glyph curve/band encoder (font-units, y-up). No GPU deps. | Stable (Sprint 7) |
 | `mkui-vector2d-wgpu` | WGPU adapter for `mkui-vector2d`'s Slug encoder — packs blobs into GPU buffers + single-horizontal-ray WGSL coverage pipeline. Behind `slug` feature (default off in `mkui-wgpu`). | Stable (Sprint 7) |
+| `mkui-vector2d-svg` | Sanitized-subset SVG parser + `mkui-vector2d` lowering, for host-supplied vector art (icons, portraits). `roxmltree` for XML; hand-written value parsers (numbers, path data, transforms, color) — no `svgtypes`/`usvg`. | Experimental (#201) |
 | `mkui-c`      | C/C++ FFI bindings — handle-based nested API over `mkui-runtime`'s `AppTree`. CI builds + clippy gates active.                  | Stable (Sprint 4)                                             |
 | `mkui-py`     | Python bindings via PyO3 0.29.0. Handle-based nested API. Builds + tests on Python 3.9–3.14.                                    | Stable (Sprint 4)                                            |
 

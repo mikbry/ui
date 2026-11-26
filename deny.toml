@@ -87,6 +87,15 @@ deny = [
     # Copyleft licenses we cannot ship under our MIT/Apache-2.0 dual licensing.
     # cargo-deny enforces this via the [licenses] block above, but listing
     # well-known copyleft crates here makes the intent explicit.
+
+    # #201: the sanitized-subset SVG parser hand-writes its own value grammar
+    # (numbers, path data, transforms, color) against roxmltree's XML tree.
+    # `svgtypes` parses the full SVG value grammar (far more surface than the
+    # subset needs) and `usvg` pulls in a full font-shaping stack that
+    # conflicts with ADR 0002's text-stack ownership — neither may reappear
+    # as a transitive dependency.
+    { name = "svgtypes" },
+    { name = "usvg" },
 ]
 skip = []
 skip-tree = []
