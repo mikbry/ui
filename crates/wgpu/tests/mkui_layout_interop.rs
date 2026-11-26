@@ -51,6 +51,7 @@ fn mkui_layout_rects_convert_cleanly_into_wgpu_types_and_cover_every_visible_nod
     let measure = WgpuLeafMeasure {
         theme: &theme,
         text_system: &text_system,
+        slug_font_id: None,
     };
     let result = compute_layout(core.tree(), LayoutSize::new(800.0, 600.0), &measure);
 

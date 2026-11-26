@@ -134,6 +134,14 @@ pub use mkui_vector2d_wgpu::{PlacedSlugGlyph, PreparedSlug, SlugAdapter};
 #[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
 pub use slug_text::place_slug_run;
 
+// #311: declarative-bridge consumers select a Slug font for component text
+// via `Mkui::with_slug_font`, which takes a `CompositeTextSystem` + the
+// `FontId` registered on it. Re-exported here so a caller building that pair
+// (e.g. `examples/native-showcase`) doesn't need its own direct `mkui-text`
+// dependency just to name these two types.
+#[cfg(feature = "slug")]
+pub use mkui_text::{CompositeTextSystem, FontId};
+
 // Low-level types
 pub use types::{
     rect_contains, AtlasRect, Axis, Backdrop, Color, Constraints, CornerRadii, DotAnimation,

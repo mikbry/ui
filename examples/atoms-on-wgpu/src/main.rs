@@ -178,6 +178,7 @@ mod tests {
             viewport: Size::new(1280.0, 720.0),
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
         let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
         assert!(
