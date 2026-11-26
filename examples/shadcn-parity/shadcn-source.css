@@ -1,0 +1,35 @@
+/* Tailwind input for the shadcn/ui reference pane (shadcn.html). Compiled by
+   build.sh into dist/shadcn.css with the `@tailwindcss/cli` already locked
+   in examples/web-showcase/node_modules (see README.md "Build"). `tokens.css`
+   supplies --background/--card/--primary/etc.; this file only maps them into
+   Tailwind's `@theme inline` color/radius namespace, exactly as pinned
+   shadcn-ui/ui@0e5b2e621a9ee4cf6a604bbe6c5c0d5b70561eb4's
+   apps/v4/app/globals.css does (minus docs-site-only utilities). */
+@import "tailwindcss";
+@source "./shadcn.html";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-sans);
+}

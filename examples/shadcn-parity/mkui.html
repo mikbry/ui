@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>mkui-web — Card + Button</title>
+<link rel="stylesheet" href="./tokens.css">
+<link rel="stylesheet" href="./mkui.css">
+<style>
+  /* Page chrome only — not part of the parity fixture. */
+  body { padding: 24px; }
+</style>
+<body>
+  <div id="app"></div>
+  <pre id="result">RUNNING</pre>
+  <script type="module">
+    // `mkui_web::WebApp` (crates/web/src/app.rs) applies its own `dark`
+    // class to `<body>` on mount, from `ThemeMode::System` /
+    // `prefers-color-scheme` — it ignores `?theme=` and runs *during*
+    // `init()`, so the override below must come after `init()` resolves
+    // and must target `<body>` (not `<html>`) to win the cascade against
+    // mkui-web's own class.
+    const params = new URLSearchParams(location.search);
+    function setTheme(value) {
+      document.body.classList.toggle('dark', value === 'dark');
+    }
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'theme') setTheme(event.data.value);
+    });
+
+    const result = document.querySelector('#result');
+    const assert = (ok, message) => { if (!ok) throw new Error(message); };
+    try {
+      const { default: init } = await import('./pkg/shadcn_parity.js');
+      await init();
+      setTheme(params.get('theme'));
+
+      const focusTarget = document.querySelector('.parity-btn-focus-target');
+      focusTarget.focus();
+      const disabled = [...document.querySelectorAll('.btn-primary')].find((b) => b.disabled);
+      const card = document.querySelector('.card');
+
+      assert(focusTarget.matches('button[type="button"]'), 'focus target is a plain button');
+      assert(disabled.matches('button[type="button"]'), 'disabled button is a plain button');
+      assert(disabled.disabled, 'disabled button has the native disabled attribute');
+      assert(getComputedStyle(disabled).opacity === '0.5', 'disabled opacity');
+      // Intentional difference from shadcn (documented in README.md): mkui
+      // keeps pointer-events enabled on disabled buttons so the painted
+      // surface still blocks controls beneath it (crates/web/styles.css).
+      assert(getComputedStyle(disabled).pointerEvents === 'auto', 'disabled button still blocks pointer hits');
+      assert(getComputedStyle(card).borderTopWidth === '1px', 'card border is present');
+
+      result.textContent = 'PASS';
+      document.documentElement.dataset.smoke = 'pass';
+    } catch (error) {
+      result.textContent = `FAIL: ${error.stack ?? error}`;
+      document.documentElement.dataset.smoke = 'fail';
+      throw error;
+    }
+  </script>
+</body>
+</html>

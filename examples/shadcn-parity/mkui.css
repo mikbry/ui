@@ -1,0 +1,103 @@
+/* Button chrome for the mkui-web pane. `mkui_web::DEFAULT_COMPONENT_CSS`
+   (injected by src/lib.rs's `start()`) only ships Card fill/border/radius/
+   shadow and disabled-button opacity — no `.btn` sizing, color or focus
+   ring at all (crates/web/styles.css). This file is this example's own
+   recipe, hand-matched to the pinned shadcn/ui Button
+   (shadcn-ui/ui@0e5b2e621a9ee4cf6a604bbe6c5c0d5b70561eb4,
+   apps/v4/registry/new-york-v4/ui/button.tsx) so the two panes are
+   comparable; see README.md's differences table for where this
+   approximation and the real Tailwind output diverge. */
+
+.card.parity-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding-block: 1.5rem;
+  max-width: 24rem;
+}
+
+.parity-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-inline: 1.5rem;
+}
+
+.parity-card-header > p {
+  margin: 0;
+}
+
+.parity-card-title {
+  font-weight: 600;
+  line-height: 1;
+}
+
+.parity-card-description {
+  font-size: 0.875rem;
+  color: var(--muted-foreground);
+}
+
+.parity-card-content {
+  padding-inline: 1.5rem;
+}
+
+.parity-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-inline: 1.5rem;
+}
+
+.parity-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+
+.btn.parity-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 2.25rem;
+  padding: 0 1rem;
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  border: none;
+  cursor: pointer;
+  outline: none;
+  transition:
+    color 0.15s,
+    background-color 0.15s,
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.btn.parity-btn:focus-visible {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 50%, transparent);
+}
+
+.btn-primary.parity-btn {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.btn-primary.parity-btn:enabled:hover {
+  background-color: color-mix(in oklab, var(--primary) 90%, transparent);
+}
+
+.btn-outline.parity-btn {
+  border: 1px solid var(--border);
+  background-color: var(--background);
+  color: var(--foreground);
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+}
+
+.btn-outline.parity-btn:enabled:hover {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+}

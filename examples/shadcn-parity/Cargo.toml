@@ -1,0 +1,19 @@
+[package]
+name = "shadcn-parity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mkui-core = { path = "../../crates/core" }
+mkui-web = { path = "../../crates/web" }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }
+
+[dev-dependencies]
+mkui-runtime = { path = "../../crates/runtime" }

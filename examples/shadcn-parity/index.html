@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>mkui-web vs. shadcn/ui — Card + Button parity (#278)</title>
+<link rel="stylesheet" href="./tokens.css">
+<style>
+  body { padding: 16px 24px 32px; }
+  h1 { font-size: 1.125rem; margin: 0 0 4px; }
+  p.lede { margin: 0 0 16px; color: var(--muted-foreground); font-size: 0.875rem; }
+  .controls { display: flex; gap: 0.75rem; margin-bottom: 16px; flex-wrap: wrap; }
+  .controls button {
+    font: inherit; font-size: 0.8125rem; padding: 0.375rem 0.75rem;
+    border-radius: 0.375rem; border: 1px solid var(--border);
+    background: var(--background); color: var(--foreground); cursor: pointer;
+  }
+  .controls button[aria-pressed="true"] { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+  .panes { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .pane { border: 1px solid var(--border); border-radius: 0.5rem; overflow: hidden; }
+  .pane h2 {
+    margin: 0; padding: 8px 12px; font-size: 0.8125rem; font-weight: 600;
+    background: var(--secondary); color: var(--secondary-foreground);
+    border-bottom: 1px solid var(--border);
+  }
+  .pane iframe { display: block; border: none; height: 420px; }
+</style>
+<body>
+  <h1>mkui-web vs. shadcn/ui — Card + Button parity (#278)</h1>
+  <p class="lede">
+    Left: the production <code>mkui-web</code> DOM renderer. Right: a pinned
+    shadcn/ui reference (new-york-v4, neutral). See
+    <a href="https://github.com/mikbry/ui/blob/main/examples/shadcn-parity/README.md">README.md</a>
+    for the run command, screenshot workflow, and the behavior/accessibility
+    comparison.
+  </p>
+  <div class="controls" role="group" aria-label="Theme">
+    <button type="button" data-theme="light" aria-pressed="true">Light</button>
+    <button type="button" data-theme="dark" aria-pressed="false">Dark</button>
+  </div>
+  <div class="controls" role="group" aria-label="Viewport">
+    <button type="button" data-width="1280" aria-pressed="true">Desktop (1280px)</button>
+    <button type="button" data-width="500" aria-pressed="false">Narrow (500px)</button>
+  </div>
+  <div class="panes">
+    <div class="pane">
+      <h2>mkui-web (DOM renderer)</h2>
+      <iframe id="mkui-frame" src="./mkui.html?theme=light" width="1280"></iframe>
+    </div>
+    <div class="pane">
+      <h2>shadcn/ui reference (pinned)</h2>
+      <iframe id="shadcn-frame" src="./shadcn.html?theme=light" width="1280"></iframe>
+    </div>
+  </div>
+  <script type="module">
+    const frames = [document.querySelector('#mkui-frame'), document.querySelector('#shadcn-frame')];
+
+    function setPressed(group, value, attr) {
+      for (const button of document.querySelectorAll(`[data-${attr}]`)) {
+        if (button.closest('.controls') !== group) continue;
+        button.setAttribute('aria-pressed', String(button.dataset[attr] === value));
+      }
+    }
+
+    for (const button of document.querySelectorAll('[data-theme]')) {
+      button.addEventListener('click', () => {
+        const value = button.dataset.theme;
+        setPressed(button.closest('.controls'), value, 'theme');
+        for (const frame of frames) {
+          frame.contentWindow.postMessage({ type: 'theme', value }, '*');
+        }
+      });
+    }
+
+    for (const button of document.querySelectorAll('[data-width]')) {
+      button.addEventListener('click', () => {
+        const value = button.dataset.width;
+        setPressed(button.closest('.controls'), value, 'width');
+        for (const frame of frames) {
+          frame.width = value;
+        }
+      });
+    }
+  </script>
+</body>
+</html>

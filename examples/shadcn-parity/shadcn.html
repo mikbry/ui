@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>shadcn/ui reference — Card + Button</title>
+<link rel="stylesheet" href="./tokens.css">
+<link rel="stylesheet" href="./dist/shadcn.css">
+<style>
+  /* Page chrome only — not part of the parity fixture. */
+  body { padding: 24px; }
+  .parity-card { max-width: 24rem; }
+  .parity-button-row { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem; }
+  .parity-card-footer { gap: 0.5rem; }
+</style>
+<body>
+  <div data-slot="card" class="parity-card flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm">
+    <div data-slot="card-header" class="@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-2 px-6">
+      <div data-slot="card-title" class="leading-none font-semibold">Team members</div>
+      <div data-slot="card-description" class="text-sm text-muted-foreground">Invite teammates to collaborate.</div>
+    </div>
+    <div data-slot="card-content" class="px-6">3 members · 2 pending invites</div>
+    <div data-slot="card-footer" class="parity-card-footer flex items-center px-6">
+      <button data-slot="button" data-variant="outline" data-size="default" type="button" class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 h-9 px-4 py-2 has-[>svg]:px-3">Cancel</button>
+      <button data-slot="button" data-variant="default" data-size="default" type="button" class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2 has-[>svg]:px-3">Invite</button>
+    </div>
+  </div>
+
+  <div class="parity-button-row">
+    <button data-slot="button" data-variant="default" data-size="default" type="button" class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2 has-[>svg]:px-3">Default</button>
+    <button data-slot="button" data-variant="outline" data-size="default" type="button" class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 h-9 px-4 py-2 has-[>svg]:px-3">Outline</button>
+    <button data-slot="button" data-variant="default" data-size="default" type="button" disabled class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2 has-[>svg]:px-3">Disabled</button>
+    <button data-slot="button" data-variant="default" data-size="default" type="button" id="focus-target" class="parity-btn inline-flex shrink-0 items-center justify-center gap-2 rounded-md text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 bg-primary text-primary-foreground hover:bg-primary/90 h-9 px-4 py-2 has-[>svg]:px-3">Keyboard focus</button>
+  </div>
+
+  <pre id="result">RUNNING</pre>
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    document.documentElement.classList.toggle('dark', params.get('theme') === 'dark');
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'theme') {
+        document.documentElement.classList.toggle('dark', event.data.value === 'dark');
+      }
+    });
+
+    const result = document.querySelector('#result');
+    const assert = (ok, message) => { if (!ok) throw new Error(message); };
+    try {
+      const focusTarget = document.querySelector('#focus-target');
+      focusTarget.focus();
+      const disabled = document.querySelector('[data-variant="default"][disabled]');
+      const card = document.querySelector('[data-slot="card"]');
+
+      assert(focusTarget.matches('button[type="button"]'), 'focus target is a plain button');
+      assert(disabled.matches('button[type="button"]'), 'disabled button is a plain button');
+      assert(disabled.disabled, 'disabled button has the native disabled attribute');
+      assert(getComputedStyle(disabled).opacity === '0.5', 'disabled opacity');
+      assert(getComputedStyle(disabled).pointerEvents === 'none', 'disabled:pointer-events-none lets clicks pass through');
+      assert(getComputedStyle(card).borderTopWidth === '1px', 'card border is present');
+
+      result.textContent = 'PASS';
+      document.documentElement.dataset.smoke = 'pass';
+    } catch (error) {
+      result.textContent = `FAIL: ${error.stack ?? error}`;
+      document.documentElement.dataset.smoke = 'fail';
+      throw error;
+    }
+  </script>
+</body>
+</html>
