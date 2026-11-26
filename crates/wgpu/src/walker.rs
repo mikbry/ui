@@ -382,13 +382,44 @@ impl WgpuLeafMeasure<'_> {
         let runs = self
             .text_system
             .layout(content, &spec, max_width_px.map(|w| w.max(1.0)));
-        let natural_width = runs
-            .iter()
-            .flat_map(|r| r.glyphs.iter())
-            .map(|g| g.x_px + g.x_advance_px)
-            .fold(0.0_f32, f32::max);
+
+        // A single visual line can be split into multiple `LayoutRun`s when
+        // a Slug run and a bitmap-fallback run alternate within it (e.g.
+        // around a character the Slug face can't map — #171/#182's
+        // mixed-fallback contract). Every run belonging to the same line
+        // shares the same `line_y_baseline_px` (the SFNT provider stamps it
+        // uniformly per line — see `push_line_runs`), but each run's own
+        // `LayoutGlyph::x_px` is relative to *that run's own* origin, not
+        // the line's (`"Absolute x within the parent run = pen − run
+        // origin"`). #311 review follow-up: the previous reduction —
+        // `runs.len()` lines (treating every run as its own line, so a
+        // 3-run single line measured as 3 stacked lines) and a flat max
+        // over `glyph.x_px + glyph.x_advance_px` (ignoring `run.origin_x_px`,
+        // so a later run's glyphs measured as if the run started at x=0) —
+        // simultaneously undercounted a multi-run line's width (truncation
+        // risk once the real, wider line is rendered) and overcounted its
+        // height (wasted layout space). Grouping by `line_y_baseline_px`
+        // and offsetting each run's own extent by `run.origin_x_px` fixes
+        // both; it is a no-op where every line is already exactly one run
+        // (bitmap-only text, or any line with no fallback split).
+        let mut natural_width = 0.0_f32;
+        let mut line_baselines: Vec<f32> = Vec::new();
+        for run in &runs {
+            let run_extent = run
+                .glyphs
+                .iter()
+                .map(|g| g.x_px + g.x_advance_px)
+                .fold(0.0_f32, f32::max);
+            natural_width = natural_width.max(run.origin_x_px + run_extent);
+            if !line_baselines
+                .iter()
+                .any(|b: &f32| (*b - run.line_y_baseline_px).abs() < f32::EPSILON)
+            {
+                line_baselines.push(run.line_y_baseline_px);
+            }
+        }
         let width = max_width_px.map(|w| w.max(0.0)).unwrap_or(natural_width);
-        let height = line_height * (runs.len().max(1) as f32);
+        let height = line_height * (line_baselines.len().max(1) as f32);
         Measured::new(width, height)
     }
 }
@@ -1748,6 +1779,75 @@ mod tests {
              glyph — fewer means the walker's rect (measured against \
              `slug_font_id`) was still too narrow for Abel's real glyph \
              widths and the label got ellipsized/truncated"
+        );
+    }
+
+    /// #311 review follow-up (second gap). `measure_text_inner` reduced a
+    /// `Text`/`LayoutSpec` layout's `Vec<LayoutRun>` with two assumptions
+    /// that both broke once a single visual line could be split into
+    /// multiple runs: `natural_width` took a flat max over
+    /// `glyph.x_px + glyph.x_advance_px` across *every* run, ignoring each
+    /// run's own `origin_x_px` (`LayoutGlyph::x_px` is run-relative —
+    /// "absolute x within the parent run = pen − run origin", per
+    /// `push_line_runs`), so a later run's glyphs measured as if that run
+    /// started at x=0; and `height` was `line_height * runs.len()`, treating
+    /// every run as its own line.
+    ///
+    /// A line splits into multiple runs whenever a Slug-mapped run and a
+    /// bitmap-fallback run alternate within it — e.g. around a character the
+    /// Slug face has no outline for, like an emoji — all sharing one
+    /// `line_y_baseline_px` (the SFNT provider stamps it per *line*, not per
+    /// run). Reviewer-reported repro: Abel at 16px, `"WWWWWWWWWW🙂WWWWWWWWWW"`
+    /// produces 3 runs (Slug / bitmap-fallback / Slug) on exactly 1 line.
+    /// Verified empirically against both the pre-fix and post-fix code
+    /// during review: pre-fix measured 120.46875×60px (3 runs read as 3
+    /// stacked lines, and only the narrowest run's own glyph extent counted
+    /// as the width); post-fix measures 252.5375×20px (1 real line, full
+    /// width across all 3 runs' combined extent).
+    #[cfg(feature = "slug")]
+    #[test]
+    fn measurement_combines_a_mixed_slug_bitmap_line_into_one_line_not_n_runs() {
+        use mkui_runtime::style::ResolvedStyle;
+        use mkui_text::CompositeTextSystem;
+
+        // Abel (Google Fonts, SIL Open Font License 1.1) — test-only
+        // fixture, never bundled into this crate's shipped (non-test) code.
+        const ABEL: &[u8] = include_bytes!("../../text/tests/fixtures/abel/Abel-Regular.ttf");
+
+        let mut text_system = CompositeTextSystem::new();
+        let font_id = text_system
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .expect("Abel registers");
+        let theme = WgpuTheme::default();
+        let measure = WgpuLeafMeasure {
+            theme: &theme,
+            text_system: &text_system,
+            slug_font_id: Some(font_id),
+        };
+
+        // U+1F642 (🙂) has no Slug outline in Abel, so it falls back to the
+        // bitmap lane mid-line, splitting this one line into 3 runs:
+        // Slug "WWWWWWWWWW" / bitmap "🙂" / Slug "WWWWWWWWWW".
+        let content = "WWWWWWWWWW\u{1F642}WWWWWWWWWW";
+        let measured =
+            measure.measure_text(content, TextVariant::Body, &ResolvedStyle::default(), None);
+
+        assert!(
+            (measured.size.height - 20.0).abs() < 0.01,
+            "a single visual line split into multiple runs (one per \
+             Slug/bitmap-fallback segment) must measure as exactly ONE \
+             20px line at 16px body text, not `line_height * run_count` \
+             (3 runs would wrongly read as 60px / 3 lines) — got height={}",
+            measured.size.height
+        );
+        assert!(
+            (200.0..280.0).contains(&measured.size.width),
+            "the line's real combined width across all 3 runs (~252.5px: \
+             20 W's plus the emoji) must be reported, not just the \
+             narrowest run's own glyph extent (the pre-fix bug measured \
+             ~120px, undercounting by ignoring later runs' \
+             `origin_x_px`) — got width={}",
+            measured.size.width
         );
     }
 
