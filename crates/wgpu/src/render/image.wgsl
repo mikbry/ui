@@ -47,9 +47,18 @@ fn vs_image(input: VertexInput) -> VertexOutput {
 // rect of half-size `half_size` and corner radius `radius`. Negative
 // inside, positive outside, zero on the boundary — the standard rounded-box
 // SDF. Collapses to a plain axis-aligned box SDF when `radius` is 0.
+//
+// `radius` is clamped to `half_size`'s shorter axis — the SDF formula below
+// is only valid up to that bound; past it the `vec2<f32>(radius, radius)`
+// offset overshoots the box and produces a distorted, partially transparent
+// shape instead of a clamped rounded square (#331). `image_vertices` already
+// clamps this on the CPU side (mirroring `rounded_rect_path`'s own
+// convention); this is defense-in-depth so the shader is correct on its own
+// terms too.
 fn rounded_box_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
-    let d = abs(p) - half_size + vec2<f32>(radius, radius);
-    return length(max(d, vec2<f32>(0.0, 0.0))) - radius + min(max(d.x, d.y), 0.0);
+    let r = clamp(radius, 0.0, min(half_size.x, half_size.y));
+    let d = abs(p) - half_size + vec2<f32>(r, r);
+    return length(max(d, vec2<f32>(0.0, 0.0))) - r + min(max(d.x, d.y), 0.0);
 }
 
 @fragment
