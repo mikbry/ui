@@ -133,6 +133,34 @@ breaking changes can land on minor bumps).
   #296) — out of scope here.
 
 ### Fixed
+- **`mkui-web` button listeners now resolve their action against the tree
+  that owns their own mount, not a process-wide thread-local (#305).**
+  `render_button` used to capture only the raw `(index, generation)` of a
+  `Button`'s `ActionId` and look it up through `high_level::ACTIVE_TREE`
+  — a `thread_local!` slot that `Mkui::run()` overwrote on every mount.
+  Mounting a second `Mkui` app in the same document pointed that slot at
+  the second tree, so the first app's buttons silently fired against the
+  second app's `ActionRegistry` whenever the two trees happened to
+  allocate the same raw id (the common case: two fresh registries both
+  hand out `(0, 0)` to their first action). Each button's onclick closure
+  now clones a strong `Rc<RefCell<AppTree>>` from the exact tree
+  `render_button` rendered it from, so dispatch is scoped per mount
+  regardless of how many other `Mkui` apps share the document; the
+  thread-local and `fire_action_global` are gone. Because
+  `Closure::forget()` already leaks every button's closure for the page's
+  lifetime, a mount's tree lives as long as any of its own listeners do —
+  there is no path through this API for `owner` itself to go stale. What
+  *can* go stale is a single action: once `ActionRegistry::remove` (e.g.
+  via `AppTree::remove_node`) bumps a slot's generation, a leftover DOM
+  button whose onclick still carries the pre-removal id resolves to
+  `None` and no-ops, per `ActionRegistry::fire`'s existing generation
+  check — expected while `mkui-web` has no live re-render loop yet (#296).
+  New `crates/web/tests/dispatch_scope.rs` (`#[wasm_bindgen_test]`, run via
+  `wasm-pack test --headless --chrome crates/web`) mounts two trees whose
+  first action collides on the same raw id and clicks both buttons,
+  proving each only ever updates its own counter; it fails against the
+  pre-fix code (clicking the first app's button bumps the second app's
+  counter instead) and passes against the fix.
 - **`mkui-runtime`'s class parser no longer panics on an unrecognized
   utility — it's dropped (logged, and counted on
   `ResolvedStyle::unknown_count`) instead, and every other class on the
