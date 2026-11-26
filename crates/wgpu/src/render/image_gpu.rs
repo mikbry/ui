@@ -421,3 +421,52 @@ fn rounded_clip_boundary_has_no_seam_around_the_curve() {
         "found a background gap along the rounded corner's arc — a seam"
     );
 }
+
+#[test]
+fn small_image_with_oversized_radius_clamps_to_a_rounded_shape_not_a_distorted_one() {
+    // #331 acceptance: an 8x8 image with a theme-default-sized radius (8.0,
+    // `theme::radius_card`) larger than half its own shorter dimension (4.0)
+    // must render as a clamped rounded shape — in this case the radius
+    // clamps to exactly 4.0, the inscribed circle touching all four edge
+    // midpoints — never the unclamped SDF's distorted, partially
+    // transparent diamond/plus the issue describes.
+    let renderer = harness();
+    let view = solid_color_view(renderer.device(), renderer.queue(), 8, 8, RED);
+    let buf = render_one(
+        &renderer,
+        Rect::new(Point::new(0.0, 0.0), Size::new(8.0, 8.0)),
+        Size::new(8.0, 8.0),
+        ImageFit::Cover,
+        8.0,
+        WgpuImageSource::Host(0),
+        |textures, device, queue, _source| {
+            let handle = textures.register_host_texture(device, &view);
+            textures
+                .resolve(device, queue, &WgpuImageSource::Host(handle))
+                .unwrap()
+                .clone()
+        },
+    );
+    // Center: solidly inside regardless of clamping.
+    assert_eq!(pixel(&buf, 4, 4), RED);
+    // Interior points just off each flat edge's midpoint: inside the
+    // clamped radius-4 inscribed circle, so they must render opaque. The
+    // unclamped SDF (radius 8 on a half-dimension of 4) pushes its
+    // "inner box" negative on both axes and erroneously excludes exactly
+    // this band next to the edges — the distortion #331 fixes.
+    for (x, y) in [(4, 1), (4, 6), (1, 4), (6, 4)] {
+        assert!(
+            pixel(&buf, x, y)[0] > 200,
+            "edge-adjacent pixel ({x},{y}) must be opaque under the clamp, \
+             got {:?}",
+            pixel(&buf, x, y)
+        );
+    }
+    // The box's own true corner is still excluded — it is a rounded shape,
+    // not a plain unclamped square.
+    assert_ne!(
+        pixel(&buf, 0, 0)[0..3],
+        RED[0..3],
+        "the true corner must still be clipped by the (clamped) radius"
+    );
+}

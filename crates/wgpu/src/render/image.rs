@@ -82,8 +82,17 @@ pub(crate) fn image_vertices(placed: &PlacedImage, width: f32, height: f32) -> [
     // A single uniform radius — `PlacedImage::corner_radii` is a
     // `CornerRadii` only for type-symmetry with `Quad`; #196 never
     // constructs one with differing per-corner values (see
-    // `components::image::image`).
-    let corner_radius = placed.corner_radii.top_left.max(0.0);
+    // `components::image::image`). Clamped to half the shorter side,
+    // mirroring `components::button::rounded_rect_path`'s own
+    // `radius.max(0.0).min(w.min(h) * 0.5)` convention (#331) — otherwise a
+    // theme radius larger than a small image's own box overshoots the SDF's
+    // valid range in `image.wgsl` and renders a distorted, partially
+    // transparent shape instead of a clamped rounded square.
+    let corner_radius = placed
+        .corner_radii
+        .top_left
+        .max(0.0)
+        .min(r.size.width.min(r.size.height) * 0.5);
     let rect_size = [r.size.width, r.size.height];
 
     let vertex = |i: usize| ImageVertex {
@@ -256,6 +265,39 @@ pub(crate) fn upload_rgba8_srgb(
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
+/// Decode `bytes` (as `encoding`) and upload the result to a texture,
+/// `None` on either a decode failure or a decoded size past `device`'s
+/// `max_texture_dimension_2d` limit. A free function (not an `ImageTextures`
+/// method) so [`ImageTextures::resolve`] can cache this `None` itself — see
+/// that method's negative-cache note (#331).
+fn decode_and_upload_image(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoding: &ImageEncoding,
+    bytes: &[u8],
+) -> Option<wgpu::TextureView> {
+    let format = match encoding {
+        ImageEncoding::Png => mkui_runtime::ImageFormat::Png,
+        ImageEncoding::WebP => mkui_runtime::ImageFormat::WebP,
+    };
+    let decoded = mkui_core::image::decode_rgba8(bytes, format).ok()?;
+    // `create_texture` validation panics on a dimension past the device's
+    // advertised limit (8192 on the default limit set) rather than
+    // returning an error — guard it here instead of letting a too-large
+    // decoded image panic the whole frame.
+    let max_dim = device.limits().max_texture_dimension_2d;
+    if decoded.width > max_dim || decoded.height > max_dim {
+        return None;
+    }
+    Some(upload_rgba8_srgb(
+        device,
+        queue,
+        decoded.width,
+        decoded.height,
+        &decoded.rgba,
+    ))
+}
+
 /// Resolves [`ImageSource`]s to drawable bind groups: decodes and caches an
 /// `Encoded` source's texture on first use (keyed by its `cache_key`), and
 /// looks up a `Host` source's already-registered texture by handle.
@@ -266,7 +308,12 @@ pub(crate) fn upload_rgba8_srgb(
 pub(crate) struct ImageTextures {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    decoded: HashMap<u64, wgpu::BindGroup>,
+    // `None` is a negative-cache entry: a `cache_key` whose decode already
+    // failed once (bad bytes, or a decoded size past the device's
+    // `max_texture_dimension_2d`). Without it, a permanently-broken image
+    // re-runs its full decode attempt every single frame forever instead of
+    // once (#331).
+    decoded: HashMap<u64, Option<wgpu::BindGroup>>,
     host: HashMap<u64, wgpu::BindGroup>,
     next_host_handle: u64,
 }
@@ -337,6 +384,12 @@ impl ImageTextures {
     /// `mkui_core::components::Image::from_encoded`'s construction-time
     /// validation but somehow fail here regardless. Either way the caller
     /// skips drawing that one primitive rather than panicking the frame.
+    ///
+    /// An `Encoded` decode failure is itself cached (as `None`, keyed by
+    /// `cache_key`) rather than retried: without this, a permanently-broken
+    /// image (bad bytes, or a decoded size past the device's texture
+    /// dimension limit) would re-run its full decode attempt every single
+    /// frame forever instead of once (#331).
     pub(crate) fn resolve(
         &mut self,
         device: &wgpu::Device,
@@ -351,34 +404,14 @@ impl ImageTextures {
                 cache_key,
             } => {
                 if !self.decoded.contains_key(cache_key) {
-                    let format = match encoding {
-                        ImageEncoding::Png => mkui_runtime::ImageFormat::Png,
-                        ImageEncoding::WebP => mkui_runtime::ImageFormat::WebP,
-                    };
-                    let decoded = mkui_core::image::decode_rgba8(bytes, format).ok()?;
-                    // `create_texture` validation panics on a dimension past
-                    // the device's advertised limit (8192 on the default
-                    // limit set) rather than returning an error — guard it
-                    // here instead of letting a too-large decoded image
-                    // panic the whole frame.
-                    let max_dim = device.limits().max_texture_dimension_2d;
-                    if decoded.width > max_dim || decoded.height > max_dim {
-                        return None;
-                    }
-                    let view = upload_rgba8_srgb(
-                        device,
-                        queue,
-                        decoded.width,
-                        decoded.height,
-                        &decoded.rgba,
-                    );
-                    let bind_group = self.build_bind_group(device, &view);
+                    let bind_group = decode_and_upload_image(device, queue, encoding, bytes)
+                        .map(|view| self.build_bind_group(device, &view));
                     if self.decoded.len() >= DECODED_TEXTURE_CACHE_CAP {
                         self.decoded.clear();
                     }
                     self.decoded.insert(*cache_key, bind_group);
                 }
-                self.decoded.get(cache_key)
+                self.decoded.get(cache_key).and_then(Option::as_ref)
             }
         }
     }
@@ -450,6 +483,18 @@ mod tests {
     }
 
     #[test]
+    fn image_vertices_clamps_corner_radius_to_half_the_shorter_side() {
+        // Shorter side is 8.0 (height); an oversized 100.0 radius clamps to
+        // 4.0 — the `rounded_rect_path_clamps_radius_to_half_the_shorter_side`
+        // regression test's counterpart for Image (#331).
+        let rect = Rect::new(Point::new(0.0, 0.0), Size::new(20.0, 8.0));
+        let verts = image_vertices(&placed(rect, [0.0, 0.0], [1.0, 1.0], 100.0), 200.0, 200.0);
+        for v in &verts {
+            assert_eq!(v.corner_radius, 4.0);
+        }
+    }
+
+    #[test]
     fn image_vertices_local_pos_spans_zero_to_rect_size() {
         let rect = Rect::new(Point::new(5.0, 5.0), Size::new(40.0, 20.0));
         let verts = image_vertices(&placed(rect, [0.0, 0.0], [1.0, 1.0], 0.0), 200.0, 200.0);
@@ -471,5 +516,58 @@ mod tests {
             4,
             "two triangles must share exactly 4 distinct corners"
         );
+    }
+
+    // ---- GPU acceptance test (#331): decode-failure negative cache --------
+    //
+    // `resolve` needs a real `wgpu::Device`/`Queue` to exercise, so this
+    // reuses the #106 surfaceless `OffscreenRenderer` harness the same way
+    // `backdrop::tests::gpu` and `embedded::tests::gpu` do.
+    #[cfg(feature = "gpu-tests")]
+    mod gpu {
+        use super::super::*;
+        use crate::render::offscreen::OffscreenRenderer;
+
+        fn host(width: u32, height: u32) -> OffscreenRenderer {
+            OffscreenRenderer::new(width, height).expect(
+                "offscreen adapter/device must be available on the CI Vulkan/Lavapipe runner",
+            )
+        }
+
+        #[test]
+        fn resolve_caches_a_decode_failure_instead_of_retrying_it_every_frame() {
+            let renderer = host(8, 8);
+            let mut textures = ImageTextures::new(renderer.device());
+            let source = ImageSource::Encoded {
+                encoding: ImageEncoding::Png,
+                bytes: std::sync::Arc::from(b"not a png".as_slice()),
+                cache_key: 42,
+            };
+
+            assert!(
+                textures
+                    .resolve(renderer.device(), renderer.queue(), &source)
+                    .is_none(),
+                "invalid bytes must fail to resolve"
+            );
+            assert_eq!(
+                textures.decoded.len(),
+                1,
+                "the failed decode must be cached, not left unrecorded"
+            );
+            assert!(
+                matches!(textures.decoded.get(&42), Some(None)),
+                "a decode failure's cache entry is `None` (negative cache), not absent"
+            );
+
+            // A second resolve on the same `cache_key` must hit that
+            // negative-cache entry rather than re-running the decode
+            // attempt: the cache must not grow, and the result stays
+            // `None`.
+            assert!(textures
+                .resolve(renderer.device(), renderer.queue(), &source)
+                .is_none());
+            assert_eq!(textures.decoded.len(), 1);
+        }
     }
 }
