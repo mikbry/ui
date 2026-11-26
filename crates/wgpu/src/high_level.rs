@@ -222,12 +222,41 @@ impl Mkui {
     /// criterion #18) routes through this so CI can validate the bridge
     /// without a display server.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn run(mut self) -> Result<(), MkuiError> {
+    pub fn run(self) -> Result<(), MkuiError> {
         let event_loop = winit::event_loop::EventLoop::new()
             .map_err(|e| MkuiError::initialization(format!("event loop init failed: {e}")))?;
 
-        let mut app = if let (Some(core), Some(registry)) = (self.core.take(), self.registry.take())
-        {
+        let mut app = self.into_app();
+
+        if std::env::var_os("HEADLESS").is_some() {
+            app = app.with_headless(true);
+        }
+
+        event_loop
+            .run_app(&mut app)
+            .map_err(|e| MkuiError::rendering(format!("event loop run failed: {e}")))
+    }
+
+    /// Resolve `self` into the live [`WgpuApp`] `run` hands to the event
+    /// loop — factored out of `run` so the text-system / `slug_font_id`
+    /// resolution logic is unit-testable without starting a real winit
+    /// event loop.
+    ///
+    /// Both construction paths apply an explicitly-supplied text system
+    /// and/or `slug_font_id` (#311 review follow-up): before this fix, the
+    /// `with_scene` escape-hatch path (the `else` arm below) took `self.app`
+    /// as-is, discarding whatever `with_slug_font` / a custom text system
+    /// had set on `self` — so `Mkui::with_scene(scene).with_slug_font(...)`
+    /// silently had no effect, even though [`Renderer::render`] draws
+    /// `WgpuApp::scene`/`WgpuApp::text_system` identically regardless of
+    /// which constructor built the app. There is no reason `with_scene`
+    /// should support less than the declarative path here, so both arms
+    /// now apply the same selection instead of only the `core`-tree one.
+    ///
+    /// [`Renderer::render`]: crate::render::Renderer::render
+    #[cfg(not(target_arch = "wasm32"))]
+    fn into_app(mut self) -> WgpuApp {
+        if let (Some(core), Some(registry)) = (self.core.take(), self.registry.take()) {
             // Retain an explicitly-supplied text system across `run` (#66) —
             // the declarative path must not silently swap in the bitmap default
             // when a custom/composite text system was provided.
@@ -250,16 +279,14 @@ impl Mkui {
             };
             app
         } else {
-            self.app
-        };
-
-        if std::env::var_os("HEADLESS").is_some() {
-            app = app.with_headless(true);
+            let mut app = self.app;
+            if let Some(text_system) = self.text_system.take() {
+                app.set_text_system(text_system);
+            }
+            #[cfg(feature = "slug")]
+            app.set_slug_font_id(self.slug_font_id.take());
+            app
         }
-
-        event_loop
-            .run_app(&mut app)
-            .map_err(|e| MkuiError::rendering(format!("event loop run failed: {e}")))
     }
 }
 
@@ -391,6 +418,54 @@ mod tests {
         assert!(
             mkui.core.is_none(),
             "with_scene must not allocate a runtime core; it's the raw-scene escape hatch"
+        );
+    }
+
+    /// #311 review follow-up regression. Before this fix, `into_app`'s
+    /// `with_scene` branch (`run`'s `else { self.app }` arm) took
+    /// `self.app` as-is, discarding whatever `with_slug_font` had set on
+    /// `self` — so `Mkui::with_scene(scene).with_slug_font(ts, font_id)`
+    /// compiled, ran, and silently stayed on the bitmap lane. `Renderer`
+    /// draws `WgpuApp::scene`/`WgpuApp::text_system` the same way
+    /// regardless of which `Mkui` constructor built the app, so there is
+    /// no reason `with_scene` should support less than the declarative
+    /// path here.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn with_scene_applies_with_slug_font_through_into_app() {
+        use mkui_text::{LayoutSpec, TextRenderClass};
+
+        let mut text_system = CompositeTextSystem::new();
+        let font_id = text_system
+            .register_sfnt_face(
+                std::sync::Arc::from(TEST_ABEL_TTF.to_vec().into_boxed_slice()),
+                0,
+            )
+            .expect("Abel registers");
+
+        let scene = Scene::new(Size::new(640.0, 480.0));
+        let app = Mkui::with_scene(scene)
+            .with_slug_font(text_system, font_id)
+            .expect("Abel is Slug-class")
+            .into_app();
+
+        assert_eq!(
+            app.slug_font_id(),
+            Some(font_id),
+            "with_scene().with_slug_font(...) must still select the font — \
+             the with_scene escape hatch must not silently drop it"
+        );
+
+        let spec = LayoutSpec {
+            font_id,
+            ..LayoutSpec::default()
+        };
+        let runs = app.text_system().layout("W", &spec, None);
+        assert!(
+            runs.iter().any(|r| r.render_class == TextRenderClass::Slug),
+            "with_scene().with_slug_font(...) must install the exact text \
+             system the font was registered on, not leave the bitmap \
+             default text system in place"
         );
     }
 }

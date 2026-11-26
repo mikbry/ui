@@ -196,11 +196,23 @@ pub struct NodeLayout {
 /// wrapped line count against it, so the rect height it reserves and
 /// what `tessellate_text` actually draws can never disagree. No `Debug`
 /// derive: `&dyn TextSystem` isn't `Debug`.
+///
+/// `slug_font_id` (#311 review follow-up) is the same `FontId` the render
+/// pass's `Renderer::set_slug_font` selects, or `None` for the bitmap
+/// default. It must be threaded through here too, not just to the renderer:
+/// `WgpuLeafMeasure::measure_text_inner` lays out each `Text` node's wrap
+/// rect against *some* font's metrics before a single pixel is painted, and
+/// if that measurement always assumed `FontId::BITMAP` while the render
+/// pass actually draws Slug glyphs (whose widths differ from bitmap's), a
+/// node's reserved rect can be narrower than what Slug needs — visibly
+/// truncating or wrapping differently than measured, even though the
+/// renderer itself never dropped a glyph.
 #[derive(Clone, Copy)]
 pub struct WalkOptions<'a> {
     pub viewport: Size,
     pub theme: WgpuTheme,
     pub text_system: &'a dyn TextSystem,
+    pub slug_font_id: Option<FontId>,
 }
 
 /// Output of one [`walk_app_tree`] pass: the freshly built scene, the
@@ -316,11 +328,22 @@ const BUTTON_MIN_WIDTH_PX: f32 = 64.0;
 pub struct WgpuLeafMeasure<'a> {
     pub theme: &'a WgpuTheme,
     pub text_system: &'a dyn TextSystem,
+    /// Mirrors [`WalkOptions::slug_font_id`] (#311 review follow-up): the
+    /// `FontId` this measurer lays out against, or `None` for
+    /// `FontId::BITMAP`. Must agree with whatever `Renderer::set_slug_font`
+    /// actually selects for the render pass — a measurer that always
+    /// assumed bitmap metrics while Slug (different glyph widths) painted
+    /// the result could reserve a rect too narrow for what Slug renders,
+    /// silently truncating or re-wrapping text the walker never flagged as
+    /// overflowing.
+    pub slug_font_id: Option<FontId>,
 }
 
 impl WgpuLeafMeasure<'_> {
     /// Measures `content` the same way [`wrapped_line_count`]'s pre-#287
-    /// call site did: identical [`LayoutSpec`] (bitmap-only `font_id`,
+    /// call site did: identical [`LayoutSpec`] (`font_id` matches
+    /// [`Self::slug_font_id`], falling back to the bitmap-only default when
+    /// `None` — #311 review follow-up; previously always bitmap-only),
     /// `max_lines: None` so this call learns the *unclamped* line count),
     /// identical width constraint. `max_width_px: Some(w)` (this node is
     /// being sized within a known box, the common case for a block `Text`)
@@ -346,7 +369,7 @@ impl WgpuLeafMeasure<'_> {
             TextAlign::Start
         };
         let spec = LayoutSpec {
-            font_id: FontId::BITMAP,
+            font_id: self.slug_font_id.unwrap_or(FontId::BITMAP),
             font_generation: 0,
             font_size_px: font_size,
             line_height_px: line_height,
@@ -581,6 +604,7 @@ fn walk_app_tree_inner(
     let measure = WgpuLeafMeasure {
         theme: &options.theme,
         text_system: options.text_system,
+        slug_font_id: options.slug_font_id,
     };
     let layout_result = mkui_layout::compute_layout(
         tree,
@@ -1471,6 +1495,7 @@ mod tests {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -1535,6 +1560,7 @@ mod tests {
             viewport,
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
         let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
 
@@ -1640,6 +1666,88 @@ mod tests {
         assert!(
             out.hit_tests.iter().all(|h| h.action.is_some()),
             "action must propagate to every hit entry registered for the button"
+        );
+    }
+
+    /// #311 review follow-up regression. Before this fix,
+    /// `WgpuLeafMeasure::measure_text_inner` hardcoded `FontId::BITMAP` in
+    /// its `LayoutSpec` regardless of which font `Renderer::set_slug_font`
+    /// actually selected for painting — so a `Button` label measured its
+    /// reserved width against bitmap's fixed 5×7 glyph cells while Slug
+    /// (Abel, a proportional face with different glyph widths) drew into
+    /// that same rect. Reported repro: `Button::new("WWWWWWWWWW")` in an
+    /// 800px viewport measured at bitmap's narrower width, then the text
+    /// system's own `max_width_px` ellipsis path (#182) kicked in against
+    /// that too-narrow rect, rendering `"WWWWWWW…"` instead of the full
+    /// label — a visible truncation even though every glyph itself
+    /// extracted fine. This both proves measurement now changes when a
+    /// Slug font is selected, and that the full label survives end to end
+    /// through the exact `expand_slug_text` seam `Renderer::render` drives.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "slug"))]
+    #[test]
+    fn button_measurement_honors_the_selected_slug_font_not_bitmap_metrics() {
+        use mkui_text::CompositeTextSystem;
+        use mkui_vector2d::{SlugBlobCache, SlugConfig};
+
+        // Abel (Google Fonts, SIL Open Font License 1.1) — test-only
+        // fixture, never bundled into this crate's shipped (non-test) code.
+        const ABEL: &[u8] = include_bytes!("../../text/tests/fixtures/abel/Abel-Regular.ttf");
+
+        let mut text_system = CompositeTextSystem::new();
+        let font_id = text_system
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .expect("Abel registers");
+
+        let label = "WWWWWWWWWW";
+        let core = CoreMkui::new().child(Button::new(label).variant(ButtonVariant::Primary));
+        let registry = WgpuRendererRegistry::with_defaults();
+
+        let bitmap_options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+            slug_font_id: None,
+        };
+        let bitmap_out =
+            walk_app_tree(core.tree(), &registry, &bitmap_options).expect("walk (bitmap)");
+        let bitmap_width = text_primitives(&bitmap_out.scene)[0].rect.size.width;
+
+        let slug_options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+            slug_font_id: Some(font_id),
+        };
+        let slug_out = walk_app_tree(core.tree(), &registry, &slug_options).expect("walk (slug)");
+        let slug_width = text_primitives(&slug_out.scene)[0].rect.size.width;
+
+        assert!(
+            (slug_width - bitmap_width).abs() > 1.0,
+            "the walker's measured button-label width must change once a \
+             Slug font is selected (bitmap={bitmap_width}, slug={slug_width}) \
+             — an unchanged width means measurement is still ignoring \
+             `slug_font_id` and ignoring it is exactly the bug this test \
+             guards against"
+        );
+
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let expanded = crate::slug_text::expand_slug_text(
+            &slug_out.scene.primitives,
+            font_id,
+            &text_system,
+            &mut cache,
+        );
+        let slug_glyphs = expanded
+            .iter()
+            .filter(|p| matches!(p, Primitive::SlugGlyph(_)))
+            .count();
+        assert_eq!(
+            slug_glyphs,
+            label.chars().count(),
+            "every character of the button label must survive as a Slug \
+             glyph — fewer means the walker's rect (measured against \
+             `slug_font_id`) was still too narrow for Abel's real glyph \
+             widths and the label got ellipsized/truncated"
         );
     }
 
@@ -2174,6 +2282,7 @@ mod tests {
             viewport: Size::new(800.0, 600.0),
             theme,
             text_system: &text_system,
+            slug_font_id: None,
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -2336,6 +2445,7 @@ mod tests {
                     viewport,
                     theme: WgpuTheme::default(),
                     text_system: &text_system,
+                    slug_font_id: None,
                 };
                 let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
 
@@ -2490,6 +2600,7 @@ mod tests {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
 
         let mut tree_without_badge = AppTree::new();
@@ -2577,6 +2688,7 @@ mod tests {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
 
         let mut tree = AppTree::new();
@@ -2625,6 +2737,7 @@ mod tests {
             viewport: Size::new(800.0, 600.0),
             theme: WgpuTheme::default(),
             text_system: &text_system,
+            slug_font_id: None,
         };
 
         let mut baseline_tree = AppTree::new();
@@ -2676,6 +2789,7 @@ mod tests {
             viewport,
             theme: WgpuTheme::default(),
             text_system,
+            slug_font_id: None,
         }
     }
 
@@ -2873,6 +2987,7 @@ mod tests {
             viewport,
             theme: theme_b,
             text_system: &text_system,
+            slug_font_id: None,
         };
 
         let (out, stats) =

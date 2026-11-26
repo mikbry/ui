@@ -370,15 +370,29 @@ impl WgpuApp {
     /// Select the `FontId` component text should route through the Slug
     /// lane against, or `None` to fall back to the bitmap lane (#311). Takes
     /// effect the next time `resumed` constructs (or reconstructs) the
-    /// native `Renderer`, which reads this via [`Renderer::set_slug_font`].
+    /// native `Renderer`, which reads this via [`Renderer::set_slug_font`] —
+    /// and immediately for layout, via the same field threaded into
+    /// [`WgpuLeafMeasure`](crate::walker::WgpuLeafMeasure) through
+    /// [`WalkOptions`] on the next rebuild.
     /// `font_id` must already be registered on whatever [`TextSystem`]
     /// `self.text_system` resolves to — this setter does not itself swap
     /// the text system, so pair it with [`WgpuApp::set_text_system`] (or
     /// construct via [`WgpuApp::with_app_tree_and_text_system`]) when
     /// `font_id` isn't already registered on the current one.
+    ///
+    /// Also flushes the per-subtree [`WalkCache`] (#229), same reasoning as
+    /// [`WgpuApp::set_text_system`]: a cached subtree's `Text` primitives
+    /// were measured against the *previous* font's metrics (bitmap, or a
+    /// different Slug face), and nothing about that measurement is visible
+    /// in `AppTree::subtree_revision` — reusing it after this swap would
+    /// paint stale geometry sized for the old font.
     #[cfg(feature = "slug")]
     pub fn set_slug_font_id(&mut self, font_id: Option<FontId>) {
         self.slug_font_id = font_id;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.walk_cache = WalkCache::new();
+        }
     }
 
     pub fn theme(&self) -> &WgpuTheme {
@@ -555,6 +569,15 @@ impl WgpuApp {
             viewport: self.scene.viewport,
             theme: self.theme,
             text_system: self.text_system.as_ref(),
+            // #311 review follow-up: the walker must measure against the
+            // same font the render pass actually paints with, not always
+            // the bitmap default — otherwise a wider/narrower Slug face can
+            // silently truncate or re-wrap text the walker measured against
+            // bitmap metrics.
+            #[cfg(feature = "slug")]
+            slug_font_id: self.slug_font_id,
+            #[cfg(not(feature = "slug"))]
+            slug_font_id: None,
         };
         let output = {
             let core_ref = core.borrow();
