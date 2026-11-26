@@ -35,14 +35,28 @@ pub fn arc_to_cubics(
     if rx == 0.0 || ry == 0.0 {
         return vec![(start, end, end)];
     }
-    let rx = rx.abs();
-    let ry = ry.abs();
-    let phi = x_axis_rotation_deg.to_radians();
+
+    // Everything below runs in `f64`, not `f32`. A large-radius, shallow
+    // arc (a chord tiny relative to its radius — e.g. radius `1e8`, chord
+    // `10`) needs to resolve a center offset that differs from the radius
+    // by only a handful of parts in `1e-8` (the sagitta). `f32`'s ~7
+    // decimal digits of precision can't represent that at all once the
+    // magnitude reaches `1e8`: the center and every angle derived from it
+    // come out wrong by a visible amount (observed: a `1e8`-radius arc
+    // over a 10-unit chord missed its endpoint by ~2.5 units). `f64`'s ~15
+    // digits comfortably separates the two scales. Only the final control
+    // points/endpoint are narrowed back to `f32`, at the public API
+    // boundary (`Vec2` is `f32`).
+    let rx = (rx as f64).abs();
+    let ry = (ry as f64).abs();
+    let phi = (x_axis_rotation_deg as f64).to_radians();
     let (sin_phi, cos_phi) = phi.sin_cos();
+    let (x1, y1) = (start.x as f64, start.y as f64);
+    let (x2, y2) = (end.x as f64, end.y as f64);
 
     // F.6.5 step 1: (x1', y1') = R(-phi) * (start - end) / 2
-    let dx2 = (start.x - end.x) / 2.0;
-    let dy2 = (start.y - end.y) / 2.0;
+    let dx2 = (x1 - x2) / 2.0;
+    let dy2 = (y1 - y2) / 2.0;
     let x1p = cos_phi * dx2 + sin_phi * dy2;
     let y1p = -sin_phi * dx2 + cos_phi * dy2;
 
@@ -72,8 +86,8 @@ pub fn arc_to_cubics(
     let cyp = coef * (-ry * x1p / rx);
 
     // step 4: center in the original coordinate space.
-    let cx = cos_phi * cxp - sin_phi * cyp + (start.x + end.x) / 2.0;
-    let cy = sin_phi * cxp + cos_phi * cyp + (start.y + end.y) / 2.0;
+    let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
+    let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
 
     // step 5: start/sweep angles (F.6.5 steps 3-4).
     let ux = (x1p - cxp) / rx;
@@ -83,17 +97,16 @@ pub fn arc_to_cubics(
     let theta1 = angle_between((1.0, 0.0), (ux, uy));
     let mut dtheta = angle_between((ux, uy), (vx, vy));
     if !sweep && dtheta > 0.0 {
-        dtheta -= std::f32::consts::TAU;
+        dtheta -= std::f64::consts::TAU;
     } else if sweep && dtheta < 0.0 {
-        dtheta += std::f32::consts::TAU;
+        dtheta += std::f64::consts::TAU;
     }
 
     // Split into segments of at most 90 degrees for an accurate cubic fit.
-    let segment_count = (dtheta.abs() / (std::f32::consts::FRAC_PI_2))
+    let segment_count = (dtheta.abs() / (std::f64::consts::FRAC_PI_2))
         .ceil()
         .max(1.0) as usize;
-    let seg_sweep = dtheta / segment_count as f32;
-    let mut segments = Vec::with_capacity(segment_count);
+    let seg_sweep = dtheta / segment_count as f64;
     let ellipse = RotatedEllipse {
         cx,
         cy,
@@ -102,10 +115,25 @@ pub fn arc_to_cubics(
         cos_phi,
         sin_phi,
     };
+    let mut segments = Vec::with_capacity(segment_count);
     let mut a0 = theta1;
-    for _ in 0..segment_count {
+    for i in 0..segment_count {
         let a1 = a0 + seg_sweep;
-        segments.push(cubic_for_arc_segment(&ellipse, a0, a1));
+        let (c1, c2, computed_end) = cubic_for_arc_segment(&ellipse, a0, a1);
+        // The parametric reconstruction of the *very last* segment's
+        // on-curve endpoint should equal the authored `end` exactly, up to
+        // floating error — but at extreme radius/chord ratios that error
+        // is still large enough in `f32` terms to visibly miss. Pin just
+        // that endpoint (not the control points, which stay as the now
+        // much more accurate `f64` computation) to the caller's own `end`:
+        // any downstream consumer (a following `L`, a `Z` back to the
+        // subpath's start) depends on it being exact, not merely close.
+        let on_curve_end = if i == segment_count - 1 {
+            end
+        } else {
+            computed_end
+        };
+        segments.push((c1, c2, on_curve_end));
         a0 = a1;
     }
     segments
@@ -113,34 +141,35 @@ pub fn arc_to_cubics(
 
 /// An ellipse centered at `(cx, cy)` with semi-axes `(rx, ry)`, rotated by
 /// `(cos_phi, sin_phi)` — bundled so [`cubic_for_arc_segment`] takes one
-/// argument instead of six.
+/// argument instead of six. `f64` throughout; see [`arc_to_cubics`]'s docs
+/// for why.
 struct RotatedEllipse {
-    cx: f32,
-    cy: f32,
-    rx: f32,
-    ry: f32,
-    cos_phi: f32,
-    sin_phi: f32,
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    cos_phi: f64,
+    sin_phi: f64,
 }
 
 /// Signed angle (radians) from vector `u` to vector `v`.
 ///
 /// `atan2(cross, dot)`, not `acos(dot / (|u||v|))`: for a shallow arc (a
 /// chord tiny relative to its radius) the two vectors are nearly parallel,
-/// `dot / (|u||v|)` lands within `f32` epsilon of `1.0`, and `acos` near its
-/// domain edge amplifies that rounding into a wildly wrong angle (observed:
-/// a 100-radius arc spanning an endpoint just `0.01` away collapsed to
-/// essentially zero sweep). `atan2` has no such singularity at `0`/`±π` and
-/// needs neither a normalization `sqrt` nor the resulting division.
-fn angle_between(u: (f32, f32), v: (f32, f32)) -> f32 {
+/// `dot / (|u||v|)` lands within epsilon of `1.0`, and `acos` near its
+/// domain edge amplifies that rounding into a wildly wrong angle. `atan2`
+/// has no such singularity at `0`/`±π` and needs neither a normalization
+/// `sqrt` nor the resulting division.
+fn angle_between(u: (f64, f64), v: (f64, f64)) -> f64 {
     let cross = u.0 * v.1 - u.1 * v.0;
     let dot = u.0 * v.0 + u.1 * v.1;
     cross.atan2(dot)
 }
 
 /// Cubic Bézier approximation of one `ellipse` arc segment spanning
-/// `[a0, a1]` (radians, `|a1 - a0| <= pi/2`).
-fn cubic_for_arc_segment(ellipse: &RotatedEllipse, a0: f32, a1: f32) -> CubicSegment {
+/// `[a0, a1]` (radians, `|a1 - a0| <= pi/2`). Narrows to `f32` only in the
+/// returned [`Vec2`]s.
+fn cubic_for_arc_segment(ellipse: &RotatedEllipse, a0: f64, a1: f64) -> CubicSegment {
     let &RotatedEllipse {
         cx,
         cy,
@@ -149,29 +178,30 @@ fn cubic_for_arc_segment(ellipse: &RotatedEllipse, a0: f32, a1: f32) -> CubicSeg
         cos_phi,
         sin_phi,
     } = ellipse;
-    let point = |a: f32| -> Vec2 {
+    let point = |a: f64| -> (f64, f64) {
         let (sin_a, cos_a) = a.sin_cos();
         let ex = rx * cos_a;
         let ey = ry * sin_a;
-        Vec2::new(
+        (
             cos_phi * ex - sin_phi * ey + cx,
             sin_phi * ex + cos_phi * ey + cy,
         )
     };
-    let tangent = |a: f32| -> Vec2 {
+    let tangent = |a: f64| -> (f64, f64) {
         let (sin_a, cos_a) = a.sin_cos();
         let dx = -rx * sin_a;
         let dy = ry * cos_a;
-        Vec2::new(cos_phi * dx - sin_phi * dy, sin_phi * dx + cos_phi * dy)
+        (cos_phi * dx - sin_phi * dy, sin_phi * dx + cos_phi * dy)
     };
     let d = a1 - a0;
     let t = 4.0 / 3.0 * (d / 4.0).tan();
-    let p0 = point(a0);
-    let p1 = point(a1);
-    let t0 = tangent(a0);
-    let t1 = tangent(a1);
-    let c1 = Vec2::new(p0.x + t * t0.x, p0.y + t * t0.y);
-    let c2 = Vec2::new(p1.x - t * t1.x, p1.y - t * t1.y);
+    let (p0x, p0y) = point(a0);
+    let (p1x, p1y) = point(a1);
+    let (t0x, t0y) = tangent(a0);
+    let (t1x, t1y) = tangent(a1);
+    let c1 = Vec2::new((p0x + t * t0x) as f32, (p0y + t * t0y) as f32);
+    let c2 = Vec2::new((p1x - t * t1x) as f32, (p1y - t * t1y) as f32);
+    let p1 = Vec2::new(p1x as f32, p1y as f32);
     (c1, c2, p1)
 }
 
@@ -296,5 +326,44 @@ mod tests {
             midpoint_deviation > 0.0 && midpoint_deviation.is_finite(),
             "control point collapsed onto the chord: {c1:?}"
         );
+    }
+
+    #[test]
+    fn a_huge_radius_arc_reaches_its_exact_endpoint() {
+        // Regression (review round 2): `M0,0 A1e8 1e8 0 0 1 10 0`. A
+        // radius of 1e8 over a 10-unit chord needs a center offset that
+        // differs from the radius by only ~1.25e-7 (the sagitta) — `f32`
+        // (~7 decimal digits) cannot represent that distinction once the
+        // magnitude reaches `1e8` at all, so the center (and every angle
+        // derived from it) came out wrong by a visible amount. Observed:
+        // landed at (12.549789, 0) instead of (10, 0). `f64` intermediates
+        // plus pinning the final on-curve point to the authored `end` must
+        // both hold for this to land exactly.
+        let start = Vec2::new(0.0, 0.0);
+        let end = Vec2::new(10.0, 0.0);
+        let segs = arc_to_cubics(start, 1e8, 1e8, 0.0, false, true, end);
+        let (_, _, reached_end) = *segs.last().unwrap();
+        assert_eq!(
+            reached_end, end,
+            "must land exactly on the authored endpoint"
+        );
+    }
+
+    #[test]
+    fn every_segments_control_points_stay_finite_at_extreme_radius() {
+        let segs = arc_to_cubics(
+            Vec2::new(0.0, 0.0),
+            1e8,
+            1e8,
+            0.0,
+            false,
+            true,
+            Vec2::new(10.0, 0.0),
+        );
+        for (c1, c2, end) in segs {
+            assert!(c1.x.is_finite() && c1.y.is_finite());
+            assert!(c2.x.is_finite() && c2.y.is_finite());
+            assert!(end.x.is_finite() && end.y.is_finite());
+        }
     }
 }

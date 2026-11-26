@@ -621,12 +621,21 @@ fn lower_shape(
     };
     // Every individual number parsed so far is finite (`crate::number`'s own
     // checks), but arithmetic on two finite inputs is not necessarily
-    // finite: `x + width` with both at `3e38` overflows `f32`, and an
-    // elliptical arc's radius-correction math (`crate::arc`) can divide by
-    // a radius as small as `1e-30` and overflow the same way. Surface that
+    // finite: `x + width` with both at `3e38` overflows `f32`. Surface that
     // here as a typed rejection instead of letting it reach
     // `encode_vector_path` downstream as an unexplained `NonFinite`.
     if !commands_are_finite(&commands) {
+        return Err(SvgError::NonFiniteGeometry(name.to_string()));
+    }
+    // The CTM's own entries being finite (checked in `walk_shapes`, where
+    // every ancestor transform is also composed in) does not guarantee
+    // *applying* it to this shape's specific points stays finite: e.g.
+    // `transform="scale(3e38, 1)"` on a 2-unit-wide rect finitely composes
+    // into the CTM, but `3e38 * 2` overflows once actually applied. A
+    // caller that reads `Shape::path`/`fill_path` without ever calling
+    // `encode_vector_path` (there is no in-tree consumer yet, see #325)
+    // would otherwise see this only as silently-wrong (infinite) geometry.
+    if !transformed_points_are_finite(&commands, state.ctm) {
         return Err(SvgError::NonFiniteGeometry(name.to_string()));
     }
 
@@ -654,6 +663,15 @@ fn lower_shape(
                     .get(id)
                     .ok_or_else(|| SvgError::UnknownPaintReference(id.clone()))?;
                 let mut g = resolve_gradient(raw, bbox_tuple);
+                // Every individual gradient coordinate parsed as a finite
+                // fraction (`crate::number`'s own checks), but resolving it
+                // against *this* shape's bounding box is more arithmetic
+                // that can overflow the same way raw geometry can: a
+                // `linearGradient x2="3e38"` against a 2-unit-wide `rect`
+                // computes `0 + 3e38 * 2`, which overflows to infinity.
+                if !gradient_kind_is_finite(&g.kind) {
+                    return Err(SvgError::NonFiniteGeometry(name.to_string()));
+                }
                 for stop in &mut g.stops {
                     stop.color = stop.color.with_opacity_multiplied(state.opacity);
                 }
@@ -748,6 +766,41 @@ fn commands_are_finite(commands: &[PathCommand]) -> bool {
         PathCommand::Close => true,
         _ => true,
     })
+}
+
+/// Whether applying `ctm` to every point referenced by `commands` stays
+/// finite. Unlike [`commands_are_finite`] (the raw, pre-transform points),
+/// this is the check that catches a transform whose *entries* are finite
+/// (e.g. `scale(3e38, 1)`, already passed [`is_finite_affine`] in
+/// `walk_shapes`) but which overflows once actually applied to this
+/// shape's specific coordinates.
+fn transformed_points_are_finite(commands: &[PathCommand], ctm: Affine2) -> bool {
+    let finite = |p: Vec2| {
+        let q = ctm.transform_point(p);
+        q.x.is_finite() && q.y.is_finite()
+    };
+    commands.iter().all(|cmd| match *cmd {
+        PathCommand::MoveTo(p) | PathCommand::LineTo(p) => finite(p),
+        PathCommand::QuadTo { control, to } => finite(control) && finite(to),
+        PathCommand::CubicTo {
+            control1,
+            control2,
+            to,
+        } => finite(control1) && finite(control2) && finite(to),
+        PathCommand::Close => true,
+        _ => true,
+    })
+}
+
+/// Whether every coordinate/magnitude in a resolved [`GradientKind`] is
+/// finite — see the `lower_shape` call site for why resolving against a
+/// shape's bounding box can overflow even though every parsed fraction was
+/// finite on its own.
+fn gradient_kind_is_finite(kind: &GradientKind) -> bool {
+    match *kind {
+        GradientKind::Linear { x1, y1, x2, y2 } => [x1, y1, x2, y2].into_iter().all(f32::is_finite),
+        GradientKind::Radial { cx, cy, rx, ry } => [cx, cy, rx, ry].into_iter().all(f32::is_finite),
+    }
 }
 
 /// Build this shape's local (raw SVG-space, pre-flip, pre-CTM) geometry, or
@@ -1232,8 +1285,7 @@ mod tests {
     #[test]
     fn finite_inputs_whose_computed_geometry_overflows_are_rejected() {
         // Every number here is individually finite and in-grammar — the
-        // overflow happens in the *arithmetic* (`x + width`, or an arc's
-        // radius-correction division by a near-zero radius), not at any
+        // overflow happens in the *arithmetic* (`x + width`), not at any
         // single number's parse, so `crate::number`'s own checks can't
         // catch it. This must surface as a typed rejection here rather than
         // reaching `encode_vector_path` downstream as an unexplained
@@ -1243,11 +1295,54 @@ mod tests {
             parse_svg(overflowing_rect).unwrap_err(),
             SvgError::NonFiniteGeometry(element) if element == "rect"
         ));
+    }
 
-        let overflowing_arc = r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 A1e-30 1e-30 0 0 1 10,10"/></svg>"##;
+    #[test]
+    fn an_arc_with_a_radius_too_small_for_f32_degrades_to_a_straight_line_not_an_error() {
+        // `crate::arc`'s radius-correction math now runs in `f64` (review
+        // round 2) specifically so a near-zero-but-representable radius
+        // doesn't overflow. A radius too small even for `f32` to represent
+        // at all (`1e-200` underflows to exactly `0.0` at the `d`
+        // attribute's own number parse, well before `crate::arc` ever runs)
+        // takes the *other* documented escape hatch instead — spec F.6.2's
+        // "a zero radius is equivalent to a straight line" — so this is a
+        // deliberately ordinary shape, not a rejection.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 A1e-200 1e-200 0 0 1 10,10" fill="#000000"/></svg>"##;
+        let doc = parse_svg(xml).unwrap();
+        assert_eq!(doc.shapes.len(), 1);
+    }
+
+    #[test]
+    fn a_finite_transform_that_overflows_this_shapes_points_is_rejected() {
+        // Review round 2 exact repro: `scale(3e38, 1)`'s own entries are
+        // finite (so it isn't caught as a singular/non-finite CTM in
+        // `walk_shapes`), but applying it to this 2-unit-wide rect's own
+        // points overflows (`3e38 * 2`). Must be caught centrally here,
+        // not left for a hypothetical downstream `encode_vector_path` call
+        // that no in-tree consumer makes yet.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect width="2" height="1" transform="scale(3e38,1)"/></svg>"##;
         assert!(matches!(
-            parse_svg(overflowing_arc).unwrap_err(),
-            SvgError::NonFiniteGeometry(element) if element == "path"
+            parse_svg(xml).unwrap_err(),
+            SvgError::NonFiniteGeometry(element) if element == "rect"
+        ));
+    }
+
+    #[test]
+    fn a_resolved_gradient_value_that_overflows_this_shapes_bbox_is_rejected() {
+        // Review round 2 exact repro: a linear gradient's `x2="3e38"` is a
+        // finite fraction on its own, but resolving it against a
+        // width-2 `rect`'s `objectBoundingBox` computes `0 + 3e38 * 2`,
+        // which overflows to infinity.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <rect width="2" height="1" fill="url(#g)"/>
+            <linearGradient id="g" x1="0" y1="0" x2="3e38" y2="0">
+                <stop offset="0" stop-color="#000000"/>
+                <stop offset="1" stop-color="#ffffff"/>
+            </linearGradient>
+        </svg>"##;
+        assert!(matches!(
+            parse_svg(xml).unwrap_err(),
+            SvgError::NonFiniteGeometry(element) if element == "rect"
         ));
     }
 

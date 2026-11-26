@@ -300,6 +300,32 @@ mod tests {
     }
 
     #[test]
+    fn a_huge_radius_arc_is_followed_by_an_exactly_vertical_line() {
+        // Regression (review round 2) exact repro: an arc with a radius
+        // nine orders of magnitude larger than its chord used to miss its
+        // endpoint by several units, so the following `L10,10` came out
+        // diagonal instead of vertical.
+        let cmds = parse_path_data("M0,0 A100000000 100000000 0 0 1 10,0 L10,10").unwrap();
+        let PathCommand::LineTo(final_point) = *cmds.last().unwrap() else {
+            panic!("expected the trailing command to be the L10,10 LineTo");
+        };
+        assert_eq!(final_point, Vec2::new(10.0, 10.0));
+        // The point the arc actually landed on, immediately before that
+        // final line, must be exactly (10, 0) — not merely close — or the
+        // "vertical" claim above is checking the wrong thing.
+        let arc_landing = cmds
+            .iter()
+            .rev()
+            .nth(1)
+            .expect("at least an arc cubic precedes the final LineTo");
+        let landed_at = match *arc_landing {
+            PathCommand::CubicTo { to, .. } => to,
+            other => panic!("expected the arc to lower to a CubicTo, got {other:?}"),
+        };
+        assert_eq!(landed_at, Vec2::new(10.0, 0.0));
+    }
+
+    #[test]
     fn arc_with_coincident_endpoints_is_omitted() {
         let cmds = parse_path_data("M5,5 A10,10 0 0 1 5,5 Z").unwrap();
         assert_eq!(cmds.len(), 2); // MoveTo + Close, no cubic emitted.
