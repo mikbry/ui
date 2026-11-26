@@ -919,7 +919,7 @@ mod tests {
 
             use mkui_vector2d::Vec2;
             use mkui_vector2d_wgpu::{
-                BandRange, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph,
+                BandRange, FillRule, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph,
             };
 
             use super::{assert_close, host, pixel_at};
@@ -937,6 +937,7 @@ mod tests {
                 let line = |p0: Vec2, p2: Vec2| SlugCurve { p0, p1: p2, p2 };
                 Arc::new(SlugGlyph {
                     revision: 1,
+                    fill_rule: FillRule::NonZero,
                     bounds: GlyphBounds {
                         x_min: 0.0,
                         y_min: 0.0,

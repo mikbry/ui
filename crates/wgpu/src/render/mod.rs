@@ -184,6 +184,13 @@ mod card_vector_gpu;
 #[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
 mod shadow_vector_gpu;
 
+/// Pixel regression tests for `VectorPath` fill-rule and local-transform
+/// semantics (#304): same-winding nested contours punch a hole under
+/// even-odd and stay solid under non-zero, and a path-local `Affine2`
+/// actually moves the rendered fill. Same dual gate as [`slug_gpu`].
+#[cfg(all(test, feature = "gpu-tests", feature = "slug"))]
+mod vector_path_fill_rule_gpu;
+
 /// Preferred MSAA sample count for the UI pass.
 ///
 /// **Re-enabled at `4` (#156, closes #95, supersedes #147).** Sprint 6 (#93)
@@ -1409,12 +1416,13 @@ mod tests {
     #[test]
     fn scene_slug_glyphs_collects_only_slug_primitives_in_order() {
         use mkui_vector2d::Vec2;
-        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use mkui_vector2d_wgpu::{FillRule, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
         use std::sync::Arc;
 
         let make = |color: [f32; 4]| PlacedSlugGlyph {
             blob: Arc::new(SlugGlyph {
                 revision: 1,
+                fill_rule: FillRule::NonZero,
                 bounds: GlyphBounds {
                     x_min: 0.0,
                     y_min: 0.0,

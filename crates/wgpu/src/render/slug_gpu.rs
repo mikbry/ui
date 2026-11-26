@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use mkui_vector2d::Vec2;
 use mkui_vector2d_wgpu::{
-    BandRange, GlyphBounds, PlacedSlugGlyph, SlugAdapter, SlugCurve, SlugGlyph,
+    BandRange, FillRule, GlyphBounds, PlacedSlugGlyph, SlugAdapter, SlugCurve, SlugGlyph,
 };
 
 use super::offscreen::{OffscreenRenderer, BYTES_PER_PIXEL};
@@ -65,6 +65,7 @@ fn square_glyph() -> Arc<SlugGlyph> {
     let line = |p0: Vec2, p2: Vec2| SlugCurve { p0, p1: p2, p2 };
     Arc::new(SlugGlyph {
         revision: 1,
+        fill_rule: FillRule::NonZero,
         bounds: GlyphBounds {
             x_min: 0.0,
             y_min: 0.0,

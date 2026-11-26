@@ -11,20 +11,50 @@
 //!    1° angular tolerance (Slug rasterizes quadratics only).
 //! 2. **Bounds are computed, not trusted.** A general caller has no
 //!    provider-resolved ink box, so the band extents are derived from the
-//!    flattened geometry's own control hull.
+//!    flattened geometry's own control hull — of the *transformed* geometry,
+//!    see below.
 //! 3. **The cache key is content-derived.** There is no font identity to key on,
 //!    so [`VectorPathKey`] is a canonical byte serialization of the path
-//!    geometry — deterministic and byte-identical across threads.
+//!    geometry (plus its fill rule and transform, #304) — deterministic and
+//!    byte-identical across threads.
 //!
-//! The fill rule is hard-coded non-zero winding (Sprint 8 §2.3), matching every
-//! existing mkui-wgpu triangulated component. No GPU type appears here; #138
-//! owns the wgpu adapter.
+//! # Fill rule and transform (#304)
+//!
+//! Unlike the glyph lane, this encoder honours [`VectorPath::fill`] and
+//! [`VectorPath::transform`] rather than hard-coding non-zero winding and
+//! ignoring the transform:
+//!
+//! - **Fill rule.** The source [`FillRule`] is carried verbatim into the
+//!   returned [`SlugGlyph::fill_rule`]. The curve/band records themselves are
+//!   rule-agnostic (#304 doesn't change how a band is built); a downstream
+//!   rasterizer (`mkui-vector2d-wgpu`'s Slug shader) reads `fill_rule` to pick
+//!   non-zero vs. even-odd coverage. Two same-winding nested contours
+//!   therefore still accumulate winding ≥ 2 at their overlap — correctly
+//!   *filled* under non-zero and a *hole* under even-odd, decided entirely at
+//!   the rasterizer, not here.
+//! - **Transform order.** [`VectorPath::transform`] is applied to every
+//!   authored point — including cubic control points, *before* subdivision
+//!   (a skew or non-uniform scale does not preserve angles, so the 1°
+//!   tolerance only holds in the space subdivision actually happens in) —
+//!   before flattening, before bounds derivation, and before band
+//!   partitioning. The full pipeline order is: authored point (path-local,
+//!   y-up) → [`Affine2`] → `origin_px`/`scale_px_per_unit` GPU placement
+//!   (`mkui-vector2d-wgpu`) → the adapter's y-flip into screen space. A
+//!   stroke centreline's transform is applied identically by
+//!   [`crate::stroke_expand::stroke_to_fill`] — see that module for how
+//!   stroke width scales (and, under shear/non-uniform scale, skews) with it.
+//! - **Typed rejections.** A non-finite transform field, a transformed point
+//!   that overflows to infinity, or a transform whose linear part has a zero
+//!   determinant (collapses the path to zero area, no inverse) are each
+//!   rejected before any geometry is produced — see [`VectorPathEncodeError`].
+//!
+//! No GPU type appears here; #138 owns the wgpu adapter.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::bezier::{subdivide_cubic, SubdivisionError};
-use crate::path::{PathCommand, Vec2, VectorPath};
+use crate::path::{Affine2, FillRule, PathCommand, Vec2, VectorPath};
 use crate::slug::{build_bands, GlyphBounds, SlugConfig, SlugCurve, SlugGlyph};
 
 /// Errors from encoding an arbitrary vector path. Typed rejections — a cache
@@ -34,6 +64,11 @@ use crate::slug::{build_bands, GlyphBounds, SlugConfig, SlugCurve, SlugGlyph};
 pub enum VectorPathEncodeError {
     /// A coordinate was NaN or infinite. Rejected at the input boundary before
     /// any geometry is produced (Sprint 7 §3.4 canonicalization rationale).
+    /// Covers three moments (#304): a non-finite `transform` field (checked
+    /// before any point is transformed), a non-finite authored coordinate,
+    /// and a transformed point that overflows to infinity (an extreme scale
+    /// applied to a large but finite coordinate) — checked right after that
+    /// point is mapped.
     #[error("path contains a non-finite (NaN or infinite) coordinate")]
     NonFinite,
     /// The path produced no drawable curves (no on-curve geometry).
@@ -46,19 +81,29 @@ pub enum VectorPathEncodeError {
     /// contract, so the encode is rejected instead.
     #[error("cubic subdivision failed: {0}")]
     Subdivision(#[from] SubdivisionError),
+    /// The path's `transform` has a zero-determinant linear part (#304): it
+    /// collapses every point onto a line or a point, which has no interior
+    /// under either fill rule and no inverse for later placement math. Not
+    /// representable; rejected rather than silently producing a degenerate
+    /// (zero-area) blob.
+    #[error("path transform is singular (zero-area linear mapping)")]
+    SingularTransform,
 }
 
 /// Encode an arbitrary [`VectorPath`] into a [`SlugGlyph`] curve/band blob.
 ///
 /// Pure function of `(path, config)`: the same logical input always yields
-/// byte-identical records. Cubics are subdivided to quadratics; NaN/Inf inputs
-/// are rejected up front; the fill rule is non-zero winding regardless of
-/// `path.fill`.
+/// byte-identical records. Cubics are subdivided to quadratics (in the
+/// already-transformed space, see the module docs' transform-order note);
+/// NaN/Inf inputs (authored or transformed) and a singular transform are
+/// rejected up front; `path.fill` is carried verbatim into the returned
+/// [`SlugGlyph::fill_rule`].
 pub fn encode_vector_path(
     path: &VectorPath,
     config: &SlugConfig,
 ) -> Result<SlugGlyph, VectorPathEncodeError> {
     reject_non_finite(path)?;
+    reject_singular_transform(path)?;
 
     let curves = flatten_path_curves(path)?;
     if curves.is_empty() {
@@ -93,6 +138,7 @@ pub fn encode_vector_path(
 
     Ok(SlugGlyph {
         revision: config.revision(),
+        fill_rule: path.fill,
         bounds,
         curves,
         horizontal_bands,
@@ -102,8 +148,28 @@ pub fn encode_vector_path(
     })
 }
 
+/// Reject a transform whose linear part has zero determinant (#304): it
+/// collapses the path to zero area, which neither fill rule can draw and
+/// which has no inverse for later placement math.
+fn reject_singular_transform(path: &VectorPath) -> Result<(), VectorPathEncodeError> {
+    if path.transform.determinant() == 0.0 {
+        return Err(VectorPathEncodeError::SingularTransform);
+    }
+    Ok(())
+}
+
 /// Reject NaN/Inf at the input boundary, before any geometry is produced.
+/// Checks the raw `transform` fields themselves (#304) in addition to the
+/// existing authored-coordinate check — a transformed *point* going
+/// non-finite (e.g. an extreme but individually-finite scale applied to a
+/// large coordinate) is instead caught where it happens, in
+/// [`flatten_path_curves`], since that failure depends on both the transform
+/// and the specific point together.
 fn reject_non_finite(path: &VectorPath) -> Result<(), VectorPathEncodeError> {
+    let Affine2 { a, b, c, d, tx, ty } = path.transform;
+    if ![a, b, c, d, tx, ty].into_iter().all(f32::is_finite) {
+        return Err(VectorPathEncodeError::NonFinite);
+    }
     let finite = |p: Vec2| p.x.is_finite() && p.y.is_finite();
     for cmd in &path.commands {
         let ok = match *cmd {
@@ -123,27 +189,48 @@ fn reject_non_finite(path: &VectorPath) -> Result<(), VectorPathEncodeError> {
     Ok(())
 }
 
-/// Walk the path into a flat quadratic-curve list, subdividing cubics. Lines use
-/// the Slug duplicated-endpoint sentinel; cubics become one or more quadratics.
-/// A no-op cubic (all points at the pen position) is skipped like a no-op quad;
-/// any other subdivision failure aborts the encode with a typed error.
+/// Walk the path into a flat quadratic-curve list, subdividing cubics. Every
+/// authored point is mapped through `path.transform` as it is read (#304) —
+/// including a cubic's control points, before subdivision, so the 1°
+/// subdivision tolerance holds in the space it is actually measured in rather
+/// than being invalidated by a later skew/non-uniform scale. Lines use the
+/// Slug duplicated-endpoint sentinel; cubics become one or more quadratics. A
+/// no-op cubic (all points at the pen position, post-transform) is skipped
+/// like a no-op quad; any other subdivision failure aborts the encode with a
+/// typed error.
 fn flatten_path_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, VectorPathEncodeError> {
+    // Maps a point through `path.transform` and rejects it if that mapping
+    // overflowed to infinity (the transform's own fields were already
+    // checked finite by `reject_non_finite`).
+    let xf = |p: Vec2| -> Result<Vec2, VectorPathEncodeError> {
+        let q = path.transform.transform_point(p);
+        if q.x.is_finite() && q.y.is_finite() {
+            Ok(q)
+        } else {
+            Err(VectorPathEncodeError::NonFinite)
+        }
+    };
+
     let mut curves = Vec::new();
     let mut start = Vec2::ZERO;
     let mut cur = Vec2::ZERO;
     for cmd in &path.commands {
         match *cmd {
             PathCommand::MoveTo(p) => {
+                let p = xf(p)?;
                 start = p;
                 cur = p;
             }
             PathCommand::LineTo(p) => {
+                let p = xf(p)?;
                 if p != cur {
                     curves.push(SlugCurve::line(cur, p));
                 }
                 cur = p;
             }
             PathCommand::QuadTo { control, to } => {
+                let control = xf(control)?;
+                let to = xf(to)?;
                 if !(to == cur && control == cur) {
                     curves.push(SlugCurve::quad(cur, control, to));
                 }
@@ -154,6 +241,9 @@ fn flatten_path_curves(path: &VectorPath) -> Result<Vec<SlugCurve>, VectorPathEn
                 control2,
                 to,
             } => {
+                let control1 = xf(control1)?;
+                let control2 = xf(control2)?;
+                let to = xf(to)?;
                 // A no-op cubic (everything at the pen position) draws nothing,
                 // exactly like the no-op quad above — skip it rather than
                 // surface `DegenerateInput` for a segment with no geometry.
@@ -208,12 +298,13 @@ fn control_hull_bounds(curves: &[SlugCurve]) -> GlyphBounds {
 /// Canonical, content-derived cache key for an arbitrary vector path.
 ///
 /// With no font identity to key on (unlike [`crate::slug::SlugGlyphKey`]), the
-/// key is a deterministic byte serialization of the path's drawing commands.
-/// Two logically-identical paths — built on different threads, in any order —
-/// serialize to byte-identical keys, so equality and hashing are exact and
-/// collision-free. The fill rule and transform are excluded because the encoder
-/// forces non-zero winding and consumes points as authored; only the command
-/// geometry determines the encoded records.
+/// key is a deterministic byte serialization of the path's fill rule,
+/// transform, and drawing commands (#304) — all three now determine the
+/// encoded records, so all three must be part of the key or two
+/// geometrically-identical paths differing only in rule or transform would
+/// wrongly collide in a cache. Two logically-identical paths — built on
+/// different threads, in any order — serialize to byte-identical keys, so
+/// equality and hashing are exact and collision-free.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VectorPathKey {
     canonical: Vec<u8>,
@@ -244,11 +335,25 @@ const TAG_CUBIC: u8 = 3;
 const TAG_CLOSE: u8 = 4;
 
 /// Serialization format version, so a future layout change is distinguishable.
-const KEY_FORMAT_VERSION: u8 = 1;
+/// Bumped to 2 (#304) when the fill rule and transform joined the key.
+const KEY_FORMAT_VERSION: u8 = 2;
+
+/// Fill-rule tag byte for the canonical serialization — stable, like the
+/// command tags above.
+const FILL_RULE_NONZERO: u8 = 0;
+const FILL_RULE_EVEN_ODD: u8 = 1;
 
 fn canonical_bytes(path: &VectorPath) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(KEY_FORMAT_VERSION);
+    out.push(match path.fill {
+        FillRule::NonZero => FILL_RULE_NONZERO,
+        FillRule::EvenOdd => FILL_RULE_EVEN_ODD,
+    });
+    let Affine2 { a, b, c, d, tx, ty } = path.transform;
+    for v in [a, b, c, d, tx, ty] {
+        out.extend_from_slice(&canonical_f32_bits(v).to_le_bytes());
+    }
     out.extend_from_slice(&(path.commands.len() as u32).to_le_bytes());
     for cmd in &path.commands {
         match *cmd {
@@ -364,7 +469,7 @@ impl VectorPathBlobCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path::{Bounds, FillRule};
+    use crate::path::{Affine2, Bounds, FillRule};
 
     fn path(commands: Vec<PathCommand>) -> VectorPath {
         // Bounds are intentionally bogus — the arbitrary-path encoder derives its
@@ -538,6 +643,217 @@ mod tests {
         let neg = VectorPathKey::from_path(&path(vec![PathCommand::MoveTo(Vec2::new(-0.0, -0.0))]))
             .unwrap();
         assert_eq!(pos, neg, "-0.0 and +0.0 are the same logical point");
+    }
+
+    // ---- Fill rule + transform (#304) --------------------------------------
+
+    #[test]
+    fn fill_rule_is_carried_through_to_the_encoded_blob() {
+        let triangle = vec![
+            PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(0.0, 10.0)),
+            PathCommand::Close,
+        ];
+        let nz = VectorPath::new(
+            triangle.clone(),
+            FillRule::NonZero,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        );
+        let eo = VectorPath::new(
+            triangle,
+            FillRule::EvenOdd,
+            Bounds::new(Vec2::ZERO, Vec2::ZERO),
+        );
+        assert_eq!(
+            encode_vector_path(&nz, &config()).unwrap().fill_rule,
+            FillRule::NonZero
+        );
+        assert_eq!(
+            encode_vector_path(&eo, &config()).unwrap().fill_rule,
+            FillRule::EvenOdd
+        );
+    }
+
+    /// The real even-odd-vs-non-zero *rasterization* decision (does a
+    /// same-winding nested contour paint a hole or stay filled) happens on
+    /// the GPU — this encoder only carries `fill_rule` through to the blob
+    /// (see the test above) and leaves the curve/band records themselves
+    /// rule-agnostic. The pixel-level regression test for nested contours
+    /// lives in `mkui-wgpu`'s `gpu-tests,slug`-gated Lavapipe suite
+    /// (`render::vector_path_fill_rule_gpu`), which this test cross-references
+    /// so the two don't drift apart.
+    #[test]
+    fn nested_same_winding_contours_still_encode_as_two_full_contours() {
+        // Two same-winding (both CCW) nested squares: outer 0..100, inner
+        // 25..75. Neither the outer nor inner contour is dropped or merged —
+        // both the non-zero *and* even-odd cases need every edge present;
+        // only the GPU rasterizer's winding test differs.
+        let nested = vec![
+            PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(100.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(100.0, 100.0)),
+            PathCommand::LineTo(Vec2::new(0.0, 100.0)),
+            PathCommand::Close,
+            PathCommand::MoveTo(Vec2::new(25.0, 25.0)),
+            PathCommand::LineTo(Vec2::new(75.0, 25.0)),
+            PathCommand::LineTo(Vec2::new(75.0, 75.0)),
+            PathCommand::LineTo(Vec2::new(25.0, 75.0)),
+            PathCommand::Close,
+        ];
+        let eo = path_with_fill(nested, FillRule::EvenOdd);
+        let glyph = encode_vector_path(&eo, &config()).unwrap();
+        // 4 edges per square (3 explicit `LineTo`s plus the 4th edge `Close`
+        // draws back to the contour's start) = 8 curves total.
+        assert_eq!(glyph.curves.len(), 8);
+        assert_eq!(glyph.fill_rule, FillRule::EvenOdd);
+    }
+
+    fn path_with_fill(commands: Vec<PathCommand>, fill: FillRule) -> VectorPath {
+        VectorPath::new(commands, fill, Bounds::new(Vec2::ZERO, Vec2::ZERO))
+    }
+
+    fn with_transform(mut p: VectorPath, transform: Affine2) -> VectorPath {
+        p.transform = transform;
+        p
+    }
+
+    #[test]
+    fn transform_translates_every_point_before_bounds_are_derived() {
+        let triangle = vec![
+            PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+            PathCommand::LineTo(Vec2::new(0.0, 10.0)),
+            PathCommand::Close,
+        ];
+        let translated = with_transform(
+            path(triangle),
+            Affine2 {
+                tx: 100.0,
+                ty: 200.0,
+                ..Affine2::IDENTITY
+            },
+        );
+        let glyph = encode_vector_path(&translated, &config()).unwrap();
+        assert_eq!(glyph.bounds.x_min, 100.0);
+        assert_eq!(glyph.bounds.y_min, 200.0);
+        assert_eq!(glyph.bounds.x_max, 110.0);
+        assert_eq!(glyph.bounds.y_max, 210.0);
+    }
+
+    #[test]
+    fn transform_scales_cubic_control_points_before_subdivision() {
+        // A 2x uniform scale applied to a cubic: the transformed endpoint
+        // must land at (200, 0), not (100, 0) — proving the transform is
+        // applied to cubic control points too, before `subdivide_cubic` ever
+        // sees them (not re-scaled after flattening).
+        let cubic = with_transform(
+            path(vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::CubicTo {
+                    control1: Vec2::new(0.0, 50.0),
+                    control2: Vec2::new(100.0, 50.0),
+                    to: Vec2::new(100.0, 0.0),
+                },
+            ]),
+            Affine2 {
+                a: 2.0,
+                d: 2.0,
+                ..Affine2::IDENTITY
+            },
+        );
+        let glyph = encode_vector_path(&cubic, &config()).unwrap();
+        assert_eq!(glyph.curves.first().unwrap().p0, Vec2::new(0.0, 0.0));
+        assert_eq!(glyph.curves.last().unwrap().p2, Vec2::new(200.0, 0.0));
+    }
+
+    #[test]
+    fn non_finite_transform_field_is_rejected() {
+        let bad = with_transform(
+            path(vec![
+                PathCommand::MoveTo(Vec2::ZERO),
+                PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+            ]),
+            Affine2 {
+                a: f32::NAN,
+                ..Affine2::IDENTITY
+            },
+        );
+        assert_eq!(
+            encode_vector_path(&bad, &config()).unwrap_err(),
+            VectorPathEncodeError::NonFinite
+        );
+    }
+
+    #[test]
+    fn a_transform_that_overflows_a_point_to_infinity_is_rejected() {
+        let overflowing = with_transform(
+            path(vec![
+                PathCommand::MoveTo(Vec2::ZERO),
+                PathCommand::LineTo(Vec2::new(f32::MAX, 0.0)),
+            ]),
+            Affine2 {
+                a: 2.0,
+                ..Affine2::IDENTITY
+            },
+        );
+        assert_eq!(
+            encode_vector_path(&overflowing, &config()).unwrap_err(),
+            VectorPathEncodeError::NonFinite
+        );
+    }
+
+    #[test]
+    fn singular_transform_is_rejected() {
+        // Rank-1 linear part: every point collapses onto the line y = 2x.
+        let singular = with_transform(
+            path(vec![
+                PathCommand::MoveTo(Vec2::ZERO),
+                PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+            ]),
+            Affine2 {
+                a: 1.0,
+                b: 2.0,
+                c: 2.0,
+                d: 4.0,
+                tx: 0.0,
+                ty: 0.0,
+            },
+        );
+        assert_eq!(
+            encode_vector_path(&singular, &config()).unwrap_err(),
+            VectorPathEncodeError::SingularTransform
+        );
+    }
+
+    #[test]
+    fn distinct_fill_rules_produce_distinct_keys() {
+        let cmds = vec![
+            PathCommand::MoveTo(Vec2::ZERO),
+            PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+        ];
+        let nz =
+            VectorPathKey::from_path(&path_with_fill(cmds.clone(), FillRule::NonZero)).unwrap();
+        let eo = VectorPathKey::from_path(&path_with_fill(cmds, FillRule::EvenOdd)).unwrap();
+        assert_ne!(nz, eo);
+    }
+
+    #[test]
+    fn distinct_transforms_produce_distinct_keys() {
+        let cmds = vec![
+            PathCommand::MoveTo(Vec2::ZERO),
+            PathCommand::LineTo(Vec2::new(1.0, 0.0)),
+        ];
+        let identity = VectorPathKey::from_path(&path(cmds.clone())).unwrap();
+        let translated = VectorPathKey::from_path(&with_transform(
+            path(cmds),
+            Affine2 {
+                tx: 5.0,
+                ..Affine2::IDENTITY
+            },
+        ))
+        .unwrap();
+        assert_ne!(identity, translated);
     }
 
     #[test]

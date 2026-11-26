@@ -20,16 +20,41 @@
 //! stamp simple convex pieces instead of solving a single offset outline with
 //! its self-intersection bookkeeping.
 //!
-//! # Coordinate space and units
+//! # Coordinate space, units, and the local transform (#304)
 //!
-//! Expansion happens entirely in the path's own coordinate space. [`Stroke`]
-//! widths are consumed as lengths in **that** space (nominally pixels — the
-//! screen-space intent of a stroke — when the path is authored in pixels). The
-//! GPU adapter (#138) applies the placement scale to the whole filled outline,
-//! so a stroke scales with zoom exactly like its fill. No GPU type appears here.
+//! Centreline flattening, dashing, offsetting, and join/cap construction all
+//! happen entirely in the path's own **local, untransformed** coordinate
+//! space — [`Stroke`] widths are consumed as lengths in that space (nominally
+//! pixels — the screen-space intent of a stroke — when the path is authored
+//! in pixels), and that arithmetic is unchanged by this section.
+//!
+//! The centreline's [`crate::path::Affine2`] transform is applied exactly
+//! once, at the very end: the generated fill outline carries `path.transform`
+//! verbatim (see this module's private `build_path` helper) rather than
+//! being pre-transformed, so
+//! [`crate::encode::encode_vector_path`] applies it — to the offset edges and
+//! caps/joins alike, not just the centreline — using the identical
+//! transform-order contract documented there. Consequences worth knowing:
+//!
+//! - A uniform scale in `transform` scales the stroke width together with the
+//!   fill, matching SVG's default (`transform` affects `stroke-width` unless
+//!   the author opts out, which this crate does not yet support).
+//! - A non-uniform scale or a shear maps the *locally perpendicular* offset
+//!   used to build each segment's rectangle/join into a direction that is no
+//!   longer perpendicular in the transformed output — the stroke becomes
+//!   direction-dependent in width (thicker along one axis than the other).
+//!   This encoder does not attempt the elliptical offset math that would
+//!   correct for that; it is an accepted limitation of the "simple convex
+//!   pieces" stroker (see the module's opening section), not a bug.
+//! - A transform with a negative determinant (e.g. a flip) reverses every
+//!   piece's winding sense together, uniformly — the "every piece shares one
+//!   winding sense" invariant above survives, just with the opposite sign.
+//!
+//! The GPU adapter (#138) then applies the placement scale on top, so a
+//! stroke scales with zoom exactly like its fill. No GPU type appears here.
 
 use crate::bezier::subdivide_cubic;
-use crate::path::{Bounds, FillRule, PathCommand, Vec2, VectorPath};
+use crate::path::{Affine2, Bounds, FillRule, PathCommand, Vec2, VectorPath};
 use crate::stroke::{DashPattern, LineCap, LineJoin, Stroke};
 
 /// Below this length a direction/segment is treated as degenerate and skipped.
@@ -78,7 +103,7 @@ pub fn stroke_to_fill(path: &VectorPath, stroke: &Stroke) -> VectorPath {
         expand_contour(contour, half, stroke.cap, stroke.join, &mut pieces);
     }
 
-    build_path(pieces)
+    build_path(pieces, path.transform)
 }
 
 /// A flattened contour: a polyline plus whether it is closed (a ring).
@@ -692,8 +717,16 @@ fn ccw(mut pts: Vec<Vec2>) -> Vec<Vec2> {
 }
 
 /// Assemble the convex pieces into one non-zero-fill [`VectorPath`], each piece a
-/// closed sub-contour, with bounds derived from all points.
-fn build_path(pieces: Vec<Vec<Vec2>>) -> VectorPath {
+/// closed sub-contour, with bounds derived from all (still-local, untransformed)
+/// points. Always [`FillRule::NonZero`] regardless of the centreline's own
+/// `fill` — the stroker emits overlapping same-wound convex pieces (see the
+/// module docs), and an even-odd *centreline* fill rule must not leak into the
+/// stroked outline: every piece-overlap at a join would otherwise punch a
+/// spurious hole. `transform` is carried through verbatim, **not** applied
+/// here (see the module's "Coordinate space..." section) — the caller
+/// (`stroke_to_fill`) passes the centreline's own [`Affine2`], and
+/// `encode_vector_path` applies it once when this outline is itself encoded.
+fn build_path(pieces: Vec<Vec<Vec2>>, transform: Affine2) -> VectorPath {
     let mut commands = Vec::new();
     let mut min = Vec2::new(f32::INFINITY, f32::INFINITY);
     let mut max = Vec2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -714,7 +747,9 @@ fn build_path(pieces: Vec<Vec<Vec2>>) -> VectorPath {
     if commands.is_empty() {
         return empty_path();
     }
-    VectorPath::new(commands, FillRule::NonZero, Bounds::new(min, max))
+    let mut out = VectorPath::new(commands, FillRule::NonZero, Bounds::new(min, max));
+    out.transform = transform;
+    out
 }
 
 #[cfg(test)]
@@ -1791,5 +1826,81 @@ mod tests {
         assert!(!out.commands.is_empty());
         assert_ne!(winding(&out, Vec2::new(5.0, 5.0)), 0);
         assert_eq!(winding(&out, Vec2::new(5.0, 10.0)), 0);
+    }
+
+    // ---- Local transform propagation (#304) --------------------------------
+
+    #[test]
+    fn stroke_to_fill_carries_the_centreline_transform_verbatim_not_identity() {
+        let moved = VectorPath {
+            transform: Affine2 {
+                tx: 1000.0,
+                ty: 2000.0,
+                ..Affine2::IDENTITY
+            },
+            ..line(Vec2::ZERO, Vec2::new(10.0, 0.0))
+        };
+        let out = stroke_to_fill(&moved, &Stroke::new(4.0));
+        assert_eq!(
+            out.transform, moved.transform,
+            "the generated outline must carry the centreline's transform, not reset to IDENTITY"
+        );
+    }
+
+    #[test]
+    fn stroke_centreline_transform_translates_the_encoded_outline() {
+        // Integration with `encode_vector_path`, exactly as
+        // `mkui-vector2d-wgpu::encode_stroke` chains the two: a translated
+        // centreline must produce an encoded blob at the translated position,
+        // not the authored one.
+        let moved = VectorPath {
+            transform: Affine2 {
+                tx: 1000.0,
+                ty: 2000.0,
+                ..Affine2::IDENTITY
+            },
+            ..line(Vec2::ZERO, Vec2::new(10.0, 0.0))
+        };
+        let out = stroke_to_fill(&moved, &Stroke::new(4.0));
+        let glyph = encode_vector_path(&out, &SlugConfig::new(2, 2, 1)).unwrap();
+        // Butt-capped 4px stroke of a (0,0)-(10,0) line: a 10x4 rectangle
+        // centered on the centreline, then translated by (1000, 2000).
+        assert_eq!(glyph.bounds.x_min, 1000.0);
+        assert_eq!(glyph.bounds.x_max, 1010.0);
+        assert_eq!(glyph.bounds.y_min, 1998.0);
+        assert_eq!(glyph.bounds.y_max, 2002.0);
+    }
+
+    #[test]
+    fn stroke_outline_stays_non_zero_even_when_the_centreline_is_even_odd() {
+        // The stroker emits overlapping same-wound convex pieces at every
+        // join (see the module docs); leaking an even-odd *centreline* fill
+        // rule into the generated outline would punch a spurious hole at
+        // each overlap. `stroke_to_fill` never reads `path.fill` at all, so
+        // this must hold regardless of it.
+        let square = VectorPath {
+            fill: FillRule::EvenOdd,
+            ..closed_square10()
+        };
+        let stroke = Stroke {
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            ..Stroke::new(4.0)
+        };
+        let out = stroke_to_fill(&square, &stroke);
+        assert_eq!(
+            out.fill,
+            FillRule::NonZero,
+            "a stroked outline is always non-zero, independent of the centreline's fill rule"
+        );
+        // The seam corner's miter apex: segment rectangle and join filler
+        // overlap here (see `closed_seam_dash_wrap_joins_all_styles` above,
+        // which uses this same probe for the same reason). A leaked
+        // even-odd rule would cancel this overlap to a hole.
+        assert_ne!(
+            winding(&out, Vec2::new(-1.5, -1.5)),
+            0,
+            "seam miter apex must stay filled, not cancelled by a leaked even-odd rule"
+        );
     }
 }

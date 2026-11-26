@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mkui_vector2d::{BandRange, GlyphBounds, SlugCurve, SlugGlyph, Vec2};
+use mkui_vector2d::{BandRange, FillRule, GlyphBounds, SlugCurve, SlugGlyph, Vec2};
 use mkui_vector2d_wgpu::{PlacedSlugGlyph, SlugAdapter};
 
 use super::offscreen::{OffscreenRenderer, BYTES_PER_PIXEL};
@@ -73,7 +73,11 @@ fn read_band_table(bytes: &[u8], cursor: &mut usize) -> (Vec<BandRange>, Vec<u32
 }
 
 /// Parse a `.slug` fixture: the public `SlugGlyph::to_le_bytes` layout
-/// (revision, bounds, curves, horizontal table, vertical table). Deliberately
+/// (revision, bounds, curves, horizontal table, vertical table) — which
+/// deliberately does not serialize `SlugGlyph::fill_rule` (#304; see that
+/// method's own docs), so there is nothing to read here either. These are
+/// committed, read-only reference-adapter goldens, always non-zero glyph
+/// outlines, so `fill_rule` is stamped `NonZero` directly. Deliberately
 /// test-local rather than a `from_le_bytes` addition to `mkui-vector2d`'s
 /// public API, which is frozen for this mission.
 fn read_glyph(path: &Path) -> SlugGlyph {
@@ -99,6 +103,7 @@ fn read_glyph(path: &Path) -> SlugGlyph {
     assert_eq!(cursor, bytes.len(), "trailing bytes in {}", path.display());
     SlugGlyph {
         revision,
+        fill_rule: FillRule::NonZero,
         bounds,
         curves,
         horizontal_bands,

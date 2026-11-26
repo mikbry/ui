@@ -14,6 +14,13 @@
 //!
 //! # Attribution (Sprint 7 plan §3.4)
 //!
+//! This lane requires [`crate::path::FillRule::NonZero`] and
+//! [`crate::path::Affine2::IDENTITY`] — a resolved outline's bounds/winding
+//! are trusted verbatim and never recomputed, so anything else is a typed
+//! [`SlugEncodeError`] rejection, not a silent ignore (#304). The general path
+//! lane ([`crate::encode::encode_vector_path`]) supports both an even-odd
+//! fill and an arbitrary local transform.
+//!
 //! The curve/band encoding reproduces the contract of the **Slug** algorithm
 //! by Eric Lengyel (<https://github.com/EricLengyel/Slug>). Lengyel published
 //! the Slug reference encoding into the public domain. This is a from-scratch
@@ -55,7 +62,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::path::{PathCommand, Vec2, VectorPath};
+use crate::path::{Affine2, FillRule, PathCommand, Vec2, VectorPath};
 use mkui_text::{Affine2Fixed, FontId, LayoutRun, VariationSettings};
 
 /// Immutable encoder configuration. Held by the owning [`SlugBlobCache`]; it is
@@ -253,6 +260,13 @@ pub struct BandRange {
 pub struct SlugGlyph {
     /// Encoder revision that produced this blob (from [`SlugConfig::revision`]).
     pub revision: u32,
+    /// The winding rule `curves`/the bands were encoded for (#304). The glyph
+    /// lane ([`encode_slug_glyph`]) always stamps [`FillRule::NonZero`]; the
+    /// general path lane ([`crate::encode::encode_vector_path`]) carries the
+    /// source [`VectorPath::fill`] through verbatim. A consumer packing this
+    /// blob for the GPU must thread the field down to the rasterizer — the
+    /// curve/band records themselves are rule-agnostic.
+    pub fill_rule: FillRule,
     pub bounds: GlyphBounds,
     pub curves: Vec<SlugCurve>,
     pub horizontal_bands: Vec<BandRange>,
@@ -262,10 +276,19 @@ pub struct SlugGlyph {
 }
 
 impl SlugGlyph {
-    /// Deterministic little-endian serialization of the records, provided so
-    /// #66 can persist/pack blobs and so callers can assert byte-identical
-    /// re-encoding. The byte layout is an encoding detail of this contract, not
-    /// a GPU buffer format.
+    /// Deterministic little-endian serialization of the curve/band records,
+    /// provided so #66 can persist/pack blobs and so callers can assert
+    /// byte-identical re-encoding. The byte layout is an encoding detail of
+    /// this contract, not a GPU buffer format — and is a **frozen external
+    /// format**: `docs/reference-harness`'s committed `.slug` fixtures are
+    /// documented as this exact layout (see that directory's `README.md` /
+    /// `PROVENANCE.md`) and are parsed by `mkui-wgpu`'s
+    /// `slug_reference_parity` test with a hand-written cursor reader, not
+    /// this method. `fill_rule` (#304) is deliberately **not** part of this
+    /// serialization — equality/hashing already distinguish it via
+    /// `SlugGlyph`'s `PartialEq` derive, and every existing `.slug` fixture
+    /// predates the field — so adding a byte here would silently desync from
+    /// those committed fixtures without anyone regenerating them.
     pub fn to_le_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.revision.to_le_bytes());
@@ -320,14 +343,37 @@ pub enum SlugEncodeError {
     /// The outline produced no drawable curves.
     #[error("outline is empty: no drawable curves")]
     EmptyOutline,
+    /// The path's fill rule was not [`FillRule::NonZero`] (#304). This lane
+    /// trusts a provider-resolved outline's bounds/winding verbatim and has
+    /// no even-odd rasterization support of its own — use
+    /// [`crate::encode::encode_vector_path`] for an even-odd fill.
+    #[error("the Slug glyph lane only supports the non-zero fill rule")]
+    UnsupportedFillRule,
+    /// The path carried a non-identity local transform (#304). This lane's
+    /// `bounds` are taken as authoritative and never recomputed, so a
+    /// transform applied here would desync the outline from its own bounds —
+    /// use [`crate::encode::encode_vector_path`], which recomputes bounds
+    /// from the transformed geometry.
+    #[error("the Slug glyph lane requires an identity transform")]
+    UnsupportedTransform,
 }
 
 /// Encode a resolved glyph path into a [`SlugGlyph`]. Pure function of
 /// `(path, config)` — same inputs always yield byte-identical records.
+/// Requires [`FillRule::NonZero`] and [`Affine2::IDENTITY`] (a resolved
+/// outline is never re-wound or re-transformed by this lane, #304); anything
+/// else is a typed rejection, not a silent ignore.
 pub fn encode_slug_glyph(
     path: &VectorPath,
     config: &SlugConfig,
 ) -> Result<SlugGlyph, SlugEncodeError> {
+    if path.fill != FillRule::NonZero {
+        return Err(SlugEncodeError::UnsupportedFillRule);
+    }
+    if path.transform != Affine2::IDENTITY {
+        return Err(SlugEncodeError::UnsupportedTransform);
+    }
+
     let curves = flatten_curves(path)?;
     if curves.is_empty() {
         return Err(SlugEncodeError::EmptyOutline);
@@ -367,6 +413,7 @@ pub fn encode_slug_glyph(
 
     Ok(SlugGlyph {
         revision: config.revision(),
+        fill_rule: FillRule::NonZero,
         bounds,
         curves,
         horizontal_bands,
@@ -1100,6 +1147,29 @@ mod tests {
         assert_eq!(err, SlugEncodeError::UnsupportedSegment);
         assert!(cache.is_empty(), "errored encode does not poison the cache");
         assert_eq!(cache.misses(), 0);
+    }
+
+    #[test]
+    fn even_odd_fill_rule_is_a_typed_rejection() {
+        let path = VectorPath {
+            fill: FillRule::EvenOdd,
+            ..golden_path()
+        };
+        let err = encode_slug_glyph(&path, &golden_config()).unwrap_err();
+        assert_eq!(err, SlugEncodeError::UnsupportedFillRule);
+    }
+
+    #[test]
+    fn non_identity_transform_is_a_typed_rejection() {
+        let path = VectorPath {
+            transform: Affine2 {
+                tx: 1.0,
+                ..Affine2::IDENTITY
+            },
+            ..golden_path()
+        };
+        let err = encode_slug_glyph(&path, &golden_config()).unwrap_err();
+        assert_eq!(err, SlugEncodeError::UnsupportedTransform);
     }
 
     #[test]
