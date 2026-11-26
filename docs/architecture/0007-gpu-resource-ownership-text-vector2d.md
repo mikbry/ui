@@ -110,6 +110,35 @@ to the GPU backend choice.
   (`mkui-wgpu-no-slug`, the `feature-slug` job's new no-default-features
   lines) keeps that path from silently rotting now that it's no longer the
   default anyone exercises by accident.
+- **The promotion was made explicit through the declarative bridge on
+  2026-11-26 (#311).** Before this date, `cargo run -p native-showcase
+  --release` already happened to render through the Slug lane — but only
+  because nothing anywhere in `mkui` → `examples/showcase-common` →
+  `examples/native-showcase` pinned `default-features = false` on
+  `mkui-wgpu`, so the 2026-11-17 crate-level default leaked through by
+  accident, with no designed opt-out: `native-showcase` had no
+  `[features]` table at all, so `--no-default-features --features wgpu`
+  was not a valid invocation. #311 replaces the accident with a real
+  default at each layer: `mkui` gains its own `slug` feature, default-on
+  (mirroring `mkui-wgpu`'s own default), forwarded through a *weak*
+  dependency edge (`slug = ["mkui-wgpu?/slug"]` — a no-op unless `wgpu` is
+  also enabled, so it never drags `mkui-wgpu` into a `web`/`console`
+  build), and `examples/showcase-common` / `examples/native-showcase`
+  mirror the same shape one layer at a time. Each crate pins
+  `default-features = false` on its downstream dependency so
+  `--no-default-features --features wgpu` genuinely suppresses `slug`
+  at every layer instead of it leaking back in through whichever
+  dependency's own default happened not to be pinned — CI verifies this
+  (not just a successful compile) by checking whether `mkui-vector2d-wgpu`,
+  the Slug GPU-resource crate `mkui-wgpu` pulls in only when its `slug`
+  feature is active, is present in `cargo tree`'s resolved dependency
+  graph. `console-showcase`/`web-showcase` are
+  unaffected — Slug has no console/web lane, and `mkui-wgpu` never enters
+  their build graph. `atoms-on-wgpu`/`examples/text` keep their own
+  independent, pre-existing
+  `slug` features unchanged (out of scope for #311); `atoms-on-wgpu` and
+  `host-embed-wgpu` have the same accidental-leak bug this entry fixes at
+  the bridge layer, tracked separately as #323.
 
 ### Ordered render-command semantics
 

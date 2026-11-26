@@ -6,7 +6,11 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-mkui = { path = "../../crates/mkui" }
+# `default-features = false`: mkui's own default is `slug`-on (#311). Pinning
+# this here, mirrored one layer up by native-showcase's own dependency on
+# this crate, is what keeps an explicit `--no-default-features --features
+# wgpu` opt-out meaningful at every layer instead of just this one.
+mkui = { path = "../../crates/mkui", default-features = false }
 mkui-core = { path = "../../crates/core" }
 
 # Optional web dependencies
@@ -20,6 +24,10 @@ web-sys = { workspace = true, optional = true }
 mkui-runtime = { path = "../../crates/runtime" }
 
 [features]
+# Slug default-on (#311), mirroring mkui's own default one layer down.
+default = ["slug"]
 web = ["mkui/web", "wasm-bindgen", "web-sys"]
 console = ["mkui/console"]
 wgpu = ["mkui/wgpu"]
+# Forward the Slug vector-glyph lane down to mkui's wgpu backend (#311).
+slug = ["mkui/slug"]

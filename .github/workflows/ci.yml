@@ -233,8 +233,20 @@ jobs:
             args: -p mkui --no-default-features --features web
           - name: mkui-bridge-console
             args: -p mkui --no-default-features --features console
+          # `--no-default-features` here suppresses mkui's own `default =
+          # ["slug"]` (#311): `wgpu` alone (without `--no-default-features`)
+          # still resolves `slug` ON, same as every other consumer that
+          # doesn't explicitly opt out. This leg's behavior flipped from
+          # implicit slug-on to real slug-off in #311 — it's the bitmap/
+          # no-slug bridge-level coverage `native-showcase`'s own
+          # `--no-default-features --features wgpu` opt-out path relies on.
           - name: mkui-bridge-wgpu
             args: -p mkui --no-default-features --features wgpu
+          # The explicit `slug` forward (#311, `slug = ["mkui-wgpu?/slug"]`,
+          # a *weak* dependency feature) — what `native-showcase`'s own
+          # default now exercises through the declarative bridge.
+          - name: mkui-bridge-wgpu-slug
+            args: -p mkui --no-default-features --features "wgpu,slug"
           - name: mkui-bridge-no-default
             args: -p mkui --no-default-features
     steps:
@@ -582,10 +594,47 @@ jobs:
             ${{ runner.os }}-cargo-mkui-examples-
       - name: Build console-showcase (console backend)
         run: cargo build -p console-showcase --locked
-      - name: Build native-showcase (wgpu backend)
-        run: cargo build -p native-showcase --locked
       - name: Build component-gallery (wgpu backend, #310)
         run: cargo build -p component-gallery --locked
+      - name: Build native-showcase (wgpu backend, Slug default)
+        run: cargo build -p native-showcase --locked
+      # Slug promoted to native-showcase's own default (#311): keeps the
+      # explicit bitmap-fallback opt-out path from silently rotting now
+      # that nothing hits it by accident. Mirrors `mkui-wgpu`'s own
+      # `mkui-wgpu-no-slug` test leg one layer up the declarative bridge.
+      - name: Build native-showcase (wgpu backend, --no-default-features)
+        run: cargo build -p native-showcase --no-default-features --features wgpu --locked
+      # A build succeeding above proves neither configuration FAILS to
+      # compile — it does not prove the resolver actually picked the
+      # Slug lane (or didn't), so each step below also asserts against
+      # ground truth via `cargo tree`'s resolved dependency graph: whether
+      # `mkui-vector2d-wgpu` — the Slug GPU-resource crate, pulled in by
+      # `mkui-wgpu` *only* when its `slug` feature is active — is present.
+      # This is pure manifest/lockfile resolution with no compilation
+      # involved, unlike an earlier version of this check that parsed a
+      # verbose build log for `mkui-wgpu`'s rustc invocation: that approach
+      # went stale as soon as a cache-warm runner let cargo skip
+      # recompiling `mkui-wgpu` entirely (it was already built with the
+      # exact same resolved features by the `component-gallery` step
+      # above), so no `Running \`rustc\`` line for it ever appeared to grep
+      # for, regardless of what was actually resolved. `cargo tree -e
+      # features` was tried first but doesn't reliably surface a
+      # weak-dependency feature activation (`mkui-wgpu?/slug`) as an edge
+      # either, so it can't be used for this check.
+      - name: Assert native-showcase default resolves the Slug lane ON
+        run: |
+          set -euo pipefail
+          if ! cargo tree -p native-showcase --locked | grep -q 'mkui-vector2d-wgpu'; then
+            echo "::error::native-showcase's default build no longer resolves mkui-wgpu's slug feature — mkui-vector2d-wgpu missing from the graph (#311 regressed)"
+            exit 1
+          fi
+      - name: Assert native-showcase --no-default-features resolves the Slug lane OFF
+        run: |
+          set -euo pipefail
+          if cargo tree -p native-showcase --no-default-features --features wgpu --locked | grep -q 'mkui-vector2d-wgpu'; then
+            echo "::error::slug leaked into native-showcase's --no-default-features --features wgpu build (bitmap opt-out path broken)"
+            exit 1
+          fi
       - name: Build web-showcase (web backend, native target)
         run: cargo build -p web-showcase --locked
 

@@ -11,15 +11,33 @@ mkui-core = { path = "../core" }
 # Optional dependencies based on features
 mkui-web = { path = "../web", optional = true }
 mkui-console = { path = "../console", optional = true }
-mkui-wgpu = { path = "../wgpu", optional = true }
+# `default-features = false`: `mkui-wgpu`'s own crate default pulls in
+# `slug` (#285). Pinning this here moves the single point of truth for
+# "does a consumer of this crate get Slug" up to *this* crate's own `slug`
+# feature (below) instead of leaving it to whatever `mkui-wgpu`'s crate
+# default happens to be — see the `slug` feature forward for why.
+mkui-wgpu = { path = "../wgpu", optional = true, default-features = false }
 
 # Web-specific deps (only when web feature is enabled)
 wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }
 
 [features]
-default = []
+# `slug` default-on (#311), mirroring `mkui-wgpu`'s own default (#285) one
+# layer up: "every consumer that doesn't explicitly opt out inherits Slug
+# rendering." A consumer gets this for free whenever it depends on this
+# crate with its own default features on (the common case); pinning
+# `default-features = false` on *its* dependency on `mkui` is the real
+# opt-out, same shape as `mkui-wgpu`'s own `--no-default-features`.
+default = ["slug"]
 web = ["mkui-web", "wasm-bindgen", "web-sys"]
 console = ["mkui-console"]
 wgpu = ["mkui-wgpu"]
+# Forward the Slug vector-glyph lane (#66) down to the wgpu backend. The `?`
+# (a *weak* dependency feature) means this only ever turns on `mkui-wgpu`'s
+# `slug` feature if `mkui-wgpu` is already enabled via `wgpu` above — it
+# never pulls `mkui-wgpu` in by itself, so `slug` being part of `default`
+# above stays a no-op for `web`/`console` consumers (no `wgpu` dependency to
+# turn a sub-feature on). wgpu-only — Slug has no web/console lane.
+slug = ["mkui-wgpu?/slug"]
 console_error_panic_hook = ["mkui-web/console_error_panic_hook"]
