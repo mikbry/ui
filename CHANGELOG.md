@@ -8,6 +8,27 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`examples/shadcn-parity` — runnable side-by-side `mkui-web` vs.
+  shadcn/ui parity fixture (#278).** Renders the shared `Card`/`Button`
+  components through the production `mkui-web` DOM renderer next to a
+  pinned shadcn/ui reference (`shadcn-ui/ui@0e5b2e621a9ee4cf6a604bbe6c5c0d5b70561eb4`,
+  `new-york-v4`/`neutral`, component source and class strings reproduced
+  verbatim, not from memory). Covers default/outline/disabled/keyboard-
+  focused `Button` states and light/dark themes at desktop (1280px) and
+  narrow (500px) widths, with no WebGPU requirement. `capture.mjs` is a
+  zero-dependency screenshot workflow (same raw-headless-Chrome pattern as
+  `examples/web-recipe-smoke/check-cascade.mjs`) producing 8 committed
+  baseline PNGs plus a manifest, each gated on an in-page `data-smoke`
+  self-check covering native button semantics, disabled opacity/pointer-
+  events, and card border presence. `src/lib.rs`'s fixture builder is
+  asserted against the shared `AppTree` in a host-side `cargo test`
+  (no browser). The README documents the pinned reference, build/run/
+  screenshot commands, and a behavior/accessibility comparison table
+  recording intentional differences — notably mkui-web's `pointer-events:
+  auto` on disabled buttons (vs. shadcn's `pointer-events-none`) and the
+  Card's lack of shadcn's `data-slot` sub-component structure (tracked in
+  #276).
+
 - **`NodeKind::Card` — the second component promoted into the shared
   contract, plus `Button`'s `disabled` field folded in as the first
   completed case (#270, #245).** `mkui-runtime::tree::NodeKind` gains a

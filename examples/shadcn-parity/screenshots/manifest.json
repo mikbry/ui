@@ -1,0 +1,65 @@
+{
+  "generatedAt": "2026-11-26T10:04:04.210Z",
+  "chrome": "Google Chrome 158.0.8127.88",
+  "platform": "darwin arm64",
+  "shadcnRefSha": "0e5b2e621a9ee4cf6a604bbe6c5c0d5b70561eb4",
+  "deviceScaleFactor": 1,
+  "shots": [
+    {
+      "name": "mkui-light-desktop.png",
+      "page": "mkui",
+      "theme": "light",
+      "width": 1280,
+      "label": "desktop"
+    },
+    {
+      "name": "mkui-light-narrow.png",
+      "page": "mkui",
+      "theme": "light",
+      "width": 500,
+      "label": "narrow"
+    },
+    {
+      "name": "mkui-dark-desktop.png",
+      "page": "mkui",
+      "theme": "dark",
+      "width": 1280,
+      "label": "desktop"
+    },
+    {
+      "name": "mkui-dark-narrow.png",
+      "page": "mkui",
+      "theme": "dark",
+      "width": 500,
+      "label": "narrow"
+    },
+    {
+      "name": "shadcn-light-desktop.png",
+      "page": "shadcn",
+      "theme": "light",
+      "width": 1280,
+      "label": "desktop"
+    },
+    {
+      "name": "shadcn-light-narrow.png",
+      "page": "shadcn",
+      "theme": "light",
+      "width": 500,
+      "label": "narrow"
+    },
+    {
+      "name": "shadcn-dark-desktop.png",
+      "page": "shadcn",
+      "theme": "dark",
+      "width": 1280,
+      "label": "desktop"
+    },
+    {
+      "name": "shadcn-dark-narrow.png",
+      "page": "shadcn",
+      "theme": "dark",
+      "width": 500,
+      "label": "narrow"
+    }
+  ]
+}
