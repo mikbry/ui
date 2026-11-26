@@ -378,6 +378,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "component-gallery"
+version = "0.10.0"
+dependencies = [
+ "mkui",
+ "showcase-common",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2019,6 +2027,7 @@ version = "0.10.0"
 dependencies = [
  "mkui",
  "mkui-core",
+ "mkui-runtime",
  "wasm-bindgen",
  "web-sys",
 ]

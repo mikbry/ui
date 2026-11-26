@@ -13,6 +13,12 @@ mkui-core = { path = "../../crates/core" }
 wasm-bindgen = { workspace = true, optional = true }
 web-sys = { workspace = true, optional = true }
 
+[dev-dependencies]
+# #310 gallery tests lower section builders into a backend-free
+# `mkui_core::components::Mkui` tree and assert on `NodeKind` directly —
+# the same pattern `mkui-core`'s own `components.rs` tests use.
+mkui-runtime = { path = "../../crates/runtime" }
+
 [features]
 web = ["mkui/web", "wasm-bindgen", "web-sys"]
 console = ["mkui/console"]

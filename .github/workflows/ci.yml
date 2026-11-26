@@ -138,7 +138,7 @@ jobs:
       # would otherwise enable all three at once and trip the one-backend
       # `compile_error!` guard (#102). They build package-aware (see the
       # `mkui-examples` job + ADR 0006). #105 owns the wider feature matrix.
-      - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --all-targets --locked -- -D warnings
+      - run: cargo clippy --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery --all-targets --locked -- -D warnings
       # `mkui-wgpu`'s own crate default now includes `slug` (2026-11-17
       # promotion, see its Cargo.toml) — the `--workspace` build above no
       # longer lints `mkui-wgpu`'s `cfg(not(feature = "slug"))` path at all
@@ -189,7 +189,7 @@ jobs:
           # into one build under the #102 one-backend guard; the `mkui-examples`
           # job covers them package-aware.
           - name: workspace-default
-            args: --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase
+            args: --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery
           # Compatible crates: `--all-features` per-crate.
           - name: mkui-core
             args: -p mkui-core --all-features
@@ -547,18 +547,22 @@ jobs:
           exit "$status"
 
   mkui-examples:
-    # The three backend-pinned showcase examples (console / web / wgpu) are
+    # The backend-pinned showcase examples (console / web / wgpu) are
     # excluded from the aggregate `--workspace` jobs because they enable
     # mutually-exclusive `mkui` backends that cannot be unified into one build
     # under the #102 one-backend guard. This job restores their coverage by
     # building each one PACKAGE-AWARE, so a real regression in an example still
     # fails CI.
     #
-    # All three build on the native (host) target — the same target the
+    # All of them build on the native (host) target — the same target the
     # aggregate `--workspace` jobs used before #102, so this is coverage at
     # parity, not new coverage. The actual `wasm32-unknown-unknown` build of
     # the web path lives in the dedicated `wasm32` job below (#121) — kept
     # separate so this job's cache key and native toolchain stay untouched.
+    #
+    # `component-gallery` (#310) joins `native-showcase` here: it pins the
+    # same `wgpu` backend, so it's excluded from the aggregate jobs above for
+    # the identical reason and needs the same package-aware build.
     name: mkui-examples
     needs: changes
     if: needs.changes.outputs.code != 'false'
@@ -580,6 +584,8 @@ jobs:
         run: cargo build -p console-showcase --locked
       - name: Build native-showcase (wgpu backend)
         run: cargo build -p native-showcase --locked
+      - name: Build component-gallery (wgpu backend, #310)
+        run: cargo build -p component-gallery --locked
       - name: Build web-showcase (web backend, native target)
         run: cargo build -p web-showcase --locked
 
@@ -652,7 +658,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-doc-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
-      - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --doc --locked
+      - run: cargo test --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery --doc --locked
 
   cargo-doc:
     # Closes the rustdoc-link drift gap (#127): `test-doc` above runs doctests
@@ -690,7 +696,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-doc-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
-      - run: cargo doc --workspace --no-deps --locked --exclude console-showcase --exclude web-showcase --exclude native-showcase
+      - run: cargo doc --workspace --no-deps --locked --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery
       # `examples/host-embed-wgpu` defaults its own `slug` feature on (#259),
       # which unifies `mkui-wgpu`'s `slug` feature ON across the whole
       # `--workspace` build above — so that invocation no longer builds
@@ -721,7 +727,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-build-release-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
-      - run: cargo build --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --release --locked
+      - run: cargo build --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery --release --locked
 
   msrv:
     # MSRV gate: `Cargo.toml` declares the workspace's minimum supported Rust
@@ -758,7 +764,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-msrv-
       # Backend-pinned examples excluded — see the clippy/test jobs (#102).
-      - run: cargo check --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --locked
+      - run: cargo check --workspace --exclude console-showcase --exclude web-showcase --exclude native-showcase --exclude component-gallery --locked
 
   mkui-py-bindings:
     # The interpreter-LINKED Python binding tests. Two suites live under
