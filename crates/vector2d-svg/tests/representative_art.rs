@@ -56,7 +56,8 @@ fn representative_sample_parses_and_every_shape_lowers_to_drawable_geometry() {
         // commands, the composed CTM, and the y-flip never produce NaN/Inf
         // or a singular transform anywhere in the sample.
         if shape.fill.is_some() {
-            encode_vector_path(&shape.path, &config)
+            let fill_path = shape.fill_path.as_ref().expect("fill is Some");
+            encode_vector_path(fill_path, &config)
                 .unwrap_or_else(|e| panic!("fill failed to encode: {e}"));
         }
         if let Some((stroke, _)) = &shape.stroke {
@@ -112,7 +113,7 @@ fn a_filled_triangle_contains_its_centroid() {
     let doc = parse_svg(xml).unwrap();
     let shape = &doc.shapes[0];
     let config = SlugConfig::new(4, 4, 1);
-    let glyph = encode_vector_path(&shape.path, &config).unwrap();
+    let glyph = encode_vector_path(shape.fill_path.as_ref().unwrap(), &config).unwrap();
 
     // Centroid of the SVG-space triangle (0,0),(30,0),(0,30) is (10,10);
     // after the crate's y-flip that's local point (10, -10), then through

@@ -100,13 +100,19 @@ pub struct ViewBox {
     pub height: f32,
 }
 
-/// One lowered, paintable shape. `path` is already in
-/// `mkui-vector2d`'s y-up convention — see the crate-level y-flip note in
-/// [`crate::transform`].
+/// One lowered, paintable shape. Geometry is already in `mkui-vector2d`'s
+/// y-up convention — see the crate-level y-flip note in [`crate::transform`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Shape {
+    /// The centerline exactly as authored — use this (with `stroke`) to
+    /// stroke the shape. An open subpath (no `Z`) stays open here.
     pub path: VectorPath,
     pub fill: Option<Paint>,
+    /// `path`'s geometry with every open subpath implicitly closed for area
+    /// computation, per SVG's "closed for filling, open for stroking" rule.
+    /// `Some` exactly when `fill` is `Some`; use this one (never `path`) to
+    /// fill the shape.
+    pub fill_path: Option<VectorPath>,
     pub stroke: Option<(Stroke, Paint)>,
 }
 
@@ -157,6 +163,7 @@ pub fn parse_svg(xml: &str) -> Result<Document, SvgError> {
         ctm: Affine2::IDENTITY,
         opacity: 1.0,
         in_defs: false,
+        rendered: true,
     };
     walk_shapes(root, 0, &state, &gradients, &mut seen_ids, &mut shapes)?;
 
@@ -455,6 +462,15 @@ struct Inherited {
     ctm: Affine2,
     opacity: f32,
     in_defs: bool,
+    /// Whether this element (and so far, its ancestors) has a renderable
+    /// CTM. A singular or non-finite composed transform means "this element
+    /// and its children are not rendered" per SVG — but that must **not**
+    /// skip validating the subtree (see the big comment where this is
+    /// computed in [`walk_shapes`]): a `<script>` or any other
+    /// out-of-subset content hidden under `transform="scale(0)"` is still
+    /// rejected, it just never reaches `shapes` if the subtree is otherwise
+    /// clean.
+    rendered: bool,
 }
 
 fn walk_shapes(
@@ -486,14 +502,19 @@ fn walk_shapes(
         None => Affine2::IDENTITY,
     };
     let ctm = compose(state.ctm, local_ctm);
-    if !is_finite_affine(ctm) || ctm.determinant() == 0.0 {
-        // SVG: a non-invertible (here: also non-finite, which the spec
-        // grammar can't even express but overflow can produce) CTM means
-        // "the given element and its children are not rendered" — valid
-        // input, not an error, same as a zero-size shape. Skip this
-        // element's own geometry and its entire subtree.
-        return Ok(());
-    }
+    // SVG: a non-invertible (here: also non-finite, which the spec grammar
+    // can't even express but overflow can produce) CTM means "the given
+    // element and its children are not rendered" — valid input, not an
+    // error, same as a zero-size shape. This must NOT short-circuit
+    // validation of the subtree, though: a document can't smuggle a
+    // `<script>` (or any other out-of-subset content) past the allowlist
+    // just by hiding it under `transform="scale(0)"`. So every element
+    // below is still fully walked, allowlisted, and lowered exactly as if
+    // it were visible — only `shapes.push` at the shape-leaf arm below is
+    // gated on `rendered` ever going false anywhere on the path from the
+    // root.
+    let own_renders = is_finite_affine(ctm) && ctm.determinant() != 0.0;
+    let rendered = state.rendered && own_renders;
 
     let fill = match node.attribute("fill") {
         Some(v) => parse_paint_ref(v).ok_or_else(|| invalid_paint(name, "fill", v))?,
@@ -522,6 +543,7 @@ fn walk_shapes(
         ctm,
         opacity,
         in_defs,
+        rendered,
     };
 
     match name {
@@ -549,7 +571,7 @@ fn walk_shapes(
                 return Err(SvgError::UnsupportedElement(local_name(child).to_string()));
             }
             if let Some(shape) = lower_shape(node, name, &next, gradients)? {
-                if !in_defs {
+                if !in_defs && rendered {
                     shapes.push(shape);
                 }
             }
@@ -597,6 +619,16 @@ fn lower_shape(
     let Some(commands) = shape_commands(node, name)? else {
         return Ok(None); // zero-size shape: valid, just invisible.
     };
+    // Every individual number parsed so far is finite (`crate::number`'s own
+    // checks), but arithmetic on two finite inputs is not necessarily
+    // finite: `x + width` with both at `3e38` overflows `f32`, and an
+    // elliptical arc's radius-correction math (`crate::arc`) can divide by
+    // a radius as small as `1e-30` and overflow the same way. Surface that
+    // here as a typed rejection instead of letting it reach
+    // `encode_vector_path` downstream as an unexplained `NonFinite`.
+    if !commands_are_finite(&commands) {
+        return Err(SvgError::NonFiniteGeometry(name.to_string()));
+    }
 
     // Scope decision: `objectBoundingBox` gradient resolution below uses the
     // control-point convex hull, not the tight geometric bbox of the
@@ -636,20 +668,86 @@ fn lower_shape(
 
     let flipped = flip_commands_y(&commands);
     let flipped_bounds = control_hull_bounds(&flipped).expect("non-empty, checked above");
+    let bounds = Bounds::new(
+        Vec2::new(flipped_bounds.0, flipped_bounds.1),
+        Vec2::new(flipped_bounds.2, flipped_bounds.3),
+    );
+    let transform = flip_ctm(state.ctm);
+    // `path` is the centerline exactly as authored — an open subpath (no
+    // `Z`/implicit `Close`) stays open, which is what a stroke must use
+    // (SVG: an open subpath gets butt/round/square caps at its two ends,
+    // not a synthetic closing edge).
     let path = VectorPath {
-        commands: flipped,
+        commands: flipped.clone(),
         fill: FillRule::NonZero,
-        transform: flip_ctm(state.ctm),
-        bounds: Bounds::new(
-            Vec2::new(flipped_bounds.0, flipped_bounds.1),
-            Vec2::new(flipped_bounds.2, flipped_bounds.3),
-        ),
+        transform,
+        bounds,
     };
+    // `fill_path` is only ever read when `fill` is `Some`: SVG fills an open
+    // subpath as if a straight line closed it back to its start — "a
+    // subpath that is open is implicitly closed for the purposes of
+    // computing the fill, but stays open for the purposes of stroking". A
+    // *separate* `VectorPath` (not a mutation of `path`) keeps that
+    // synthetic edge out of the stroke centerline above.
+    let fill_path = fill.is_some().then(|| VectorPath {
+        commands: close_open_subpaths_for_fill(&flipped),
+        fill: FillRule::NonZero,
+        transform,
+        bounds, // `Close` carries no point of its own; bounds are unchanged.
+    });
 
     if fill.is_none() && stroke.is_none() {
         return Ok(None);
     }
-    Ok(Some(Shape { path, fill, stroke }))
+    Ok(Some(Shape {
+        path,
+        fill,
+        fill_path,
+        stroke,
+    }))
+}
+
+/// Append an implicit `Close` to every subpath in `commands` that the author
+/// didn't already explicitly close — SVG's fill-only closure rule (see
+/// [`lower_shape`]'s `fill_path`). A no-op for a shape that is already
+/// fully closed (`rect`/`circle`/`ellipse`/`polygon`, or a `path` whose
+/// author wrote `Z`).
+fn close_open_subpaths_for_fill(commands: &[PathCommand]) -> Vec<PathCommand> {
+    if commands.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(commands.len() + 1);
+    for (i, cmd) in commands.iter().enumerate() {
+        if i != 0
+            && matches!(cmd, PathCommand::MoveTo(_))
+            && !matches!(out.last(), Some(PathCommand::Close))
+        {
+            out.push(PathCommand::Close);
+        }
+        out.push(*cmd);
+    }
+    if !matches!(out.last(), Some(PathCommand::Close)) {
+        out.push(PathCommand::Close);
+    }
+    out
+}
+
+/// Whether every point referenced by `commands` is finite. See the
+/// [`lower_shape`] call site for why this is checked even though every
+/// individual parsed number already is.
+fn commands_are_finite(commands: &[PathCommand]) -> bool {
+    let finite = |p: Vec2| p.x.is_finite() && p.y.is_finite();
+    commands.iter().all(|cmd| match *cmd {
+        PathCommand::MoveTo(p) | PathCommand::LineTo(p) => finite(p),
+        PathCommand::QuadTo { control, to } => finite(control) && finite(to),
+        PathCommand::CubicTo {
+            control1,
+            control2,
+            to,
+        } => finite(control1) && finite(control2) && finite(to),
+        PathCommand::Close => true,
+        _ => true,
+    })
 }
 
 /// Build this shape's local (raw SVG-space, pre-flip, pre-CTM) geometry, or
@@ -1132,6 +1230,28 @@ mod tests {
     }
 
     #[test]
+    fn finite_inputs_whose_computed_geometry_overflows_are_rejected() {
+        // Every number here is individually finite and in-grammar — the
+        // overflow happens in the *arithmetic* (`x + width`, or an arc's
+        // radius-correction division by a near-zero radius), not at any
+        // single number's parse, so `crate::number`'s own checks can't
+        // catch it. This must surface as a typed rejection here rather than
+        // reaching `encode_vector_path` downstream as an unexplained
+        // `NonFinite`.
+        let overflowing_rect = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect x="3e38" y="0" width="3e38" height="1"/></svg>"##;
+        assert!(matches!(
+            parse_svg(overflowing_rect).unwrap_err(),
+            SvgError::NonFiniteGeometry(element) if element == "rect"
+        ));
+
+        let overflowing_arc = r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 A1e-30 1e-30 0 0 1 10,10"/></svg>"##;
+        assert!(matches!(
+            parse_svg(overflowing_arc).unwrap_err(),
+            SvgError::NonFiniteGeometry(element) if element == "path"
+        ));
+    }
+
+    #[test]
     fn a_singular_transform_renders_nothing_rather_than_erroring() {
         let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
             <rect width="10" height="10" transform="matrix(0,0,0,0,0,0)"/>
@@ -1150,6 +1270,47 @@ mod tests {
         </svg>"##;
         let doc = parse_svg(xml).unwrap();
         assert!(doc.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_singular_transform_does_not_smuggle_out_of_subset_content_past_the_allowlist() {
+        // A document cannot hide a `<script>` (or any other rejected
+        // element/attribute) from validation just by nesting it under a
+        // non-rendering `scale(0)` group — "not rendered" must still mean
+        // "fully validated", not "skipped". This is the regression case
+        // for the real security gap: an early return on the singular-CTM
+        // check used to bypass the rest of the subtree entirely.
+        let hidden_script = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(0)"><script>alert(1)</script></g>
+        </svg>"##;
+        assert_eq!(
+            parse_svg(hidden_script).unwrap_err(),
+            SvgError::UnsupportedElement("script".to_string())
+        );
+
+        let hidden_bad_attribute = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(0)"><rect width="1" height="1" onclick="evil()"/></g>
+        </svg>"##;
+        assert!(matches!(
+            parse_svg(hidden_bad_attribute).unwrap_err(),
+            SvgError::UnsupportedAttribute { attr, .. } if attr == "onclick"
+        ));
+
+        let hidden_xlink = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+            <g transform="scale(0)"><rect xlink:href="#a" width="1" height="1"/></g>
+        </svg>"##;
+        assert!(matches!(
+            parse_svg(hidden_xlink).unwrap_err(),
+            SvgError::UnsupportedAttribute { attr, .. } if attr == "href"
+        ));
+
+        // A clean subtree under a singular transform still parses (and
+        // still renders nothing) — this isn't "singular transform is
+        // always an error", only "singular transform doesn't skip checks".
+        let clean = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(0)"><rect width="1" height="1"/></g>
+        </svg>"##;
+        assert!(parse_svg(clean).unwrap().shapes.is_empty());
     }
 
     #[test]
@@ -1311,5 +1472,72 @@ mod tests {
         let doc = parse_svg(xml).unwrap();
         assert_eq!(doc.shapes[0].fill, Some(Paint::Solid(Color::BLACK)));
         assert!(doc.shapes[0].stroke.is_none());
+    }
+
+    #[test]
+    fn open_path_fill_is_implicitly_closed_but_the_stroke_centerline_stays_open() {
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <path d="M0,0 L10,0 L10,10" fill="#000000" stroke="#ffffff"/>
+        </svg>"##;
+        let doc = parse_svg(xml).unwrap();
+        let shape = &doc.shapes[0];
+
+        // The centerline (what a stroke outline is built from) is exactly
+        // as authored: two lines, no synthetic closing edge.
+        assert_eq!(
+            shape.path.commands,
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, -10.0)),
+            ]
+        );
+
+        // The fill geometry gains an implicit closing edge back to the
+        // subpath's start, per SVG's "closed for filling, open for
+        // stroking" rule.
+        let fill_path = shape.fill_path.as_ref().expect("fill is Some");
+        assert_eq!(
+            fill_path.commands,
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(10.0, -10.0)),
+                PathCommand::Close,
+            ]
+        );
+    }
+
+    #[test]
+    fn open_path_fill_geometry_matches_the_equivalent_explicitly_closed_path() {
+        let open = parse_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 L10,0 L10,10" fill="#000000"/></svg>"##,
+        )
+        .unwrap();
+        let closed = parse_svg(
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0,0 L10,0 L10,10 Z" fill="#000000"/></svg>"##,
+        )
+        .unwrap();
+        assert_eq!(
+            open.shapes[0].fill_path.as_ref().unwrap().commands,
+            closed.shapes[0].fill_path.as_ref().unwrap().commands
+        );
+        // ...but their stroke centerlines (not exercised here: no `stroke`
+        // attribute on either) would still differ — `path.commands` keeps
+        // the author's own `Z` or lack of one, only `fill_path` normalizes.
+        assert_ne!(open.shapes[0].path.commands, closed.shapes[0].path.commands);
+    }
+
+    #[test]
+    fn a_shape_that_is_already_closed_has_identical_fill_path_and_path() {
+        // rect/circle/ellipse/polygon, and a `path` the author closed with
+        // `Z`, need no implicit closure — `fill_path` is a no-op copy.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10" fill="#000000"/></svg>"##;
+        let doc = parse_svg(xml).unwrap();
+        let shape = &doc.shapes[0];
+        assert_eq!(
+            shape.fill_path.as_ref().unwrap().commands,
+            shape.path.commands
+        );
     }
 }

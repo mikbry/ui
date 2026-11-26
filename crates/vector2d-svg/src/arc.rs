@@ -124,16 +124,18 @@ struct RotatedEllipse {
 }
 
 /// Signed angle (radians) from vector `u` to vector `v`.
+///
+/// `atan2(cross, dot)`, not `acos(dot / (|u||v|))`: for a shallow arc (a
+/// chord tiny relative to its radius) the two vectors are nearly parallel,
+/// `dot / (|u||v|)` lands within `f32` epsilon of `1.0`, and `acos` near its
+/// domain edge amplifies that rounding into a wildly wrong angle (observed:
+/// a 100-radius arc spanning an endpoint just `0.01` away collapsed to
+/// essentially zero sweep). `atan2` has no such singularity at `0`/`±π` and
+/// needs neither a normalization `sqrt` nor the resulting division.
 fn angle_between(u: (f32, f32), v: (f32, f32)) -> f32 {
+    let cross = u.0 * v.1 - u.1 * v.0;
     let dot = u.0 * v.0 + u.1 * v.1;
-    let len = ((u.0 * u.0 + u.1 * u.1) * (v.0 * v.0 + v.1 * v.1)).sqrt();
-    let cos_a = (dot / len).clamp(-1.0, 1.0);
-    let sign = if u.0 * v.1 - u.1 * v.0 < 0.0 {
-        -1.0
-    } else {
-        1.0
-    };
-    sign * cos_a.acos()
+    cross.atan2(dot)
 }
 
 /// Cubic Bézier approximation of one `ellipse` arc segment spanning
@@ -263,5 +265,36 @@ mod tests {
             assert!(c2.x.is_finite() && c2.y.is_finite());
             assert!(end.x.is_finite() && end.y.is_finite());
         }
+    }
+
+    #[test]
+    fn a_shallow_arc_reaches_its_true_endpoint_instead_of_collapsing() {
+        // Regression: the old `acos(dot / (|u||v|))` angle formula loses
+        // precision catastrophically when the two vectors it compares are
+        // nearly parallel — exactly the case for a shallow arc (chord tiny
+        // relative to radius). A radius-100 arc spanning an endpoint just
+        // 0.01 away used to collapse to a near-zero sweep (observed:
+        // landing around (7.6e-7, 0) instead of (0.01, 0)).
+        let start = Vec2::new(0.0, 0.0);
+        let end = Vec2::new(0.01, 0.0);
+        let segs = arc_to_cubics(start, 100.0, 100.0, 0.0, false, true, end);
+        let (_, _, reached_end) = *segs.last().unwrap();
+        assert!(
+            (reached_end.x - end.x).abs() < 1e-4,
+            "expected to reach x ≈ {}, got {}",
+            end.x,
+            reached_end.x
+        );
+        assert!((reached_end.y - end.y).abs() < 1e-4);
+        // The arc must have actually swept *something* nonzero — not
+        // collapsed to an exact straight line (a radius-100 arc over a
+        // 0.01 chord has a genuinely tiny sagitta, ~chord²/(8·r) ≈ 1.25e-7,
+        // so this only checks "not exactly zero", not a specific magnitude).
+        let (c1, _, _) = segs[0];
+        let midpoint_deviation = (c1.y - start.y).abs();
+        assert!(
+            midpoint_deviation > 0.0 && midpoint_deviation.is_finite(),
+            "control point collapsed onto the chord: {c1:?}"
+        );
     }
 }

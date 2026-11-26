@@ -78,4 +78,11 @@ pub enum SvgError {
     /// than risking a stack overflow walking it.
     #[error("element nesting is too deep")]
     NestingTooDeep,
+    /// Every individual number in `<{0}>`'s geometry parsed as finite, but
+    /// computing from them (e.g. `x + width`, or an elliptical arc's
+    /// radius-correction math on a near-zero radius) overflowed `f32` to
+    /// NaN/Inf. Rejected here rather than left to surface downstream as an
+    /// unexplained `mkui_vector2d::VectorPathEncodeError::NonFinite`.
+    #[error("`<{0}>`'s computed geometry is not finite (NaN or overflow)")]
+    NonFiniteGeometry(String),
 }
