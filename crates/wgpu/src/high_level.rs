@@ -20,6 +20,8 @@ use std::sync::Arc;
 use mkui_core::components::Component;
 use mkui_core::error::MkuiError;
 use mkui_text::TextSystem;
+#[cfg(feature = "slug")]
+use mkui_text::{CompositeTextSystem, FontId, TextRenderClass};
 
 use crate::bridge::{WgpuRenderable, WgpuRendererRegistry};
 use crate::{Scene, Size, WgpuApp};
@@ -52,6 +54,13 @@ pub struct Mkui {
     /// against a custom/composite text system instead of the bitmap default,
     /// and is **never** replaced during `run` or a per-frame rebuild.
     text_system: Option<Arc<dyn TextSystem>>,
+    /// Optional `FontId` component text should route through the Slug lane
+    /// against (#311), set via [`Mkui::with_slug_font`]. Threaded into the
+    /// `WgpuApp` on `.run()` alongside `text_system` — the two travel
+    /// together because a `FontId` is only meaningful against the text
+    /// system it was registered on.
+    #[cfg(feature = "slug")]
+    slug_font_id: Option<FontId>,
 }
 
 impl Mkui {
@@ -61,6 +70,8 @@ impl Mkui {
             core: Some(mkui_core::components::Mkui::new()),
             registry: Some(WgpuRendererRegistry::with_defaults()),
             text_system: None,
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
         })
     }
 
@@ -75,6 +86,8 @@ impl Mkui {
             core: Some(core),
             registry: Some(WgpuRendererRegistry::with_defaults()),
             text_system: None,
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
         })
     }
 
@@ -98,7 +111,43 @@ impl Mkui {
             core: Some(core),
             registry: Some(WgpuRendererRegistry::with_defaults()),
             text_system: Some(text_system),
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
         })
+    }
+
+    /// Pair a Slug-registered [`CompositeTextSystem`] with the [`FontId`]
+    /// component text should route through the Slug lane against (#311) —
+    /// the declarative-bridge counterpart of `examples/host-embed-wgpu`'s
+    /// hand-wired `EmbeddedRenderer::set_slug_font` call (#259), reached
+    /// here instead of by bypassing the bridge.
+    ///
+    /// Rejects `font_id` if it isn't actually registered as a
+    /// [`TextRenderClass::Slug`] provider on `text_system` — pairing a
+    /// `FontId` with the wrong (or no) text system is exactly the silent
+    /// "feature flag flipped, runtime behavior didn't" failure #311 exists
+    /// to close, so this constructor refuses to build a mismatched pair
+    /// rather than let it degrade to bitmap unnoticed.
+    ///
+    /// `run` threads both `text_system` and `font_id` into the live
+    /// [`WgpuApp`] (via [`WgpuApp::with_app_tree_and_text_system`] +
+    /// [`WgpuApp::set_slug_font_id`]), and neither is replaced during a
+    /// per-frame rebuild — same retention contract as
+    /// [`Mkui::from_core_with_text_system`].
+    #[cfg(feature = "slug")]
+    pub fn with_slug_font(
+        mut self,
+        text_system: CompositeTextSystem,
+        font_id: FontId,
+    ) -> Result<Self, MkuiError> {
+        if text_system.render_class(font_id) != Some(TextRenderClass::Slug) {
+            return Err(MkuiError::initialization(
+                "Mkui::with_slug_font: font_id is not registered as a Slug-class face on the supplied text system",
+            ));
+        }
+        self.text_system = Some(Arc::new(text_system));
+        self.slug_font_id = Some(font_id);
+        Ok(self)
     }
 
     /// Build a `Mkui` from a pre-built [`Scene`] of raw render primitives.
@@ -120,6 +169,8 @@ impl Mkui {
             core: None,
             registry: None,
             text_system: None,
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
         }
     }
 
@@ -180,12 +231,24 @@ impl Mkui {
             // Retain an explicitly-supplied text system across `run` (#66) —
             // the declarative path must not silently swap in the bitmap default
             // when a custom/composite text system was provided.
-            match self.text_system.take() {
+            let app = match self.text_system.take() {
                 Some(text_system) => {
                     WgpuApp::with_app_tree_and_text_system(core, registry, text_system)
                 }
                 None => WgpuApp::with_app_tree(core, registry),
-            }
+            };
+            // #311: thread the selected Slug `FontId` (if any — `None` keeps
+            // the bitmap lane) alongside the text system it was registered
+            // on. Must happen after the text-system swap above so the font
+            // id is set on the same `WgpuApp` instance that will carry it
+            // into `resumed`'s `Renderer::set_slug_font` call.
+            #[cfg(feature = "slug")]
+            let app = {
+                let mut app = app;
+                app.set_slug_font_id(self.slug_font_id.take());
+                app
+            };
+            app
         } else {
             self.app
         };
@@ -251,6 +314,62 @@ mod tests {
         assert!(
             Arc::ptr_eq(stored, &ts),
             "the exact supplied text system is retained, not a bitmap default"
+        );
+    }
+
+    // Abel (Google Fonts, SIL Open Font License 1.1) — test-only fixture,
+    // never bundled into this crate's shipped (non-test) code; mirrors the
+    // same fixture `crate::slug_text`'s own tests already embed.
+    #[cfg(feature = "slug")]
+    const TEST_ABEL_TTF: &[u8] = include_bytes!("../../text/tests/fixtures/abel/Abel-Regular.ttf");
+
+    #[cfg(feature = "slug")]
+    #[test]
+    fn with_slug_font_stores_the_pair_when_font_id_is_slug_class() {
+        let mut text_system = CompositeTextSystem::new();
+        let font_id = text_system
+            .register_sfnt_face(
+                std::sync::Arc::from(TEST_ABEL_TTF.to_vec().into_boxed_slice()),
+                0,
+            )
+            .expect("Abel registers");
+
+        let mkui = Mkui::new()
+            .expect("Mkui::new")
+            .with_slug_font(text_system, font_id)
+            .expect("a Slug-class font_id on its own text system must be accepted");
+
+        assert_eq!(
+            mkui.slug_font_id,
+            Some(font_id),
+            "the supplied font_id is retained for `run` to thread into `WgpuApp`"
+        );
+        assert!(
+            mkui.text_system.is_some(),
+            "with_slug_font must also install the text system it registered font_id on"
+        );
+    }
+
+    /// #311: a `FontId` that isn't actually a `TextRenderClass::Slug` face on
+    /// the supplied text system must be rejected at construction, not
+    /// silently accepted and left to degrade to bitmap at render time — the
+    /// exact "feature flag flipped, runtime behavior didn't" failure mode
+    /// this issue exists to close for mismatched inputs too, not just the
+    /// missing `set_slug_font` call.
+    #[cfg(feature = "slug")]
+    #[test]
+    fn with_slug_font_rejects_a_font_id_not_registered_as_slug() {
+        let text_system = CompositeTextSystem::new();
+        let result = Mkui::new()
+            .expect("Mkui::new")
+            .with_slug_font(text_system, FontId::BITMAP);
+        let message = match result {
+            Ok(_) => panic!("FontId::BITMAP is never a Slug-class face"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            message.contains("with_slug_font"),
+            "error should name the call site that rejected the pair: {message}"
         );
     }
 

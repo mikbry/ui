@@ -110,22 +110,20 @@ to the GPU backend choice.
   (`mkui-wgpu-no-slug`, the `feature-slug` job's new no-default-features
   lines) keeps that path from silently rotting now that it's no longer the
   default anyone exercises by accident.
-- **The promotion was made explicit through the declarative bridge on
-  2026-11-26 (#311).** Before this date, `cargo run -p native-showcase
-  --release` already happened to render through the Slug lane — but only
-  because nothing anywhere in `mkui` → `examples/showcase-common` →
-  `examples/native-showcase` pinned `default-features = false` on
-  `mkui-wgpu`, so the 2026-11-17 crate-level default leaked through by
-  accident, with no designed opt-out: `native-showcase` had no
-  `[features]` table at all, so `--no-default-features --features wgpu`
-  was not a valid invocation. #311 replaces the accident with a real
-  default at each layer: `mkui` gains its own `slug` feature, default-on
-  (mirroring `mkui-wgpu`'s own default), forwarded through a *weak*
-  dependency edge (`slug = ["mkui-wgpu?/slug"]` — a no-op unless `wgpu` is
-  also enabled, so it never drags `mkui-wgpu` into a `web`/`console`
-  build), and `examples/showcase-common` / `examples/native-showcase`
-  mirror the same shape one layer at a time. Each crate pins
-  `default-features = false` on its downstream dependency so
+- **The `slug` Cargo *feature* default was threaded through the declarative
+  bridge on 2026-11-26 (#311, first pass).** Before this date, nothing
+  anywhere in `mkui` → `examples/showcase-common` → `examples/native-showcase`
+  pinned `default-features = false` on `mkui-wgpu`, so the 2026-11-17
+  crate-level default leaked through by accident, with no designed opt-out:
+  `native-showcase` had no `[features]` table at all, so
+  `--no-default-features --features wgpu` was not a valid invocation. This
+  pass replaced the accident with a real default at each layer: `mkui` gains
+  its own `slug` feature, default-on (mirroring `mkui-wgpu`'s own default),
+  forwarded through a *weak* dependency edge (`slug = ["mkui-wgpu?/slug"]` —
+  a no-op unless `wgpu` is also enabled, so it never drags `mkui-wgpu` into a
+  `web`/`console` build), and `examples/showcase-common` /
+  `examples/native-showcase` mirror the same shape one layer at a time. Each
+  crate pins `default-features = false` on its downstream dependency so
   `--no-default-features --features wgpu` genuinely suppresses `slug`
   at every layer instead of it leaking back in through whichever
   dependency's own default happened not to be pinned — CI verifies this
@@ -139,6 +137,51 @@ to the GPU backend choice.
   `slug` features unchanged (out of scope for #311); `atoms-on-wgpu` and
   `host-embed-wgpu` have the same accidental-leak bug this entry fixes at
   the bridge layer, tracked separately as #323.
+  **Correction (2026-11-26, same day):** this pass did NOT make
+  `native-showcase` render *component text* through the Slug lane, contrary
+  to what an earlier draft of this entry claimed. It genuinely did flip
+  non-text vector lanes already gated purely on the Cargo feature (e.g.
+  `button`/`card`'s `VectorPath` chrome, #279) — the false claim was
+  specifically about text. No code anywhere in the declarative bridge
+  (`crates/mkui`, `crates/wgpu/src/walker.rs`, `crates/wgpu/src/builder.rs`,
+  or `crates/wgpu/src/app.rs`) ever called
+  [`Renderer::set_slug_font`](../../crates/wgpu/src/render/mod.rs) — the one
+  call that actually selects which registered `FontId` component text routes
+  through. `Renderer::slug_font_id` therefore stayed `None` (its byte-
+  identical-to-bitmap default) regardless of which Cargo features were on, so
+  a plain `cargo run -p native-showcase --release` compiled with `slug` and
+  still rendered bitmap *text* at runtime. Caught by re-verifying with `grep`
+  for `set_slug_font` call sites rather than trusting the feature-flag state
+  — the only call site anywhere in the workspace was
+  `examples/host-embed-wgpu`'s own hand-wired one, which bypasses the
+  declarative bridge entirely. The fix is the entry immediately below.
+- **The runtime wiring gap above was closed on 2026-11-26 (#311, second
+  pass).** `mkui_wgpu::high_level::Mkui` gained `with_slug_font(text_system,
+  font_id)` (wgpu+`slug`-only), which pairs a Slug-registered
+  `CompositeTextSystem` with the `FontId` to route component text through —
+  refusing the pair if `font_id` isn't actually a
+  `TextRenderClass::Slug`-class face on that system, so a mismatched pair
+  fails loudly at construction rather than silently degrading to bitmap at
+  render time. `run()` threads both into `WgpuApp` (`set_slug_font_id`,
+  alongside the existing `text_system` retention from #66), and `resumed`
+  now calls `Renderer::set_slug_font` on the freshly constructed renderer —
+  the exact call `examples/host-embed-wgpu`'s `resumed` already makes by
+  hand against `EmbeddedRenderer`, reached here through the bridge instead.
+  `crates/mkui` re-exports `CompositeTextSystem`/`FontId` from `mkui-wgpu`
+  (wgpu+`slug`-gated) and forwards `with_slug_font`, so a consumer names
+  only its existing `mkui` dependency. `examples/native-showcase` is the
+  first declarative-bridge consumer to opt in: it embeds the same Abel
+  (Google Fonts, SIL OFL 1.1) fixture `host-embed-wgpu` already does, under
+  the same "this example only, never the library" rule (#259) — font choice
+  stays a host/app decision, not something `mkui-wgpu` bundles for every
+  consumer. `--no-default-features --features wgpu` skips the whole block
+  (native-showcase's own `slug` Cargo feature is off), so that invocation is
+  unchanged: bitmap, byte-identical to pre-#311. `console-showcase`/
+  `web-showcase` are unaffected — no Slug lane exists for either backend.
+  `component-gallery` (`create_gallery_ui`) does not yet call
+  `with_slug_font` either, so it stays on the bitmap lane despite also
+  building with `slug` on by default; wiring it the same ~5-line way is
+  deferred to [#330](https://github.com/mikbry/ui/issues/330).
 
 ### Ordered render-command semantics
 

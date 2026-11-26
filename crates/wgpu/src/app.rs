@@ -12,6 +12,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[cfg(feature = "slug")]
+use mkui_text::FontId;
 use mkui_text::{BitmapTextSystem, TextSystem};
 
 use crate::bridge::WgpuRendererRegistry;
@@ -50,6 +52,17 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 pub struct WgpuApp {
     scene: Scene,
     text_system: Arc<dyn TextSystem>,
+    /// `FontId` component text should route through the Slug lane against
+    /// (#311), or `None` to keep the bitmap lane — threaded into the native
+    /// `Renderer` via [`Renderer::set_slug_font`] as soon as `resumed`
+    /// constructs it. Carried alongside `text_system` rather than inferred
+    /// from it: the renderer, not `WgpuApp`, owns the Slug/bitmap choice,
+    /// and `text_system` alone doesn't say which registered face (if any)
+    /// to prefer. `None` by default, so a plain `WgpuApp` stays on the
+    /// bitmap lane until a caller (declaratively, via
+    /// [`crate::Mkui::with_slug_font`]) opts a font in.
+    #[cfg(feature = "slug")]
+    slug_font_id: Option<FontId>,
     theme: WgpuTheme,
     /// Either a runtime tree (declarative path) or `None` (raw-scene
     /// escape hatch). When `Some`, `Renderer::render` is called against
@@ -238,6 +251,8 @@ impl WgpuApp {
         Self {
             scene,
             text_system: Arc::new(BitmapTextSystem::new()),
+            #[cfg(feature = "slug")]
+            slug_font_id: None,
             theme: WgpuTheme::default(),
             core: None,
             registry: None,
@@ -343,6 +358,27 @@ impl WgpuApp {
         {
             self.walk_cache = WalkCache::new();
         }
+    }
+
+    /// The `FontId` component text currently routes through the Slug lane
+    /// against, or `None` for the bitmap default (#311).
+    #[cfg(feature = "slug")]
+    pub fn slug_font_id(&self) -> Option<FontId> {
+        self.slug_font_id
+    }
+
+    /// Select the `FontId` component text should route through the Slug
+    /// lane against, or `None` to fall back to the bitmap lane (#311). Takes
+    /// effect the next time `resumed` constructs (or reconstructs) the
+    /// native `Renderer`, which reads this via [`Renderer::set_slug_font`].
+    /// `font_id` must already be registered on whatever [`TextSystem`]
+    /// `self.text_system` resolves to — this setter does not itself swap
+    /// the text system, so pair it with [`WgpuApp::set_text_system`] (or
+    /// construct via [`WgpuApp::with_app_tree_and_text_system`]) when
+    /// `font_id` isn't already registered on the current one.
+    #[cfg(feature = "slug")]
+    pub fn set_slug_font_id(&mut self, font_id: Option<FontId>) {
+        self.slug_font_id = font_id;
     }
 
     pub fn theme(&self) -> &WgpuTheme {
@@ -1129,6 +1165,23 @@ impl ApplicationHandler for WgpuApp {
         // through the winit `ApplicationHandler` (ADR 0004).
         match pollster::block_on(Renderer::new(window.clone())) {
             Ok(renderer) => {
+                // #311: thread the declarative bridge's selected Slug font
+                // (if any — `None` keeps the bitmap lane, the pre-#311
+                // default) into the freshly constructed renderer. This is
+                // the runtime half #324 left undone: that PR flipped the
+                // `slug` Cargo *feature* default through the bridge, but no
+                // code anywhere actually called `set_slug_font`, so
+                // component text stayed on the bitmap lane regardless.
+                // Mirrors `host-embed-wgpu`'s hand-wired
+                // `EmbeddedRenderer::set_slug_font` call in its own
+                // `resumed` (#259), but through the bridge instead of a
+                // host bypassing it.
+                #[cfg(feature = "slug")]
+                let renderer = {
+                    let mut renderer = renderer;
+                    renderer.set_slug_font(self.slug_font_id);
+                    renderer
+                };
                 self.state = Some(WgpuAppState { window, renderer });
                 if self.core.is_some() {
                     // Re-derive the viewport from the window's real
@@ -1979,6 +2032,118 @@ mod tests {
             .iter()
             .any(|p| matches!(p, crate::types::Primitive::Text(_)));
         assert!(has_text, "walker should emit at least one text primitive");
+    }
+
+    /// #311 regression guard. Before this fix, `Mkui::with_slug_font`'s
+    /// `(text_system, font_id)` pair reached `WgpuApp` (the `slug` Cargo
+    /// feature flipped through the whole bridge), but nothing in the render
+    /// path ever called `Renderer::set_slug_font`/`expand_slug_text` against
+    /// it — component text stayed on the bitmap lane regardless. GPU pixel
+    /// verification of the actual renderer (#171 Part B.2) already lives in
+    /// `render::sfnt_slug_gpu`/`render::embedded`'s offscreen tests; this is
+    /// the CPU-only proof that the bridge's `(text_system, font_id)` pair,
+    /// built exactly as `Mkui::with_slug_font`/`WgpuApp::with_app_tree_and_
+    /// text_system` build it, actually expands real Button + Card component
+    /// text into Slug glyph primitives when fed through `expand_slug_text` —
+    /// the same seam `Renderer::render` drives once `resumed` threads
+    /// `slug_font_id` into it (covered at the `resumed`-call level by a real
+    /// windowed run; see the #311 PR body).
+    ///
+    /// Also guards against a *different* silent-bitmap failure: the walker
+    /// measures every `Text` primitive's wrap rect against
+    /// `FontId::BITMAP`'s metrics (`walker.rs`'s hardcoded layout font),
+    /// while `expand_text_primitive` re-lays out that same rect under
+    /// Abel's (different) metrics. If Abel's wider/narrower glyphs don't fit
+    /// the bitmap-sized rect, `expand_slug_text` degrades the overflowing
+    /// text back to a bitmap `Primitive::Text` (or an ellipsized partial
+    /// run) rather than failing loudly — asserting zero leftover
+    /// `Primitive::Text` and a full per-character glyph count catches that
+    /// silently-truncated-or-ellipsized case too.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(feature = "slug")]
+    #[test]
+    fn declarative_bridge_slug_font_expands_component_text_into_slug_glyphs() {
+        use mkui_core::components::{Button, Card, Mkui as CoreMkui, Text};
+        use mkui_runtime::{ButtonVariant, TextVariant};
+        use mkui_text::CompositeTextSystem;
+        use mkui_vector2d::{SlugBlobCache, SlugConfig};
+
+        // Abel (Google Fonts, SIL Open Font License 1.1) — test-only fixture,
+        // never bundled into this crate's shipped (non-test) code; mirrors
+        // the same fixture `crate::slug_text`'s own tests already embed.
+        const ABEL: &[u8] = include_bytes!("../../text/tests/fixtures/abel/Abel-Regular.ttf");
+
+        let mut text_system = CompositeTextSystem::new();
+        let font_id = text_system
+            .register_sfnt_face(std::sync::Arc::from(ABEL.to_vec().into_boxed_slice()), 0)
+            .expect("Abel registers");
+
+        let button_label = "Get Started";
+        let card_title = "Card Title";
+        let card_description = "A short description of this card.";
+
+        let core = CoreMkui::new()
+            .child(Button::new(button_label).variant(ButtonVariant::Primary))
+            .child(
+                Card::new()
+                    .child(Text::new(card_title).variant(TextVariant::Heading2))
+                    .child(Text::new(card_description).variant(TextVariant::Body)),
+            );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree_and_text_system(core, registry, Arc::new(text_system));
+        app.set_slug_font_id(Some(font_id));
+        app.rebuild_scene_from_tree();
+
+        let mut cache = SlugBlobCache::new(SlugConfig::new(16, 16, 1));
+        let expanded = crate::slug_text::expand_slug_text(
+            &app.scene().primitives,
+            app.slug_font_id().expect("font id set above"),
+            app.text_system().as_ref(),
+            &mut cache,
+        );
+
+        let slug_glyph_count = expanded
+            .iter()
+            .filter(|p| matches!(p, crate::types::Primitive::SlugGlyph(_)))
+            .count();
+        // A leftover `Primitive::Text` whose content is pure whitespace is
+        // expected and harmless: a space has no visible outline in Abel (or
+        // any font), so `place_slug_run`'s per-glyph bitmap fallback
+        // degrades each inter-word space to its own invisible one-space
+        // `Primitive::Text` — there is nothing to render either way. Only a
+        // leftover primitive with *visible* content would mean real text
+        // silently stayed on the bitmap lane.
+        let leftover_visible_text: Vec<&str> = expanded
+            .iter()
+            .filter_map(|p| match p {
+                crate::types::Primitive::Text(t) if !t.content.trim().is_empty() => {
+                    Some(t.content.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        let expected_glyphs: usize = [button_label, card_title, card_description]
+            .iter()
+            .map(|s| s.chars().filter(|c| !c.is_whitespace()).count())
+            .sum();
+
+        assert!(
+            leftover_visible_text.is_empty(),
+            "every Button/Card `Primitive::Text` with visible (non-whitespace) \
+             content must be fully expanded into Slug glyphs once a Slug font \
+             is selected — a surviving non-whitespace `Primitive::Text` \
+             ({leftover_visible_text:?}) means some component text silently \
+             stayed on the bitmap lane (feature flag flipped, runtime \
+             behavior didn't)"
+        );
+        assert_eq!(
+            slug_glyph_count, expected_glyphs,
+            "expected exactly one Slug glyph per non-whitespace character \
+             across the Button label + Card title + description \
+             ({expected_glyphs}), got {slug_glyph_count} — fewer means \
+             Abel's layout was truncated or ellipsized against the walker's \
+             bitmap-sized rects"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

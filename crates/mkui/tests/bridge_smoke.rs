@@ -46,6 +46,29 @@ fn console_backend_accepts_a_component_tree() {
         .child(View::new().class("flex").child(Button::new("ok")));
 }
 
+/// #311: the bridge's `Mkui::with_slug_font` must actually forward to the
+/// wgpu backend's own rejection logic, not swallow or bypass it — a
+/// `FontId` that isn't a `TextRenderClass::Slug` face on the supplied text
+/// system must fail here exactly as it does calling
+/// `mkui_wgpu::Mkui::with_slug_font` directly. No font fixture needed: the
+/// rejection fires before any SFNT bytes would be touched.
+#[cfg(all(feature = "wgpu", feature = "slug"))]
+#[test]
+fn with_slug_font_forwards_the_wgpu_backends_rejection() {
+    let text_system = mkui::CompositeTextSystem::new();
+    let result = Mkui::new()
+        .expect("wgpu init should succeed headlessly")
+        .with_slug_font(text_system, mkui::FontId::BITMAP);
+    let message = match result {
+        Ok(_) => panic!("FontId::BITMAP is never a Slug-class face"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        message.contains("with_slug_font"),
+        "the bridge must surface the backend's own rejection message: {message}"
+    );
+}
+
 #[test]
 fn prelude_re_exports_core_contract_types() {
     // Compile-time check: the bridge prelude must expose the shared

@@ -86,6 +86,13 @@
 )))]
 use mkui_core::error::MkuiError;
 
+// #311: `Mkui::with_slug_font`'s parameter types. Re-exported here (rather
+// than requiring a direct `mkui-text` dependency) so a caller building the
+// pair — e.g. `examples/native-showcase` — names only `mkui`, the same single
+// dependency it already has.
+#[cfg(all(feature = "wgpu", feature = "slug"))]
+pub use mkui_wgpu::{CompositeTextSystem, FontId};
+
 // One-primary-backend invariant (see ADR 0006 "Cross-binding identity: one
 // primary backend"). The `web`, `console`, and `wgpu` features each select a
 // different `Mkui` implementation; enabling more than one is ambiguous, and
@@ -306,6 +313,26 @@ impl Mkui {
             Err(MkuiError::generic("No mkui backend feature enabled"))
         }
     }
+
+    /// Pair a Slug-registered [`CompositeTextSystem`] with the [`FontId`]
+    /// component text should route through the Slug lane against (#311) —
+    /// forwards to the wgpu backend's own `Mkui::with_slug_font`.
+    ///
+    /// wgpu-only: Slug has no web/console render lane (ADR 0007), and this
+    /// crate's own `slug` feature sits behind a *weak* `mkui-wgpu?/slug`
+    /// dependency edge that is a no-op unless `wgpu` is already enabled —
+    /// so this method only exists to call when both features are active
+    /// together, matching the shape `slug`'s own forwarding already assumes.
+    #[cfg(all(feature = "wgpu", feature = "slug"))]
+    pub fn with_slug_font(
+        self,
+        text_system: CompositeTextSystem,
+        font_id: FontId,
+    ) -> Result<Self, MkuiError> {
+        Ok(Self {
+            inner: self.inner.with_slug_font(text_system, font_id)?,
+        })
+    }
 }
 
 /// Convert a `JsValue` from the web backend into a typed `MkuiError`.
@@ -409,5 +436,7 @@ pub mod prelude {
         all(feature = "console", feature = "wgpu"),
     )))]
     pub use crate::Mkui;
+    #[cfg(all(feature = "wgpu", feature = "slug"))]
+    pub use crate::{CompositeTextSystem, FontId};
     pub use mkui_core::prelude::*;
 }
