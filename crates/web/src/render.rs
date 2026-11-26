@@ -232,6 +232,26 @@ fn render_node(
             }
             el
         }
+        NodeKind::ScrollArea(_) => {
+            // #328: a real `overflow-y: auto` box — the browser owns
+            // scrolling (position, wheel/touch/keyboard/scrollbar input)
+            // entirely natively, same as the rest of the web backend
+            // leans on native primitives (`<input>` for `TextField`).
+            // Chrome comes from the opt-in `DEFAULT_COMPONENT_CSS`
+            // `.scroll-area` recipe, mirroring `Card`'s `.card` above.
+            let el = document.create_element("div")?;
+            let class = if node.class.raw().is_empty() {
+                "scroll-area".to_string()
+            } else {
+                format!("scroll-area {}", node.class.raw())
+            };
+            el.set_class_name(&class);
+            for child_id in &node.children {
+                let child = render_node(tree, *child_id, document, registry, owner)?;
+                el.append_child(&child)?;
+            }
+            el
+        }
         NodeKind::Button(b) => render_button(tree, node, b, document, owner)?,
         NodeKind::TextField(f) => render_text_field(node, f, document, owner)?,
         NodeKind::Image(img) => render_image(node, img, document)?,

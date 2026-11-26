@@ -6,8 +6,9 @@
 //!
 //! Every [`mkui_runtime::NodeKind::View`] (and the synthetic `Root`, and
 //! [`mkui_runtime::NodeKind::Card`] — #270's card chrome is a container,
-//! not a leaf) is a flex container. `resolved.flex_column`, or the absence
-//! of `resolved.flex`
+//! not a leaf, and [`mkui_runtime::NodeKind::ScrollArea`] — #328's
+//! viewport-clipping chrome is likewise a container) is a flex container.
+//! `resolved.flex_column`, or the absence of `resolved.flex`
 //! entirely (ordinary tailwind block flow — children stack one per line),
 //! both mean **Column**; `resolved.flex` without `flex-col` means **Row**.
 //! This mirrors real Tailwind: a plain block element's children already
@@ -290,8 +291,20 @@ fn explicit_height_px(style: &ResolvedStyle) -> Option<f32> {
 fn is_container(tree: &AppTree, id: NodeId) -> bool {
     matches!(
         tree.get(id).map(|n| &n.kind),
-        Some(NodeKind::View(_)) | Some(NodeKind::Card(_)) | Some(NodeKind::Root)
+        Some(NodeKind::View(_))
+            | Some(NodeKind::Card(_))
+            | Some(NodeKind::Root)
+            | Some(NodeKind::ScrollArea(_))
     )
+}
+
+/// Whether `id` is a `ScrollArea` (#328) — the one container kind whose
+/// column-shrink floor is zero rather than its own natural height (see
+/// [`ChildPlan::shrink_to_zero`] and [`layout_column_children`]): it exists
+/// specifically to absorb overflow its box can't fit, not to protect its
+/// content's minimum size the way a plain `View`/`Card` does.
+fn is_scroll_area(tree: &AppTree, id: NodeId) -> bool {
+    matches!(tree.get(id).map(|n| &n.kind), Some(NodeKind::ScrollArea(_)))
 }
 
 /// Whether `id` participates in layout at all. `false` for a hidden node or
@@ -329,7 +342,7 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
         return 0.0;
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
             let style = &node.resolved;
             let pad_x = padding_x_px(style);
             let kids = visible_children(tree, measure, node);
@@ -400,7 +413,7 @@ fn layout_subtree(
         return ComputedNode::leaf(Size::ZERO);
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
             layout_container(tree, measure, node, avail_width, avail_height)
         }
         NodeKind::Text(t) => {
@@ -540,6 +553,10 @@ fn layout_container(
 struct ChildPlan {
     id: NodeId,
     is_view: bool,
+    /// `true` only for a `ScrollArea` child (#328): its column-shrink
+    /// floor is zero rather than its own natural height — see
+    /// `layout_column_children`'s `min_heights` computation.
+    shrink_to_zero: bool,
     flex_grow: bool,
     mt_auto: bool,
     mx_auto: bool,
@@ -553,6 +570,7 @@ fn plan_children(tree: &AppTree, measure: &dyn LeafMeasure, node: &Node) -> Vec<
             ChildPlan {
                 id,
                 is_view: is_container(tree, id),
+                shrink_to_zero: is_scroll_area(tree, id),
                 flex_grow: style.flex_grow,
                 mt_auto: style.mt_auto,
                 mx_auto: style.mx_auto,
@@ -704,12 +722,19 @@ fn layout_column_children(
         // A column's main axis is height, and block height has no
         // narrower "min-content" than a child's own natural height (see
         // this function's module docs and `distribute_main_axis`'s doc
-        // comment) — so every shrinkable child's floor is the natural
-        // height the basis pass above already computed for it. In
-        // practice this means a plain `View`/`Card` column child never
-        // actually shrinks; any shortfall becomes visible overflow past
-        // this container's own (budget-clamped) box instead.
-        let min_heights = heights.clone();
+        // comment) — so a plain `View`/`Card` child's floor is the natural
+        // height the basis pass above already computed for it, and in
+        // practice it never actually shrinks; any shortfall becomes
+        // visible overflow past this container's own (budget-clamped) box
+        // instead. A `ScrollArea` child (#328) is the one exception — its
+        // whole purpose is absorbing overflow its box can't fit, so its
+        // floor is zero, same as CSS's `min-height: auto` resolving to
+        // zero for a scroll container.
+        let min_heights: Vec<f32> = plans
+            .iter()
+            .zip(&heights)
+            .map(|(p, &h)| if p.shrink_to_zero { 0.0 } else { h })
+            .collect();
         let consumed = distribute_main_axis(&plans, &mut heights, &min_heights, free);
         leftover = free - consumed;
 

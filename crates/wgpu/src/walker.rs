@@ -131,8 +131,9 @@ use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
 use crate::components::{
-    card, image as render_image_primitive, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX,
+    card, image as render_image_primitive, scroll_area, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX,
 };
+use crate::scroll::ScrollState;
 use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, InputStyle, TextVariant as ThemeTextVariant,
@@ -885,6 +886,16 @@ fn walk_node(
             cache,
             stats,
         )?,
+        NodeKind::ScrollArea(_) => render_scroll_area(
+            tree,
+            node,
+            ctx,
+            layout,
+            rect.unwrap_or_else(fallback_rect),
+            layouts,
+            cache,
+            stats,
+        )?,
         NodeKind::Text(t) => render_text(node, t, ctx, rect.unwrap_or_else(fallback_rect), layouts),
         NodeKind::Button(b) => {
             render_button(node, b, ctx, rect.unwrap_or_else(fallback_rect), layouts)
@@ -1048,6 +1059,76 @@ fn render_card(
     )?;
 
     ctx.current_foreground = saved_foreground;
+
+    layouts.push(NodeLayout {
+        node: node.id,
+        rect,
+    });
+
+    Ok(())
+}
+
+/// Width of the vertical scrollbar track `render_scroll_area` paints,
+/// matching the `track_width` convention `components::scroll_area`'s own
+/// tests use.
+const SCROLLBAR_TRACK_WIDTH_PX: f32 = 8.0;
+
+/// Renders [`mkui_runtime::NodeKind::ScrollArea`] (#328): promoted from
+/// this crate's wgpu-local `components::scroll_area`/`scrollbar` (#194)
+/// into the shared contract, following the same promotion pattern
+/// [`render_card`] proved. Paints the scrollbar chrome (track + a thumb
+/// sized to the real content:viewport ratio, via a fresh
+/// [`ScrollState`] built from this frame's own computed rects — no
+/// retained offset yet) at the box's right edge, then walks children
+/// through the ordinary flow unmodified.
+///
+/// Scope decision (#328): the offset is always `0.0` here — wheel/drag/
+/// keyboard/gamepad input *on the promoted component* (the underlying
+/// `ScrollState` already supports all four per #194) is not wired into
+/// this crate's live `winit` event loop in this change; see the PR for
+/// the tracking follow-up. A child taller than this box's own rect
+/// simply draws past its bottom edge — this crate has no generic clip/
+/// scissor primitive on [`Scene`] today (deferred alongside interactive
+/// input), so for the common case of one root-level `ScrollArea` sized
+/// to the whole window, the window's own render-target bounds are the
+/// only clip, satisfying issue #328's "at minimum visibly overflow, never
+/// overlap" bar.
+#[allow(clippy::too_many_arguments)] // mirrors `render_card`'s own escape hatch.
+fn render_scroll_area(
+    tree: &AppTree,
+    node: &mkui_runtime::Node,
+    ctx: &mut WgpuRenderCtx<'_>,
+    layout: &mkui_layout::LayoutResult,
+    rect: Rect,
+    layouts: &mut Vec<NodeLayout>,
+    cache: Option<&mut WalkCache>,
+    stats: &mut WalkStats,
+) -> Result<(), MkuiError> {
+    let content_len = node
+        .children
+        .iter()
+        .filter_map(|id| node_rect(layout, *id))
+        .map(|child_rect| child_rect.height_end() - rect.origin.y)
+        .fold(rect.size.height, f32::max);
+    let state = ScrollState::new(content_len, rect.size.height);
+    scroll_area(
+        ctx.scene,
+        rect,
+        SCROLLBAR_TRACK_WIDTH_PX,
+        &state,
+        &ctx.theme.scrollbar(),
+    );
+
+    walk_children(
+        tree,
+        &node.children,
+        ctx,
+        layout,
+        rect.origin.x,
+        layouts,
+        cache,
+        stats,
+    )?;
 
     layouts.push(NodeLayout {
         node: node.id,
@@ -1509,7 +1590,9 @@ mod tests {
     use crate::bridge::WgpuRendererRegistry;
     use crate::pointer;
     use crate::types::{Primitive, Size, Text as PrimitiveText};
-    use mkui_core::components::{Button, Card, Mkui as CoreMkui, Text as CoreText, View};
+    use mkui_core::components::{
+        Button, Card, Mkui as CoreMkui, ScrollArea, Text as CoreText, View,
+    };
     use mkui_text::BitmapTextSystem;
 
     /// Mirrors `WgpuTheme::default().tokens.spacing.button_height` (#287
@@ -1931,6 +2014,67 @@ mod tests {
 
         // Card itself + the text child = 2 layout entries.
         assert_eq!(out.layouts.len(), 2);
+    }
+
+    /// #328: `NodeKind::ScrollArea` paints the promoted scrollbar chrome
+    /// (via `components::scroll_area`/`scrollbar`, #194) and clamps its
+    /// own box to an explicit `h-16`, while every child still renders in
+    /// full even though its final position lands past that box's own
+    /// bottom edge — the "visible overflow, never overlap" contract
+    /// issue #328 asks for, now reachable through the shared contract
+    /// instead of only `mkui-wgpu`'s own wgpu-local widget.
+    #[test]
+    fn scroll_area_paints_scrollbar_chrome_and_lets_overflowing_children_draw_past_its_box() {
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(CoreText::new("line five")),
+            ),
+        );
+        let scroll_id = core.tree().get(core.tree().root()).unwrap().children[0];
+        let out = walk(&core);
+
+        let quads = out
+            .scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Quad(_)))
+            .count();
+        assert_eq!(quads, 2, "scroll area must paint a track + thumb quad");
+
+        let texts = text_primitives(&out.scene);
+        assert_eq!(texts.len(), 5, "every child must still render");
+
+        let scroll_layout = out
+            .layouts
+            .iter()
+            .find(|l| l.node == scroll_id)
+            .expect("ScrollArea must have its own layout entry");
+        assert!(
+            (scroll_layout.rect.size.height - 64.0).abs() < 0.01,
+            "an explicit h-16 ScrollArea box must clamp to 64px regardless \
+             of its children's combined height, got {}",
+            scroll_layout.rect.size.height
+        );
+
+        let last_text_bottom = out
+            .layouts
+            .iter()
+            .filter(|l| l.node != scroll_id)
+            .map(|l| l.rect.height_end())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            last_text_bottom > scroll_layout.rect.height_end() + 0.01,
+            "overflowing children must draw past the box's bottom edge \
+             instead of being compressed to fit: last child bottom {} vs \
+             box bottom {}",
+            last_text_bottom,
+            scroll_layout.rect.height_end()
+        );
     }
 
     /// #312: `NodeKind::TextField` paints the same input chrome + value

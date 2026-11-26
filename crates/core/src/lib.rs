@@ -6,7 +6,8 @@
 //!
 //! - **Components** ([`components::Component`], [`components::View`],
 //!   [`components::Text`], [`components::Button`], [`components::Card`],
-//!   [`components::Image`]) — the renderable tree.
+//!   [`components::Image`], [`components::ScrollArea`]) — the renderable
+//!   tree.
 //! - **Headless logic** ([`headless`]) — state, events, and a11y helpers for
 //!   interactive components that are identical across backends.
 //! - **Theme contracts** ([`theme::Theme`], [`theme::ThemeMode`],
@@ -52,8 +53,8 @@ pub mod theme;
 pub mod prelude {
     // Components (high-level cross-platform components)
     pub use crate::components::{
-        Button, Card, Component, Image, ImageFit, ImageSource, MenuList, Mkui, Text, TextField,
-        TextureHandle, View,
+        Button, Card, Component, Image, ImageFit, ImageSource, MenuList, Mkui, ScrollArea, Text,
+        TextField, TextureHandle, View,
     };
 
     // Image decode support (#196) — `ImageDecodeError` is the fallible half

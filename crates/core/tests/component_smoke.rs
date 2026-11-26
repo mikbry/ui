@@ -26,6 +26,7 @@ struct NodeCounts {
     buttons: usize,
     cards: usize,
     text_fields: usize,
+    scroll_areas: usize,
 }
 
 fn count_nodes(app: &Mkui) -> NodeCounts {
@@ -37,6 +38,7 @@ fn count_nodes(app: &Mkui) -> NodeCounts {
             NodeKind::Button(_) => counts.buttons += 1,
             NodeKind::Card(_) => counts.cards += 1,
             NodeKind::TextField(_) => counts.text_fields += 1,
+            NodeKind::ScrollArea(_) => counts.scroll_areas += 1,
             NodeKind::Root | NodeKind::Image(_) | NodeKind::Custom { .. } => {}
         }
     }
@@ -77,6 +79,25 @@ fn card_counts_as_its_own_node_kind_during_traversal() {
     let counts = count_nodes(&app);
     assert_eq!(counts.views, 1);
     assert_eq!(counts.cards, 1);
+    assert_eq!(counts.texts, 1);
+    assert_eq!(counts.buttons, 1);
+}
+
+#[test]
+fn scroll_area_counts_as_its_own_node_kind_during_traversal() {
+    // #328: `ScrollArea` is a distinct `NodeKind`, following the same
+    // promotion pattern `Card`/`TextField`/`Image` proved (ADR 0015).
+    let app = Mkui::new().child(
+        View::new().child(
+            ScrollArea::new()
+                .child(Text::new("inside"))
+                .child(Button::new("ok")),
+        ),
+    );
+
+    let counts = count_nodes(&app);
+    assert_eq!(counts.views, 1);
+    assert_eq!(counts.scroll_areas, 1);
     assert_eq!(counts.texts, 1);
     assert_eq!(counts.buttons, 1);
 }

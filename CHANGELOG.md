@@ -22,6 +22,37 @@ breaking changes can land on minor bumps).
   fully parsed and resolved against each shape's `objectBoundingBox`, but
   no GPU adapter in this workspace can shade one yet — GPU gradient
   shading and wiring `Document::shapes` into a renderer are follow-up work.
+- **`NodeKind::ScrollArea` — a viewport-clipping container promoted into
+  the shared contract (#328), following the `Card`/`TextField`/`Image`
+  promotion pattern (#270/#301/#312/#196, ADR 0015).** `mkui-runtime`
+  gains a `ScrollArea(ScrollAreaProps)` variant (empty props — scroll
+  offset is each backend's own transient view state, not tree-shared
+  data) and `AppTree::push_scroll_area[_unchecked]`; `mkui-core` gains a
+  `components::ScrollArea` builder (`.class`/`.child`, symmetric with
+  `View`/`Card`). `mkui-layout` treats it as an ordinary container with
+  one difference: its column-shrink floor is `0.0` rather than its own
+  natural height (CSS's `min-height: auto` resolving to zero for a scroll
+  container) — absorbing overflow is its whole purpose. Each backend
+  renders through its own native primitive: `mkui-web` emits a real
+  `overflow-y: auto` box (the browser owns scrolling entirely natively);
+  `mkui-wgpu` paints the existing `components::scroll_area`/`scrollbar`
+  chrome (#194) — its first live consumer anywhere in the crate, with a
+  scrollbar thumb sized to the real content:viewport ratio each frame;
+  `mkui-console` renders it transparently (no console-native scroll
+  primitive, same bar `Image`'s `[image WxH]` stub clears). The example
+  showcase's outermost page container (`examples/showcase-common`,
+  shared verbatim by `native-showcase`/`web-showcase`/`console-showcase`)
+  and `component-gallery`'s own root are now wrapped in `ScrollArea`
+  instead of a plain `View`, so content taller than the window scrolls
+  (web) or stays reachable past the window edge (wgpu/console) instead of
+  overlapping. Deferred, tracked as follow-ups: wheel/drag/keyboard/
+  gamepad input on the promoted `mkui-wgpu` component (`ScrollState`
+  itself already supports all four, #194 — wiring it into this crate's
+  live `winit` event loop plus shifting hit-test rects by the live offset
+  is separate input-substrate work), nested clipping (no generic clip/
+  scissor primitive on `Scene` yet), real per-area console scrolling, and
+  `mkui-c`/`mkui-py` constructors.
+
 - **`examples/shadcn-parity` — runnable side-by-side `mkui-web` vs.
   shadcn/ui parity fixture (#278).** Renders the shared `Card`/`Button`
   components through the production `mkui-web` DOM renderer next to a
@@ -267,6 +298,25 @@ breaking changes can land on minor bumps).
   #296) — out of scope here.
 
 ### Fixed
+- **`mkui-layout`'s column (height) flex-shrink now stops at a `View`/`Card`
+  child's own natural content height instead of compressing it below what
+  its subtree requires (#328).** `distribute_main_axis` used to shrink
+  every shrinkable child proportionally to its basis with no floor other
+  than zero on both axes; on the column axis this let a child's box end up
+  smaller than its own children needed, so those grandchildren were
+  positioned inside an undersized box and visibly overlapped the next
+  sibling — observed on `component-gallery` (#310) once a window's height
+  dropped below the showcase tree's natural content height. Block height
+  has no CSS "min-content" narrower than a child's own natural height, so
+  a plain `View`/`Card` column child's shrink floor is now that natural
+  height (it never actually shrinks on this axis); the row (width) axis
+  keeps its pre-existing zero floor unchanged (no min-content-width
+  concept exists yet). Once every shrinkable child bottoms out, remaining
+  negative free space is left unresolved and surfaces as genuine overflow
+  past the container's own box instead of overlap. Two new regression
+  tests in `crates/layout/src/lib.rs` lay out a minimal two-sibling repro
+  and the full canonical showcase tree at a viewport shorter than their
+  content and assert no overlap.
 - **`mkui-web` button listeners now resolve their action against the tree
   that owns their own mount, not a process-wide thread-local (#305).**
   `render_button` used to capture only the raw `(index, generation)` of a

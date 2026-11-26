@@ -1,5 +1,5 @@
 use mkui::prelude::*;
-use mkui_core::components::{Button, Card, Image, ImageFit, Text, TextField, View};
+use mkui_core::components::{Button, Card, Image, ImageFit, ScrollArea, Text, TextField, View};
 use mkui_core::headless::{ButtonVariant, TextVariant};
 
 /// A tiny (8x8) orange/blue checkerboard, generated once at
@@ -18,7 +18,15 @@ const CHECKERBOARD_PNG: &[u8] = &[
 pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
     Ok(Mkui::new()?
         .child(
-            View::new()
+            // #328: wrapped in a `ScrollArea` instead of a plain `View` —
+            // a one-token, purely structural swap (same `.class`/`.child`
+            // builder shape) so content that doesn't fit the window
+            // scrolls instead of overlapping. No existing section's
+            // content, text, or component usage below changes; the
+            // byte-identical-across-bindings property (#56 AC #3) is
+            // unaffected since C/Python call this exact same function,
+            // not a separate copy of its tree.
+            ScrollArea::new()
                 .class("flex-1")
                 .child(
                     // Header
@@ -368,13 +376,19 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
 /// letting the gallery go stale the way the landing-page showcase did
 /// before #310.
 pub fn create_gallery_ui() -> Result<Mkui, MkuiError> {
+    // #328: wrapped in a `ScrollArea` instead of a plain `View`, same
+    // additive swap `create_showcase_ui` got — content that doesn't fit
+    // the window scrolls/stays reachable instead of overlapping.
     Ok(Mkui::new()?.child(
-        View::new().class("flex-1").child(gallery_header()).child(
-            View::new()
-                .class("container mx-auto py-8 px-4 max-w-4xl space-y-8")
-                .child(button_section())
-                .child(card_section()),
-        ),
+        ScrollArea::new()
+            .class("flex-1")
+            .child(gallery_header())
+            .child(
+                View::new()
+                    .class("container mx-auto py-8 px-4 max-w-4xl space-y-8")
+                    .child(button_section())
+                    .child(card_section()),
+            ),
     ))
 }
 

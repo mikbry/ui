@@ -613,6 +613,80 @@ mod tests {
     }
 
     #[test]
+    fn scroll_area_box_clamps_to_the_viewport_while_its_child_keeps_its_natural_height() {
+        // #328: a `ScrollArea` wrapping content taller than the viewport
+        // must still report its own box at the viewport's height (so a
+        // sibling laid out after it, or the window itself, is not pushed
+        // around) while its child keeps its full natural height — the
+        // overflow a scrollbar/clip would need to act on, not something
+        // silently compressed away.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let scroll = tree.push_scroll_area(root, "flex-1").unwrap();
+        tree.push_text(
+            scroll,
+            "A very long line of body copy that is much taller than the tiny viewport below",
+            TextVariant::Body,
+            "",
+        )
+        .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 50.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        assert!(
+            (scroll_rect.size.height - 50.0).abs() < 0.01,
+            "ScrollArea's own box must clamp to the viewport budget, got {}",
+            scroll_rect.size.height
+        );
+
+        let child = result
+            .iter()
+            .find(|(id, _)| tree.get(*id).unwrap().parent == Some(scroll))
+            .map(|(_, r)| r)
+            .unwrap();
+        assert!(
+            child.size.height > scroll_rect.size.height,
+            "the child must keep its own natural (overflowing) height \
+             instead of being shrunk to fit the box: child {} vs box {}",
+            child.size.height,
+            scroll_rect.size.height
+        );
+    }
+
+    #[test]
+    fn scroll_area_child_fills_a_viewport_taller_than_its_natural_content() {
+        // #328: the mirror case — content shorter than the viewport.
+        // `flex-1` on the `ScrollArea` must still let it (and transitively
+        // its child, via the same re-resolve-on-grow pass every other
+        // container uses) fill the available height, so large-window
+        // layouts are unchanged from before this promotion.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let scroll = tree.push_scroll_area(root, "flex-1").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+        tree.push_text(inner, "short", TextVariant::Body, "")
+            .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 400.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        assert!(
+            (scroll_rect.size.height - 400.0).abs() < 0.01,
+            "ScrollArea must still grow to fill the viewport when content is short, got {}",
+            scroll_rect.size.height
+        );
+        let inner_rect = result.get(inner).unwrap();
+        assert!(
+            (inner_rect.size.height - 400.0).abs() < 0.01,
+            "a flex-1 descendant inside a short ScrollArea must still fill the viewport, got {}",
+            inner_rect.size.height
+        );
+    }
+
+    #[test]
     fn image_without_flex_grow_keeps_its_intrinsic_width_under_a_stretch_aligned_column() {
         // Regression: a `Column`'s default `Align::Stretch` hands *every*
         // child the full `inner_width` as `avail_width` regardless of
