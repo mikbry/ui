@@ -1328,6 +1328,54 @@ mod tests {
     }
 
     #[test]
+    fn an_extreme_radius_to_chord_ratio_from_a_tiny_chord_is_rejected_not_distorted() {
+        // Review round 4, case 1 exact repro: radius 1e6 over a chord of
+        // 1e-12 (ratio 1e18) is just as ill-conditioned as a huge absolute
+        // radius — the wrapping `scale(1e13)` is irrelevant to this
+        // rejection (it happens on the `d` attribute's own local-space
+        // numbers, in `crate::arc`, before any transform is applied) but
+        // is kept in the repro to match the review exactly, and to prove
+        // that whatever transform wraps an ill-conditioned arc, the
+        // parser still rejects it cleanly rather than emitting a visibly
+        // distorted shape (observed, pre-fix: a transformed midpoint
+        // around (464, -873) for what should have been nearly a straight
+        // line between (0,0) and (10,0)).
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(1e13)">
+                <path d="M0,0 A1e6,1e6 0 0 1 1e-12,0" fill="#000000"/>
+            </g>
+        </svg>"##;
+        assert!(matches!(
+            parse_svg(xml).unwrap_err(),
+            SvgError::InvalidValue { element, attr, .. } if element == "path" && attr == "d"
+        ));
+    }
+
+    #[test]
+    fn a_well_conditioned_huge_radius_renders_an_accurate_quarter_circle() {
+        // Review round 4, case 2 exact repro: `M2000000,0
+        // A2000000,2000000 0 0 1 0,2000000` with `scale(0.00001)` is
+        // equivalent to `M20,0 A20,20 0 0 1 0,20` — a perfectly
+        // well-conditioned quarter-circle (ratio ≈0.707) that an
+        // absolute-radius clamp (review round 3's mistake) would have
+        // wrongly distorted into a semicircle. Checked structurally
+        // (exactly one shape, a single cubic segment reaching the
+        // authored endpoint) rather than by hand-deriving the exact
+        // post-transform midpoint — `arc::tests::well_conditioned_arcs_are_accurate_at_any_absolute_scale`
+        // already covers the numeric accuracy at this same scale directly.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg">
+            <g transform="scale(0.00001)">
+                <path d="M2000000,0 A2000000,2000000 0 0 1 0,2000000" fill="#000000"/>
+            </g>
+        </svg>"##;
+        let doc = parse_svg(xml).expect("a well-conditioned ratio must not be rejected");
+        assert_eq!(doc.shapes.len(), 1);
+        let commands = &doc.shapes[0].path.commands;
+        assert_eq!(commands.len(), 2, "MoveTo + one CubicTo, no segment split");
+        assert!(matches!(commands[1], PathCommand::CubicTo { .. }));
+    }
+
+    #[test]
     fn a_finite_transform_that_overflows_this_shapes_points_is_rejected() {
         // Review round 2 exact repro: `scale(3e38, 1)`'s own entries are
         // finite (so it isn't caught as a singular/non-finite CTM in

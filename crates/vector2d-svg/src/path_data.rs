@@ -169,7 +169,12 @@ pub fn parse_path_data(d: &str) -> Option<Vec<PathCommand>> {
                 if to == cur {
                     // Spec F.6.2: identical endpoints omit the arc entirely.
                 } else {
-                    for (c1, c2, end) in arc_to_cubics(cur, rx, ry, rot, large_arc, sweep, to) {
+                    // `None` means this arc's radius-to-chord ratio is too
+                    // extreme to represent safely (see
+                    // `arc::MAX_RADIUS_TO_CHORD_RATIO`) — the `?` propagates
+                    // that out as the same typed `d`-grammar rejection any
+                    // other malformed path data gets.
+                    for (c1, c2, end) in arc_to_cubics(cur, rx, ry, rot, large_arc, sweep, to)? {
                         out.push(PathCommand::CubicTo {
                             control1: c1,
                             control2: c2,
@@ -300,12 +305,14 @@ mod tests {
     }
 
     #[test]
-    fn a_huge_radius_arc_is_followed_by_an_exactly_vertical_line() {
-        // Regression (review round 2) exact repro: an arc with a radius
-        // nine orders of magnitude larger than its chord used to miss its
-        // endpoint by several units, so the following `L10,10` came out
-        // diagonal instead of vertical.
-        let cmds = parse_path_data("M0,0 A100000000 100000000 0 0 1 10,0 L10,10").unwrap();
+    fn a_moderately_large_radius_arc_is_followed_by_an_exactly_vertical_line() {
+        // Regression (review round 2): an arc whose radius is large
+        // relative to its chord used to miss its endpoint by several
+        // units, so the following `L10,10` came out diagonal instead of
+        // vertical. Radius 1e4 over a 10-unit chord (ratio 1e3) is
+        // comfortably inside `arc::MAX_RADIUS_TO_CHORD_RATIO` (review
+        // round 4) — a case this must still get right, not reject.
+        let cmds = parse_path_data("M0,0 A10000 10000 0 0 1 10,0 L10,10").unwrap();
         let PathCommand::LineTo(final_point) = *cmds.last().unwrap() else {
             panic!("expected the trailing command to be the L10,10 LineTo");
         };
@@ -323,6 +330,15 @@ mod tests {
             other => panic!("expected the arc to lower to a CubicTo, got {other:?}"),
         };
         assert_eq!(landed_at, Vec2::new(10.0, 0.0));
+    }
+
+    #[test]
+    fn an_extreme_radius_to_chord_ratio_rejects_the_whole_d_attribute() {
+        // `arc::arc_to_cubics` returning `None` for an ill-conditioned
+        // radius-to-chord ratio (review round 4) must propagate out of
+        // `parse_path_data` as a whole-attribute rejection — not panic,
+        // not silently drop just the arc segment.
+        assert_eq!(parse_path_data("M0,0 A1e18,1e18 0 0 1 10,0"), None);
     }
 
     #[test]

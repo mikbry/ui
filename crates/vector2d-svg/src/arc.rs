@@ -14,29 +14,42 @@ use mkui_vector2d::Vec2;
 /// whatever the caller's pen position already is.
 pub type CubicSegment = (Vec2, Vec2, Vec2);
 
-/// Radii beyond this are clamped before any arc math runs, same philosophy
-/// as this parser's other anti-adversarial-input caps (nesting depth, XML
-/// node count): no realistic icon/portrait asset draws a curve with a
-/// multi-million-unit radius, and at a large enough radius *no* amount of
-/// floating-point precision fixes the underlying problem. Resolving a
-/// center offset that differs from the radius by the curve's sagitta
-/// (`chord² / (8·radius)`) needs roughly `radius²` worth of precision
-/// relative to the chord; even `f64`'s ~15-16 decimal digits run out well
-/// before `radius = 1e18` for any chord length this subset's shapes
-/// plausibly have (observed: a `1e18`-radius arc over a 10-unit chord
-/// reached the correct *endpoint* — that's pinned exactly, see
-/// [`arc_to_cubics`] — but its control points, and so the curve's
-/// interior, bulged out to roughly 5x the chord length). `1e6` is
-/// comfortably above any plausible authored radius and comfortably below
-/// where `f64` stops resolving a reasonable chord's sagitta.
-const MAX_ARC_RADIUS: f64 = 1e6;
+/// The largest `max(rx, ry) / chord` this module will attempt to compute
+/// rather than reject outright.
+///
+/// Neither `f32` nor `f64` is the real constraint here — *no* amount of
+/// precision fixes an ill-conditioned problem, because the conditioning is
+/// about the *ratio* between two scales, not either one's absolute
+/// magnitude (a radius of `2_000_000` over a chord of comparable length is
+/// just as well-behaved as a radius of `20` over a chord of `10` — floating
+/// point is relative, not absolute). What actually breaks the
+/// endpoint-to-center construction below is a radius *disproportionately*
+/// larger than the chord it spans: resolving the resulting center offset
+/// needs roughly `(chord / radius)² / 8` (the sagitta, relative to the
+/// radius) worth of relative precision, and `f64` only has ~2.22e-16 of
+/// that to spend. At this threshold the sagitta is still ~564× larger than
+/// that epsilon — comfortable margin — while well-conditioned arcs at any
+/// absolute scale (this subset's `d`-grammar numbers are plain `f32`s, so
+/// nothing here is bounded by the *document's* own coordinate magnitude)
+/// stay far below it. An earlier revision tried clamping the radius itself
+/// to an absolute cap instead: that neither caught an extreme ratio
+/// produced by a tiny chord at a merely large-but-capped radius, nor left
+/// alone a huge-but-well-conditioned radius/chord pair — this ratio is the
+/// actual conditioning measure, an absolute magnitude never was.
+const MAX_RADIUS_TO_CHORD_RATIO: f64 = 1e6;
 
 /// Convert an SVG elliptical arc from `start` to `end` into a chain of cubic
 /// Bézier segments, all in the same (SVG, y-down) coordinate space as
 /// `start`/`end`. `x_axis_rotation_deg` is the ellipse's own rotation.
-/// Returns `None` only for a degenerate case the caller should special-case
-/// instead of calling this: `start == end` (spec: omit the arc) is handled
-/// by the caller, not here.
+///
+/// `None` for two distinct reasons: `start == end` (spec: omit the arc) is
+/// the caller's special case, never reached here — and a radius so
+/// disproportionate to the chord it spans that computing it would be a
+/// best-effort guess at numerical noise rather than a representable curve
+/// (see `MAX_RADIUS_TO_CHORD_RATIO`) is this function's own typed
+/// rejection, matching this parser's "anything outside what can be safely
+/// represented is rejected, not guessed at" rule everywhere else (DOCTYPE,
+/// foreign namespaces, non-finite numbers, ...).
 pub fn arc_to_cubics(
     start: Vec2,
     rx: f32,
@@ -45,27 +58,22 @@ pub fn arc_to_cubics(
     large_arc: bool,
     sweep: bool,
     end: Vec2,
-) -> Vec<CubicSegment> {
+) -> Option<Vec<CubicSegment>> {
     // Spec F.6.2: a zero radius is equivalent to a straight line. A cubic
     // with both control points pinned to the endpoints traces exactly that
     // line (a non-uniform but still straight parametrization).
     if rx == 0.0 || ry == 0.0 {
-        return vec![(start, end, end)];
+        return Some(vec![(start, end, end)]);
     }
 
-    // Everything below runs in `f64`, not `f32`. A large-radius, shallow
-    // arc (a chord tiny relative to its radius — e.g. radius `1e8`, chord
-    // `10`) needs to resolve a center offset that differs from the radius
-    // by only a handful of parts in `1e-8` (the sagitta). `f32`'s ~7
-    // decimal digits of precision can't represent that at all once the
-    // magnitude reaches `1e8`: the center and every angle derived from it
-    // come out wrong by a visible amount (observed: a `1e8`-radius arc
-    // over a 10-unit chord missed its endpoint by ~2.5 units). `f64`'s ~15
-    // digits comfortably separates the two scales. Only the final control
-    // points/endpoint are narrowed back to `f32`, at the public API
-    // boundary (`Vec2` is `f32`).
-    let rx = (rx as f64).abs().min(MAX_ARC_RADIUS);
-    let ry = (ry as f64).abs().min(MAX_ARC_RADIUS);
+    // Everything below runs in `f64`, not `f32`: even a well-conditioned
+    // ratio (see `MAX_RADIUS_TO_CHORD_RATIO`) needs more than `f32`'s ~7
+    // decimal digits to resolve the center/angle math precisely once the
+    // radius and chord are at noticeably different scales. Only the final
+    // control points/endpoint are narrowed back to `f32`, at the public
+    // API boundary (`Vec2` is `f32`).
+    let rx = (rx as f64).abs();
+    let ry = (ry as f64).abs();
     let phi = (x_axis_rotation_deg as f64).to_radians();
     let (sin_phi, cos_phi) = phi.sin_cos();
     let (x1, y1) = (start.x as f64, start.y as f64);
@@ -85,6 +93,17 @@ pub fn arc_to_cubics(
     } else {
         (rx, ry)
     };
+
+    // Reject rather than compute an ill-conditioned arc — see
+    // `MAX_RADIUS_TO_CHORD_RATIO`'s docs. Using the (possibly step-2-
+    // enlarged) radius and the direct start→end distance: step 2 only ever
+    // *enlarges* a too-small radius to fit the chord, so by this point
+    // `max(rx, ry)` is already the effective radius the rest of this
+    // function will actually use.
+    let chord = (dx2 * dx2 + dy2 * dy2).sqrt() * 2.0;
+    if rx.max(ry) / chord > MAX_RADIUS_TO_CHORD_RATIO {
+        return None;
+    }
 
     // step 3: center (cx', cy') (F.6.5 step 2)
     let rx2 = rx * rx;
@@ -153,7 +172,7 @@ pub fn arc_to_cubics(
         segments.push((c1, c2, on_curve_end));
         a0 = a1;
     }
-    segments
+    Some(segments)
 }
 
 /// An ellipse centered at `(cx, cy)` with semi-axes `(rx, ry)`, rotated by
@@ -237,7 +256,8 @@ mod tests {
             false,
             true,
             Vec2::new(10.0, 0.0),
-        );
+        )
+        .unwrap();
         assert!(!segs.is_empty());
         let (_, _, end) = *segs.last().unwrap();
         assert!((end.x - 10.0).abs() < 1e-3);
@@ -254,7 +274,8 @@ mod tests {
             false,
             true,
             Vec2::new(0.0, 10.0),
-        );
+        )
+        .unwrap();
         assert_eq!(segs.len(), 1);
         // Midpoint of the cubic (De Casteljau at t=0.5) should be close to the
         // true circle point at 45 degrees: (10/sqrt(2), 10/sqrt(2)).
@@ -283,8 +304,8 @@ mod tests {
         // segment) way round vs. the long (270°, three 90° segments) way.
         let start = Vec2::new(10.0, 0.0);
         let end = Vec2::new(0.0, 10.0);
-        let small = arc_to_cubics(start, 10.0, 10.0, 0.0, false, true, end);
-        let large = arc_to_cubics(start, 10.0, 10.0, 0.0, true, true, end);
+        let small = arc_to_cubics(start, 10.0, 10.0, 0.0, false, true, end).unwrap();
+        let large = arc_to_cubics(start, 10.0, 10.0, 0.0, true, true, end).unwrap();
         assert_eq!(small.len(), 1);
         assert_eq!(large.len(), 3);
         let mid_small = cubic_at_half(start, small[0].0, small[0].1, small[0].2);
@@ -306,7 +327,8 @@ mod tests {
             false,
             true,
             Vec2::new(10.0, 0.0),
-        );
+        )
+        .unwrap();
         for (c1, c2, end) in segs {
             assert!(c1.x.is_finite() && c1.y.is_finite());
             assert!(c2.x.is_finite() && c2.y.is_finite());
@@ -321,10 +343,12 @@ mod tests {
         // nearly parallel — exactly the case for a shallow arc (chord tiny
         // relative to radius). A radius-100 arc spanning an endpoint just
         // 0.01 away used to collapse to a near-zero sweep (observed:
-        // landing around (7.6e-7, 0) instead of (0.01, 0)).
+        // landing around (7.6e-7, 0) instead of (0.01, 0)). Ratio here is
+        // only 1e4 — well inside `MAX_RADIUS_TO_CHORD_RATIO` — so this is
+        // still an *accepted*, computed arc, not a rejection.
         let start = Vec2::new(0.0, 0.0);
         let end = Vec2::new(0.01, 0.0);
-        let segs = arc_to_cubics(start, 100.0, 100.0, 0.0, false, true, end);
+        let segs = arc_to_cubics(start, 100.0, 100.0, 0.0, false, true, end).unwrap();
         let (_, _, reached_end) = *segs.last().unwrap();
         assert!(
             (reached_end.x - end.x).abs() < 1e-4,
@@ -346,19 +370,13 @@ mod tests {
     }
 
     #[test]
-    fn a_huge_radius_arc_reaches_its_exact_endpoint() {
-        // Regression (review round 2): `M0,0 A1e8 1e8 0 0 1 10 0`. A
-        // radius of 1e8 over a 10-unit chord needs a center offset that
-        // differs from the radius by only ~1.25e-7 (the sagitta) — `f32`
-        // (~7 decimal digits) cannot represent that distinction once the
-        // magnitude reaches `1e8` at all, so the center (and every angle
-        // derived from it) came out wrong by a visible amount. Observed:
-        // landed at (12.549789, 0) instead of (10, 0). `f64` intermediates
-        // plus pinning the final on-curve point to the authored `end` must
-        // both hold for this to land exactly.
+    fn a_moderately_large_radius_arc_reaches_its_exact_endpoint() {
+        // `M0,0 A10000 10000 0 0 1 10 0` — ratio 1e3, comfortably inside
+        // `MAX_RADIUS_TO_CHORD_RATIO`. `f64` intermediates plus pinning the
+        // final on-curve point to the authored `end` land exactly on it.
         let start = Vec2::new(0.0, 0.0);
         let end = Vec2::new(10.0, 0.0);
-        let segs = arc_to_cubics(start, 1e8, 1e8, 0.0, false, true, end);
+        let segs = arc_to_cubics(start, 1e4, 1e4, 0.0, false, true, end).unwrap();
         let (_, _, reached_end) = *segs.last().unwrap();
         assert_eq!(
             reached_end, end,
@@ -367,54 +385,68 @@ mod tests {
     }
 
     #[test]
-    fn every_segments_control_points_stay_finite_at_extreme_radius() {
+    fn well_conditioned_arcs_are_accurate_at_any_absolute_scale() {
+        // Review round 4, case 2: `M2000000,0 A2000000 2000000 0 0 1
+        // 0,2000000` is geometrically identical (just scaled ×100000) to
+        // the `quarter_circle_passes_near_the_true_arc_midpoint` case
+        // above — radius/chord ratio ≈0.707 either way — and must be just
+        // as accurate. Floating point is a relative, not absolute,
+        // precision budget: a well-conditioned ratio stays well-
+        // conditioned regardless of the absolute magnitude of the
+        // numbers involved, which is exactly why `MAX_RADIUS_TO_CHORD_RATIO`
+        // checks the *ratio*, not either value's magnitude (an earlier,
+        // wrong revision clamped the absolute radius instead, and this
+        // case is exactly what that wrongly broke).
+        let start = Vec2::new(2_000_000.0, 0.0);
+        let end = Vec2::new(0.0, 2_000_000.0);
+        let segs = arc_to_cubics(start, 2_000_000.0, 2_000_000.0, 0.0, false, true, end).unwrap();
+        assert_eq!(segs.len(), 1);
+        let (c1, c2, reached_end) = segs[0];
+        assert_eq!(reached_end, end);
+        let mid = cubic_at_half(start, c1, c2, reached_end);
+        let expected = 2_000_000.0 / std::f32::consts::SQRT_2;
+        // Same relative tolerance as the human-scale quarter-circle test,
+        // scaled up: 0.2 / 10.0 of the radius.
+        let tolerance = expected * 0.02;
+        assert!((mid.x - expected).abs() < tolerance, "mid = {mid:?}");
+        assert!((mid.y - expected).abs() < tolerance, "mid = {mid:?}");
+    }
+
+    #[test]
+    fn an_extreme_radius_to_chord_ratio_is_rejected_not_distorted() {
+        // Review round 3's repro (radius 1e18 over a 10-unit chord, ratio
+        // 1e17) is a textbook case for `MAX_RADIUS_TO_CHORD_RATIO`:
+        // rejected outright now, instead of a round-3-style clamp that
+        // would have silently changed the authored geometry.
         let segs = arc_to_cubics(
             Vec2::new(0.0, 0.0),
-            1e8,
-            1e8,
+            1e18,
+            1e18,
             0.0,
             false,
             true,
             Vec2::new(10.0, 0.0),
         );
-        for (c1, c2, end) in segs {
-            assert!(c1.x.is_finite() && c1.y.is_finite());
-            assert!(c2.x.is_finite() && c2.y.is_finite());
-            assert!(end.x.is_finite() && end.y.is_finite());
-        }
+        assert!(segs.is_none());
     }
 
     #[test]
-    fn an_absurd_radius_is_clamped_to_a_sane_arc_not_a_bulging_curve() {
-        // Regression (review round 3): endpoint pinning alone doesn't fix
-        // the *interior* of the curve. At radius 1e18 over a 10-unit
-        // chord, even `f64` can't resolve the sagitta relative to the
-        // radius, so the (unclamped) center/control-point math degenerated
-        // into numerical noise — observed control points landing around
-        // x≈66, well past the chord's own [0, 10] span, with the curve's
-        // interior overshooting to roughly x=51 before returning to
-        // (10, 0). `MAX_ARC_RADIUS` clamps the radius before any of that
-        // math runs, so the result is a sane, nearly-flat arc instead.
-        let start = Vec2::new(0.0, 0.0);
-        let end = Vec2::new(10.0, 0.0);
-        let segs = arc_to_cubics(start, 1e18, 1e18, 0.0, false, true, end);
-        assert_eq!(
-            segs.len(),
-            1,
-            "a clamped radius keeps this a shallow, single-segment arc"
+    fn a_huge_radius_over_a_tiny_chord_is_rejected_even_at_a_merely_large_absolute_radius() {
+        // Review round 4, case 1: radius 1e6 over a chord of 1e-12 has
+        // ratio 1e18 — just as ill-conditioned as the 1e18-radius case
+        // above, but reached through a *tiny chord* instead of a huge
+        // radius. A radius-only check (round 3's mistake) would have let
+        // this straight through since 1e6 isn't an unusually large radius
+        // on its own; only the ratio catches it.
+        let segs = arc_to_cubics(
+            Vec2::new(0.0, 0.0),
+            1e6,
+            1e6,
+            0.0,
+            false,
+            true,
+            Vec2::new(1e-12, 0.0),
         );
-        let (c1, c2, reached_end) = segs[0];
-        assert_eq!(reached_end, end);
-        // Every point - including the control points, which the endpoint
-        // pin alone does nothing for - stays within a sane margin of the
-        // chord's own span, nowhere near the ~66 the unclamped bulge
-        // reached.
-        for p in [c1, c2, reached_end] {
-            assert!(
-                (-1.0..=11.0).contains(&p.x),
-                "point {p:?} is far outside the chord's [0, 10] span"
-            );
-            assert!(p.y.abs() < 1.0, "point {p:?} bulges far off the chord");
-        }
+        assert!(segs.is_none());
     }
 }
