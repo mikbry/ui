@@ -657,6 +657,15 @@ impl WgpuApp {
         self.scene = output.scene;
         self.hit_tests = output.hit_tests;
         self.scroll_areas = scroll_areas;
+        // #328: write back the *clamped* offsets this walk actually used,
+        // not the raw ones `options.scroll_offsets` fed in — otherwise an
+        // over-scroll (a fast wheel flick past the content's end, or a
+        // resize that shrank `content_len`) would only ever grow in
+        // `self.scroll_offsets`, and scrolling the other way would do
+        // nothing visible until the stored value worked its way back
+        // under the real max. This also drops any id for a `ScrollArea`
+        // that no longer exists in the tree.
+        self.scroll_offsets = output.scroll_offsets;
         true
     }
 
@@ -2188,6 +2197,77 @@ mod tests {
             app.pointer.armed(),
             Some(hit_after.node),
             "a click at the scrolled button's new position must hit it"
+        );
+    }
+
+    /// #328 regression: `try_rebuild_scene_from_tree` must write back the
+    /// *clamped* offset each walk actually used (`output.scroll_offsets`),
+    /// not leave `self.scroll_offsets` holding whatever raw, possibly
+    /// over-scrolled value a fast wheel flick produced. Without this,
+    /// scrolling far past the content's end stores a value the real max
+    /// is nowhere near, and scrolling back the other way has no visible
+    /// effect until the stored value works its way back under the real
+    /// max — exactly what every other test in this module (all well
+    /// within the clamp range) would miss.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn wheel_overscroll_past_the_end_clamps_so_scrolling_back_moves_content_immediately() {
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui, ScrollArea, Text as CoreText, View};
+
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        assert!(app.update_frame());
+
+        let (_, scroll_rect) = *app
+            .scroll_areas
+            .first()
+            .expect("the ScrollArea must produce a scroll_areas entry");
+        let cursor_over_scroll_area = Point::new(
+            scroll_rect.origin.x + scroll_rect.size.width / 2.0,
+            scroll_rect.origin.y + scroll_rect.size.height / 2.0,
+        );
+        let effective = app.cursor_scale_factor();
+        app.pointer.update_cursor_raw(
+            cursor_over_scroll_area.x as f64 * effective,
+            cursor_over_scroll_area.y as f64 * effective,
+        );
+
+        // Flick far past the end — the content here is nowhere near 1000px
+        // of overflow, so the real max_offset is far smaller than this.
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::LineDelta(0.0, -1000.0)));
+        app.rebuild_scene_from_tree();
+        let hit_at_max = *app
+            .hit_tests
+            .first()
+            .expect("the button must still produce a hit-test entry");
+
+        // Scroll back up by one small notch.
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::LineDelta(0.0, 1.0)));
+        app.rebuild_scene_from_tree();
+        let hit_after_scrolling_back = *app
+            .hit_tests
+            .first()
+            .expect("the button must still produce a hit-test entry");
+
+        assert!(
+            hit_after_scrolling_back.rect.origin.y > hit_at_max.rect.origin.y,
+            "scrolling back up even one notch must move the content down \
+             immediately — if the stored offset were left unclamped at \
+             ~1000px instead of the real max, one notch back wouldn't \
+             move anything visible yet: at max {} after one notch back {}",
+            hit_at_max.rect.origin.y,
+            hit_after_scrolling_back.rect.origin.y
         );
     }
 

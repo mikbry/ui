@@ -231,6 +231,19 @@ pub struct WalkOutput {
     pub scene: Scene,
     pub hit_tests: Vec<HitTestEntry>,
     pub layouts: Vec<NodeLayout>,
+    /// Every `ScrollArea`'s offset actually used this walk, already
+    /// clamped to `[0, content_len - viewport_len]` (#328) — see
+    /// `apply_scroll_offsets`. A host that fed in an un-clamped,
+    /// possibly-over-scrolled raw offset (e.g. after a fast wheel flick
+    /// past the content's end, or a resize that shrank `content_len`)
+    /// must write *this* map back as its new `WalkOptions::scroll_offsets`
+    /// input for the next frame, not keep its own raw one — otherwise the
+    /// stored value only ever grows, and scrolling back the other way
+    /// does nothing visible until it works its way back under the real
+    /// max. A `ScrollArea` id with no entry here was not present in the
+    /// input map at all (nothing has tried to scroll it, or it no longer
+    /// exists in the tree).
+    pub scroll_offsets: HashMap<NodeId, f32>,
 }
 
 /// Per-call counters [`walk_app_tree_cached`] returns alongside its
@@ -751,6 +764,7 @@ fn walk_app_tree_inner(
             scene,
             hit_tests,
             layouts,
+            scroll_offsets: clamped_scroll_offsets,
         },
         stats,
     ))
