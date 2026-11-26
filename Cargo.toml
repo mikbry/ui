@@ -7,6 +7,7 @@ members = [
     "crates/layout",           # Backend-neutral flex layout engine over AppTree (#63)
     "crates/vector2d",         # Backend-neutral 2D paths/curves + Slug glyph encoder (Sprint 7)
     "crates/vector2d-wgpu",      # Native WGPU adapter for Slug glyph blobs (Sprint 7, #66)
+    "crates/vector2d-svg",      # Sanitized-subset SVG parser + mkui-vector2d lowering (#201)
     "crates/wgpu",             # WGPU-facing scene primitives and declarative builders
     "crates/hud",              # Second-class, host-reusable HUD plumbing (ADR 0013, #290)
     "crates/web",              # Web/WASM renderer
@@ -53,6 +54,7 @@ default-members = [
     "crates/text",
     "crates/layout",
     "crates/vector2d",
+    "crates/vector2d-svg",
     "crates/wgpu",
     "crates/hud",
     "crates/web",
@@ -78,6 +80,11 @@ repository = "https://github.com/mikbry/ui"
 [workspace.dependencies]
 # Core
 thiserror = "1.0"
+
+# Vector / SVG (#201): XML tokenization only — value parsing (numbers, path
+# data, transforms, color) is hand-written against the sanitized subset's
+# grammar, never delegated to svgtypes/usvg (see deny.toml [bans]).
+roxmltree = "0.21"
 
 # Web
 wasm-bindgen = "0.2"

@@ -8,6 +8,20 @@ breaking changes can land on minor bumps).
 ## [Unreleased]
 
 ### Added
+- **`mkui-vector2d-svg` — sanitized-subset SVG parser + `mkui-vector2d`
+  lowering (#201).** Renders host-supplied vector art (icons, portraits)
+  limited to a deliberately small subset: shapes (`path circle ellipse rect
+  line polyline polygon g defs`), linear/radial gradients with stops, and
+  the presentation attributes `fill stroke opacity transform`. XML
+  tokenization goes through `roxmltree`; numbers, the `d` path-data grammar
+  (including elliptical arcs), `transform` functions, and color are
+  hand-written against exactly the subset's grammar — no `svgtypes`, no
+  `usvg` (now a `deny.toml` `[bans]` entry). An element/attribute outside
+  the subset, a DOCTYPE, a processing instruction, or non-whitespace text
+  is a typed `SvgError`, never a best-effort guess. Gradient *data* is
+  fully parsed and resolved against each shape's `objectBoundingBox`, but
+  no GPU adapter in this workspace can shade one yet — GPU gradient
+  shading and wiring `Document::shapes` into a renderer are follow-up work.
 - **`examples/shadcn-parity` — runnable side-by-side `mkui-web` vs.
   shadcn/ui parity fixture (#278).** Renders the shared `Card`/`Button`
   components through the production `mkui-web` DOM renderer next to a

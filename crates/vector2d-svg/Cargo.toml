@@ -1,0 +1,14 @@
+[package]
+name = "mkui-vector2d-svg"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Sanitized-subset SVG parser + mkui-vector2d lowering: roxmltree for XML, hand-written value parsers for numbers/path-data/transform/color (no svgtypes, no usvg)"
+
+[dependencies]
+thiserror = { workspace = true }
+roxmltree = { workspace = true }
+mkui-vector2d = { path = "../vector2d" }
