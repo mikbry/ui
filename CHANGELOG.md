@@ -29,6 +29,59 @@ breaking changes can land on minor bumps).
   Card's lack of shadcn's `data-slot` sub-component structure (tracked in
   #276).
 
+- **`NodeKind::TextField` — a single-line editable text input promoted
+  into the shared contract (#312), following the `Card` promotion
+  pattern (#270/#301, ADR 0015).** `mkui-runtime::tree::NodeKind` gains a
+  `TextField(TextFieldProps)` variant: `value`, `placeholder`, byte-offset
+  `caret`/`anchor` (directional, not a normalized selection range, so an
+  extend-selection gesture round-trips which end is moving), `disabled`,
+  and `invalid` (the shadcn `aria-invalid` convention). `AppTree` gains
+  `push_text_field[_unchecked]`, a `set_text_field_value` setter (clamps
+  `caret`/`anchor` to a UTF-8 char boundary and strips line breaks, same
+  no-op-on-equal contract as `set_text_props`/`set_button_props`), and a
+  new singleton `focused_text_field: Option<NodeId>` + `focus_text_field`/
+  `blur_text_field` (at most one field focused at a time, cleared
+  automatically on `remove_node`) — the first promoted component with
+  live, user-driven mutable state rather than only declaratively-set
+  props. `mkui-core::components::TextField` is the ergonomic builder,
+  registered in `LoweringRegistry::with_defaults`; `mkui-layout` measures
+  it as a leaf (`LeafMeasure::measure_text_field`, a new required trait
+  method — every implementor updated). Every backend renders through its
+  own native primitive and reuses `mkui-wgpu`'s pre-existing, already-
+  tested `text_edit::TextEditState` (#185) editing algorithm unchanged —
+  this promotion adds a new entry path into that logic, not a parallel
+  reimplementation: `mkui-wgpu`'s `WgpuApp` click-to-focuses a field
+  (reusing the existing `HitTestEntry`/`ClickHit` pointer machinery — a
+  text field's hit entry carries `action: None`) and routes
+  typing/Backspace/Delete/Home/End/Shift-extend-selection/Ctrl+A through a
+  transient `TextEditState::from_parts` built from the node's current
+  state each keystroke, writing the result back via
+  `set_text_field_value`; `theme.input_invalid()` gives an invalid field a
+  destructive-stroke treatment regardless of focus, and disabled dims
+  fill/stroke/text/caret by the same `DISABLED_ALPHA_FACTOR` disabled
+  buttons use. `mkui-web` renders a real `<input>`, wiring `disabled`/
+  `aria-invalid` from the shared flags and `oninput`/`onfocus`/`onblur` to
+  write the live value/caret/selection (converted from the browser's
+  UTF-16 selection offsets to the UTF-8 byte offsets the contract carries)
+  back into the tree. `mkui-console` renders a bracketed `[value]` row
+  with a dedicated typed-input edit mode (Enter to start editing,
+  Enter/Esc to stop) — caret/selection mid-string editing is a documented
+  follow-up (#317), explicitly allowed by #312's own acceptance criteria.
+  Real OS clipboard (Ctrl+C/X/V) and `winit::event::Ime` composition
+  wiring for `mkui-wgpu`, and `mkui-c`/`mkui-py` FFI constructors, are
+  also deferred to #317 — `TextEditState::copy`/`cut`/`paste`/
+  `set_composing` remain exactly as #185 shipped and tested them, just not
+  yet wired to a live OS clipboard or `Ime` event from this new
+  declarative-tree entry point. `examples/showcase-common` gained a "Text
+  Field" section (enabled/disabled/invalid) exercised through every
+  backend's canonical showcase. See
+  `docs/architecture/0015-component-promotion-process.md`'s "Text field:
+  the third completed case" section for the full design rationale.
+- **Source migration for `TextField`:** exhaustive Rust matches on
+  `mkui_runtime::tree::NodeKind` must handle `NodeKind::TextField(_)` (as
+  a leaf, like `Text`/`Button` — never a container); `mkui_layout::
+  LeafMeasure` implementors must add `measure_text_field`. No existing
+  constructor signature changed.
 - **`NodeKind::Card` — the second component promoted into the shared
   contract, plus `Button`'s `disabled` field folded in as the first
   completed case (#270, #245).** `mkui-runtime::tree::NodeKind` gains a

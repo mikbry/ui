@@ -231,6 +231,7 @@ fn render_node(
             el
         }
         NodeKind::Button(b) => render_button(tree, node, b, document, owner)?,
+        NodeKind::TextField(f) => render_text_field(node, f, document, owner)?,
         NodeKind::Custom { type_name, props } => {
             // Custom renderers are responsible for their own children; we
             // do not recurse automatically because a Custom may want to
@@ -351,6 +352,158 @@ fn fire_action(owner: &Rc<RefCell<AppTree>>, index: u32, generation: u32) -> boo
         .any(|s| matches!(s, RuntimeSignal::RequestRedraw))
 }
 
+/// Convert a UTF-16 code-unit offset (the unit JS string indices and a
+/// native `<input>`'s `selectionStart`/`selectionEnd` use) into a UTF-8
+/// byte offset into `s` (#312 — the unit `mkui_runtime::TextFieldProps`
+/// carries). Required because the two units diverge for any character
+/// outside the Basic Latin range (accents, CJK, emoji): treating a
+/// `selectionStart` value as a byte offset directly would misplace the
+/// caret, or — worse — land mid-character and panic a later byte slice.
+fn utf16_offset_to_byte_offset(s: &str, utf16_offset: usize) -> usize {
+    let mut utf16_count = 0usize;
+    for (byte_idx, ch) in s.char_indices() {
+        if utf16_count >= utf16_offset {
+            return byte_idx;
+        }
+        utf16_count += ch.len_utf16();
+    }
+    s.len()
+}
+
+/// Read `input`'s current value and selection and write them into
+/// `owner`'s `TextField` node at `(index, generation)` (#312). Called from
+/// a `TextField`'s `oninput`/`onblur` closures installed in
+/// [`render_text_field`] — same per-mount `owner` clone [`fire_action`]
+/// uses, for the same `'static` closure-capture reason (#305).
+///
+/// `selectionStart`/`selectionEnd` are always reported in UTF-16 order
+/// (`start <= end`) regardless of which end the user is actually dragging
+/// from; `selectionDirection` says which end is the live caret, so this
+/// re-derives the directional `(caret, anchor)` pair
+/// `mkui_runtime::TextFieldProps` carries, then converts both from UTF-16
+/// code units to UTF-8 bytes via `utf16_offset_to_byte_offset`. Returns
+/// `true` if anything in the tree actually changed.
+fn sync_text_field(
+    owner: &Rc<RefCell<AppTree>>,
+    index: u32,
+    generation: u32,
+    input: &web_sys::HtmlInputElement,
+) -> bool {
+    let id = NodeId::from_raw(index, generation);
+    let value = input.value();
+    let start = input.selection_start().ok().flatten().unwrap_or(0) as usize;
+    let end = input
+        .selection_end()
+        .ok()
+        .flatten()
+        .map(|v| v as usize)
+        .unwrap_or(start);
+    let backward = input.selection_direction().ok().flatten().as_deref() == Some("backward");
+    let (caret_utf16, anchor_utf16) = if start == end {
+        (start, None)
+    } else if backward {
+        (start, Some(end))
+    } else {
+        (end, Some(start))
+    };
+    let caret = utf16_offset_to_byte_offset(&value, caret_utf16);
+    let anchor = anchor_utf16.map(|a| utf16_offset_to_byte_offset(&value, a));
+    owner
+        .borrow_mut()
+        .set_text_field_value(id, &value, caret, anchor)
+}
+
+/// Focus the `TextField` node at `(index, generation)` as `owner`'s one
+/// live [`mkui_runtime::AppTree::focused_text_field`] (#312). Called from
+/// a `TextField`'s `onfocus` closure installed in [`render_text_field`].
+fn focus_text_field(owner: &Rc<RefCell<AppTree>>, index: u32, generation: u32) -> bool {
+    let id = NodeId::from_raw(index, generation);
+    owner.borrow_mut().focus_text_field(id)
+}
+
+/// Blur whichever `TextField` is focused in `owner`, if any (#312). Called
+/// from a `TextField`'s `onblur` closure — a singleton clear, same as
+/// [`mkui_runtime::AppTree::blur_text_field`] itself, since only one field
+/// is ever focused at a time.
+fn blur_text_field(owner: &Rc<RefCell<AppTree>>) -> bool {
+    owner.borrow_mut().blur_text_field()
+}
+
+/// Renders [`mkui_runtime::NodeKind::TextField`] (#312) through a real
+/// `<input>` — a native element gets focus/caret/selection, keyboard
+/// editing, and IME composition for free, which is exactly the "mkui-web
+/// becomes a renderer of the contract" promise ADR 0015 describes for
+/// `Card`, now for an interactive leaf instead of a static container.
+/// `disabled`/`invalid` map to the real `disabled` attribute and the
+/// shadcn `aria-invalid` convention; `oninput`/`onfocus`/`onblur` write the
+/// live value/caret/selection (and the tree's singleton
+/// `focused_text_field`) back into the exact tree this node was rendered
+/// from — a cloned `owner` [`render_button`]'s `onclick` already uses,
+/// not the pre-#305 thread-local dance, so two mounted trees that happen
+/// to allocate the same raw `NodeId` never cross-write each other's state.
+fn render_text_field(
+    node: &mkui_runtime::Node,
+    field: &mkui_runtime::TextFieldProps,
+    document: &Document,
+    owner: &Rc<RefCell<AppTree>>,
+) -> Result<Element, JsValue> {
+    let input = document
+        .create_element("input")?
+        .dyn_into::<web_sys::HtmlInputElement>()?;
+    input.set_type("text");
+    input.set_value(&field.value);
+    input.set_placeholder(&field.placeholder);
+    input.set_disabled(field.disabled);
+
+    let class = if node.class.raw().is_empty() {
+        "text-field".to_string()
+    } else {
+        format!("text-field {}", node.class.raw())
+    };
+    input.set_class_name(&class);
+
+    let html: &web_sys::HtmlElement = input.dyn_ref().unwrap();
+    if field.invalid {
+        html.set_attribute("aria-invalid", "true")?;
+    } else {
+        html.remove_attribute("aria-invalid")?;
+    }
+
+    // Disabled native inputs never fire `input`/`focus` — no listeners to
+    // install, same as `render_button` skipping `onclick` on a disabled
+    // button.
+    if !field.disabled {
+        let node_idx = node.id.index();
+        let node_gen = node.id.generation();
+
+        let owner_for_input = Rc::clone(owner);
+        let input_for_input = input.clone();
+        let oninput = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            sync_text_field(&owner_for_input, node_idx, node_gen, &input_for_input);
+        }) as Box<dyn FnMut(_)>);
+        input.set_oninput(Some(oninput.as_ref().unchecked_ref()));
+        oninput.forget();
+
+        let owner_for_focus = Rc::clone(owner);
+        let onfocus = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            focus_text_field(&owner_for_focus, node_idx, node_gen);
+        }) as Box<dyn FnMut(_)>);
+        input.set_onfocus(Some(onfocus.as_ref().unchecked_ref()));
+        onfocus.forget();
+
+        let owner_for_blur = Rc::clone(owner);
+        let input_for_blur = input.clone();
+        let onblur = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            sync_text_field(&owner_for_blur, node_idx, node_gen, &input_for_blur);
+            blur_text_field(&owner_for_blur);
+        }) as Box<dyn FnMut(_)>);
+        input.set_onblur(Some(onblur.as_ref().unchecked_ref()));
+        onblur.forget();
+    }
+
+    Ok(input.into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,5 +522,40 @@ mod tests {
             Err(JsValue::from_str("unsupported"))
         });
         assert!(registry.has_fallback());
+    }
+
+    // `utf16_offset_to_byte_offset` is pure Rust — no DOM, so it's one of
+    // the few `TextField` (#312) code paths this crate can unit test
+    // natively (see `tests/web_smoke.rs`'s module doc for why the
+    // DOM-touching paths can't).
+
+    #[test]
+    fn ascii_utf16_and_byte_offsets_coincide() {
+        assert_eq!(utf16_offset_to_byte_offset("hello", 3), 3);
+    }
+
+    #[test]
+    fn multi_byte_char_before_the_offset_shifts_the_byte_offset_forward() {
+        // "é" is 1 UTF-16 code unit but 2 UTF-8 bytes.
+        assert_eq!(utf16_offset_to_byte_offset("é is nice", 1), 2);
+        assert_eq!(utf16_offset_to_byte_offset("é is nice", 0), 0);
+    }
+
+    #[test]
+    fn an_offset_past_the_end_clamps_to_the_strings_byte_length() {
+        assert_eq!(utf16_offset_to_byte_offset("hi", 999), 2);
+    }
+
+    #[test]
+    fn a_surrogate_pair_char_counts_as_two_utf16_units() {
+        // "😀" (U+1F600) is one Unicode scalar, 2 UTF-16 code units, 4
+        // UTF-8 bytes. An offset of 1 falls between the two UTF-16 units
+        // of that single surrogate pair — not a boundary a byte offset
+        // could ever land on — so it rounds forward to the next real char
+        // boundary (4) rather than returning a mid-character byte index.
+        let s = "😀x";
+        assert_eq!(utf16_offset_to_byte_offset(s, 0), 0);
+        assert_eq!(utf16_offset_to_byte_offset(s, 1), 4);
+        assert_eq!(utf16_offset_to_byte_offset(s, 2), 4);
     }
 }

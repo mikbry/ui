@@ -142,6 +142,49 @@ a responsive grid) is **not** part of this promotion — #195 remains the
 tracking issue for that, now with a real cross-backend `Card` node to
 build on instead of a wgpu-only chrome helper.
 
+### Text field: the third completed case (#312)
+
+`NodeKind::TextField(TextFieldProps { value, placeholder, caret, anchor, disabled, invalid })` —
+promoted from `mkui-wgpu`'s wgpu-local `components::text_field`/`TextEditState`
+(#185), following the same checklist `Card` proved. Unlike `Card`, it is a
+*mutable* leaf: a backend writes `value`/`caret`/`anchor` back into the
+tree on every keystroke via `AppTree::set_text_field_value` (clamped to a
+UTF-8 char boundary and line-break-stripped, the same safety
+`TextFieldProps::new` applies at construction), rather than only ever
+reading declaratively-set props the way `Button`/`Card` do. `caret`/
+`anchor` are kept directional (an `anchor`, not a normalized `(start,
+end)` selection) so a Shift+Left/Right or a native `<input>`'s
+`selectionDirection` round-trips through the tree without losing which
+end is the moving one.
+
+Focus is a new concept this promotion introduces: `AppTree` carries a
+singleton `focused_text_field: Option<NodeId>` (at most one field focused
+at a time, mirroring a browser's own invariant) rather than a per-node
+`focused: bool` — cheaper to maintain (no need to scan every other node
+to clear its flag) and the natural shape for "exactly one" state.
+`mkui-wgpu`'s `WgpuApp` sets it on click (reusing the existing
+`HitTestEntry`/`ClickHit` pointer machinery — a text field's hit entry
+just carries `action: None`) and clears it on Escape or a click
+elsewhere; `mkui-web` sets it from the native `<input>`'s `onfocus`/
+`onblur`. `mkui-wgpu`'s walker paints the caret only while the node is
+the focused one.
+
+`on_change`/a payload-carrying callback is deliberately absent:
+`ActionRegistry` actions are `FnMut(&mut RuntimeCtx)` with no argument
+slot for a new value, and the tree itself is the contract — any code
+holding the `NodeId` reads the live value back directly. Clipboard
+contents and IME composition state stay out of `TextFieldProps` entirely,
+per the issue's own framing ("platform concerns each backend implements
+against its own primitives, not shared state") — `mkui-wgpu`'s keyboard
+routing reuses `TextEditState::from_parts`/`.text()`/`.caret()`/
+`.anchor()` each frame as a transient bridge to the pre-existing, already-
+tested editing algorithm (typing, Backspace/Delete, Home/End, Shift-
+extend-selection, Ctrl+A), so #185's logic is exercised unchanged through
+this new entry path — real OS clipboard and `winit::event::Ime` wiring
+for `mkui-wgpu`, and caret/selection for `mkui-console` (typed input only,
+append/backspace at the end — explicitly allowed as a documented
+follow-up by #312's own acceptance criteria), are deferred to #317.
+
 ### Button + disabled: the first completed case, folded in
 
 #245 asked for `disabled: bool` on `ButtonProps`/`NodeKind::Button`,
@@ -198,14 +241,15 @@ and Python default dispatch are covered by tests.
   and out of this issue's scope, but a future reader should treat ADR
   0005 and this ADR as the current statement of where the contract lives.
 
-### Component status (2026-11-20)
+### Component status (2026-11-26)
 
 | Component | `mkui-core`/`mkui-runtime` | `mkui-wgpu` | `mkui-web` | `mkui-console` | Status |
 |---|---|---|---|---|---|
 | Button | `NodeKind::Button` (+`disabled`, #245) | yes | yes | yes | **Done** |
 | Card | `NodeKind::Card` (#270) | yes | yes | yes (border rule) | **Done** (chrome only — see #195 for image/grid/states) |
+| Text field (Input) | `NodeKind::TextField` (+`disabled`/`invalid`, #312) | yes (typing/caret/selection; clipboard/IME wiring deferred — #317) | yes (native `<input>`) | yes (typed input; caret/selection deferred — #317) | **Done** (#185's editing logic unchanged; #317 tracks the deferred platform integrations) |
 | Badge, Dot, Tooltip, Toast | — | `mkui-wgpu`-only (badge/dot/tooltip reachable via `NodeKind::Custom`, wgpu-registered only) | no | no | Not promoted |
-| Dialog, Slider, Toggle, Segmented select, Chip group, Progress bar, Scroll area, Text field, Panels | — | `mkui-wgpu`-only | no | no | Not promoted |
+| Dialog, Slider, Toggle, Segmented select, Chip group, Progress bar, Scroll area, Panels | — | `mkui-wgpu`-only | no | no | Not promoted |
 
 ## Alternatives considered
 

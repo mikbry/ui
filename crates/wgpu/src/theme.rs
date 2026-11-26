@@ -830,6 +830,23 @@ impl WgpuTheme {
         }
     }
 
+    /// Invalid-state text input chrome (#312 — the shadcn `aria-invalid`
+    /// convention's wgpu visual treatment): [`Self::input`]'s chrome with
+    /// the stroke swapped to `destructive` so an invalid field reads as
+    /// such regardless of focus, mirroring `mkui-web`'s
+    /// `[aria-invalid="true"]` CSS rule and `mkui-console`'s invalid
+    /// marker. A separate method rather than an `invalid: bool` parameter
+    /// on [`Self::input`] so that method's existing callers (including
+    /// the pre-#312 `UiBuilder::number_row`) keep compiling unchanged.
+    pub fn input_invalid(&self, active: bool) -> InputStyle {
+        let mut style = self.input(active);
+        style.stroke = self.tokens.destructive;
+        style.stroke_width = style
+            .stroke_width
+            .max(self.tokens.spacing.stroke_width_hairline * 1.5);
+        style
+    }
+
     /// Modal dialog chrome: the full-viewport backdrop scrim plus the roomy
     /// panel preset (#188). Two stacked dialogs each call this and compose
     /// correctly without any special-casing — the second call's backdrop

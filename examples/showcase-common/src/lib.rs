@@ -1,5 +1,5 @@
 use mkui::prelude::*;
-use mkui_core::components::{Button, Card, Text, View};
+use mkui_core::components::{Button, Card, Text, TextField, View};
 use mkui_core::headless::{ButtonVariant, TextVariant};
 
 // Create the common showcase UI structure
@@ -172,6 +172,44 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                     Button::new("Disabled")
                                                         .variant(ButtonVariant::Secondary)
                                                         .disabled(true)
+                                                )
+                                        )
+                                )
+                                .child(
+                                    // Text field showcase section (#312) — promoted from
+                                    // mkui-wgpu's wgpu-local chrome into the shared contract,
+                                    // following the same `Card` promotion pattern (#270/#301,
+                                    // ADR 0015). Exercised through every backend's canonical
+                                    // showcase (that ADR's step 7), not only each crate's own
+                                    // test suite.
+                                    Card::new()
+                                        .class("p-6")
+                                        .child(
+                                            View::new()
+                                                .class("mb-6")
+                                                .child(
+                                                    Text::new("Text Field")
+                                                        .variant(TextVariant::Heading2)
+                                                        .class("text-2xl font-semibold leading-none tracking-tight")
+                                                )
+                                                .child(
+                                                    Text::new("A single-line editable text input, with disabled and invalid states")
+                                                        .variant(TextVariant::Caption)
+                                                        .class("text-sm text-muted-foreground mt-2")
+                                                )
+                                        )
+                                        .child(
+                                            View::new()
+                                                .class("flex flex-col gap-4")
+                                                .child(TextField::new("").placeholder("Email"))
+                                                .child(
+                                                    TextField::new("disabled@example.com")
+                                                        .disabled(true)
+                                                )
+                                                .child(
+                                                    TextField::new("not-an-email")
+                                                        .placeholder("Email")
+                                                        .invalid(true)
                                                 )
                                         )
                                 )

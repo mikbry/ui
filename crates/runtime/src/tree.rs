@@ -85,6 +85,15 @@ pub enum NodeKind {
     /// own, same as [`ViewProps`] — the chrome itself comes from each
     /// backend's theme, not from a field here.
     Card(CardProps),
+    /// A single-line editable text input (#312) — promoted from
+    /// `mkui-wgpu`'s wgpu-local `components::text_field`/`TextEditState`
+    /// (#185) into the shared contract, following the same promotion
+    /// pattern `Card` proved (#270/#301, ADR 0015). Every backend renders
+    /// it through its own native text-entry primitive (`mkui-web`: a real
+    /// `<input>`; `mkui-wgpu`: the existing caret/selection chrome;
+    /// `mkui-console`: a bracketed row) rather than `mkui-wgpu` staying
+    /// the sole owner of the component's existence.
+    TextField(TextFieldProps),
     /// Extension slot. `type_name` identifies the component (`"test_widget"`,
     /// `"separator"`, …) and `props` is a renderer-readable JSON payload.
     Custom {
@@ -108,6 +117,62 @@ pub struct ViewProps {}
 /// state) can be added without a breaking `NodeKind` shape change.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardProps {}
+
+/// Payload for a `TextField` node (#312): a single-line editable text
+/// input.
+///
+/// `caret`/`anchor` are byte offsets into `value`, always on a UTF-8 char
+/// boundary — the same representation `mkui-wgpu`'s `TextEditState` (#185)
+/// already uses internally. Kept directional (an `anchor` rather than a
+/// normalized `(start, end)` selection) so an extend-selection gesture
+/// (Shift+Left/Right, or a native `<input>`'s `selectionDirection`) can
+/// round-trip through the tree without losing which end is the moving one.
+/// `anchor == None` means no selection; an `anchor` equal to `caret`
+/// collapses to no visible selection too, same as `TextEditState`.
+///
+/// Clipboard contents and IME composition state are deliberately absent:
+/// the issue scopes those as "platform concerns each backend implements
+/// against its own primitives, not shared state" — only the *result* of
+/// an edit (the new `value`/`caret`/`anchor`) crosses into the shared
+/// contract. `NodeKind` derives `Eq`, ruling out a raw float the same way
+/// `CardProps`/`ButtonProps` already do — nothing here needs one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextFieldProps {
+    pub value: String,
+    #[serde(default)]
+    pub placeholder: String,
+    pub caret: usize,
+    #[serde(default)]
+    pub anchor: Option<usize>,
+    #[serde(default)]
+    pub disabled: bool,
+    #[serde(default)]
+    pub invalid: bool,
+}
+
+impl TextFieldProps {
+    /// New props with `value`'s caret at its end (byte length) and no
+    /// selection — mirrors `TextEditState::new`'s default, and strips line
+    /// breaks the same way (#312 is a single-line field).
+    pub fn new(value: impl Into<String>) -> Self {
+        let value = strip_line_breaks(&value.into()).into_owned();
+        let caret = value.len();
+        Self {
+            value,
+            placeholder: String::new(),
+            caret,
+            anchor: None,
+            disabled: false,
+            invalid: false,
+        }
+    }
+}
+
+impl Default for TextFieldProps {
+    fn default() -> Self {
+        Self::new(String::new())
+    }
+}
 
 /// Payload for a `Text` node: the string to render plus the semantic
 /// [`TextVariant`] that drives the renderer's typographic scale.
@@ -162,6 +227,15 @@ pub struct AppTree {
     /// trading precision for safety on the untracked-mutation path.
     epoch: u64,
     actions: ActionRegistry,
+    /// At most one `TextField` node is focused at a time (#312) — a
+    /// singleton, same as a browser's own "one focused element" invariant,
+    /// rather than a per-node `focused` flag every backend would have to
+    /// remember to clear on every other node whenever one gains focus.
+    /// `mkui-wgpu`'s click-to-focus, `mkui-web`'s `onfocus`/`onblur`, and
+    /// `mkui-console`'s Enter-to-edit all read/write this one slot so the
+    /// caret-visibility decision (should `mkui-wgpu` paint one this frame?)
+    /// lives in the shared tree, not duplicated per backend.
+    focused_text_field: Option<NodeId>,
 }
 
 #[derive(Debug)]
@@ -187,6 +261,7 @@ impl AppTree {
             next_revision: 0,
             epoch: 0,
             actions: ActionRegistry::new(),
+            focused_text_field: None,
         };
         // The root is allocated like any other node so its NodeId follows the
         // same `(index, generation)` shape FFI handles use.
@@ -282,6 +357,43 @@ impl AppTree {
 
     pub fn actions_mut(&mut self) -> &mut ActionRegistry {
         &mut self.actions
+    }
+
+    /// The currently-focused `TextField` node, if any (#312). Automatically
+    /// `None` once that node is removed ([`AppTree::remove_node`] clears
+    /// the slot) — a caller never has to separately check staleness.
+    pub fn focused_text_field(&self) -> Option<NodeId> {
+        self.focused_text_field
+    }
+
+    /// Focus `id` as the one live `TextField` (#312), clearing whichever
+    /// node (if any) was previously focused. Returns `false` (no-op, no
+    /// touch) if `id` is stale/missing or already the focused node. Does
+    /// **not** check `id` actually names a `TextField` node — a backend
+    /// that only ever calls this from its own text-field click/Tab-focus
+    /// path never passes anything else, and rejecting a non-`TextField` id
+    /// here would just be a second place that invariant could drift out of
+    /// sync with the first.
+    pub fn focus_text_field(&mut self, id: NodeId) -> bool {
+        if self.get(id).is_none() || self.focused_text_field == Some(id) {
+            return false;
+        }
+        let previous = self.focused_text_field.replace(id);
+        if let Some(previous) = previous {
+            self.touch(previous);
+        }
+        self.touch(id);
+        true
+    }
+
+    /// Clear the focused `TextField` slot, if one is set (#312). Returns
+    /// `false` (no-op) if nothing was focused.
+    pub fn blur_text_field(&mut self) -> bool {
+        let Some(previous) = self.focused_text_field.take() else {
+            return false;
+        };
+        self.touch(previous);
+        true
     }
 
     /// Look up a node by id. Returns `None` if the slot is empty or the id
@@ -450,6 +562,40 @@ impl AppTree {
     pub fn push_card_unchecked(&mut self, parent: NodeId, class: StyleClass) -> NodeId {
         let kind = NodeKind::Card(CardProps::default());
         self.alloc_and_attach(parent, kind, class)
+    }
+
+    /// Append a `TextField` under `parent` (#312): a single-line editable
+    /// text input, with its caret placed at `value`'s end.
+    #[allow(clippy::too_many_arguments)] // mirrors `push_button_with_disabled`'s own escape hatch.
+    pub fn push_text_field(
+        &mut self,
+        parent: NodeId,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        class: impl Into<String>,
+        disabled: bool,
+        invalid: bool,
+    ) -> Result<NodeId, ClassParseError> {
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(self.push_text_field_unchecked(parent, value, placeholder, style, disabled, invalid))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_text_field_unchecked(
+        &mut self,
+        parent: NodeId,
+        value: impl Into<String>,
+        placeholder: impl Into<String>,
+        class: StyleClass,
+        disabled: bool,
+        invalid: bool,
+    ) -> NodeId {
+        let mut props = TextFieldProps::new(value);
+        props.placeholder = placeholder.into();
+        props.disabled = disabled;
+        props.invalid = invalid;
+        self.alloc_and_attach(parent, NodeKind::TextField(props), class)
     }
 
     /// Append a custom (registry-style) node under `parent`. Used by the
@@ -622,6 +768,61 @@ impl AppTree {
         changed
     }
 
+    /// Apply a text-edit result (#312) to an existing `TextField` node:
+    /// `value`/`caret`/`anchor` together, in one touch, the same
+    /// no-op-on-equal contract as [`AppTree::set_text_props`]/
+    /// [`AppTree::set_button_props`]. Every backend's live-edit path
+    /// (`mkui-wgpu`'s keyboard routing, `mkui-web`'s `oninput`/`onblur`,
+    /// `mkui-console`'s typed-input loop) calls this rather than reaching
+    /// into `NodeKind::TextField` directly, so caret/anchor clamping lives
+    /// in one place instead of three.
+    ///
+    /// `value` is stripped of line breaks (single-line field, same as
+    /// [`TextFieldProps::new`]); `caret`/`anchor` are clamped to
+    /// `[0, value.len()]` and snapped down to the nearest UTF-8 char
+    /// boundary. A byte offset computed against the text a backend *had*,
+    /// just before replacing it with `value`, must never panic whatever
+    /// later slices `value` at that offset (e.g.
+    /// `mkui_wgpu::components::text_field`'s caret-placement math) —
+    /// clamping here means every caller gets that safety for free instead
+    /// of re-deriving it three times.
+    pub fn set_text_field_value(
+        &mut self,
+        id: NodeId,
+        value: &str,
+        caret: usize,
+        anchor: Option<usize>,
+    ) -> bool {
+        let value = strip_line_breaks(value);
+        let caret = clamp_to_char_boundary(&value, caret);
+        let anchor = anchor
+            .map(|a| clamp_to_char_boundary(&value, a))
+            .filter(|a| *a != caret);
+        let changed = {
+            let Some(node) = self.get_mut(id) else {
+                return false;
+            };
+            let NodeKind::TextField(field) = &mut node.kind else {
+                return false;
+            };
+            if field.value == *value && field.caret == caret && field.anchor == anchor {
+                false
+            } else {
+                if field.value != *value {
+                    field.value.clear();
+                    field.value.push_str(&value);
+                }
+                field.caret = caret;
+                field.anchor = anchor;
+                true
+            }
+        };
+        if changed {
+            self.touch(id);
+        }
+        changed
+    }
+
     /// Wholesale replace a `Custom` node's `props` payload (`type_name`
     /// stays fixed — swapping it is a different node kind, not a props
     /// update). Same no-op-on-equal contract as [`AppTree::set_text_props`].
@@ -762,6 +963,13 @@ impl AppTree {
         {
             self.actions.remove(*action_id);
         }
+        // #312: a removed `TextField` can't stay the focused one — leaving
+        // a stale `NodeId` in `focused_text_field` would let a later
+        // slot-index reuse (#83) silently hand focus to whatever
+        // unrelated node gets allocated into the freed slot next.
+        if self.focused_text_field == Some(id) {
+            self.focused_text_field = None;
+        }
         let slot = &mut self.nodes[id.index() as usize];
         slot.generation = slot.generation.wrapping_add(1);
         slot.node = None;
@@ -810,6 +1018,29 @@ impl AppTree {
             id
         }
     }
+}
+
+/// Strip `\r`/`\n` from `s` (#312's `TextField` is single-line, same
+/// constraint `mkui-wgpu`'s `TextEditState::new`/`insert_str` already
+/// enforce). Borrows when there's nothing to strip.
+fn strip_line_breaks(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains(['\r', '\n']) {
+        std::borrow::Cow::Owned(s.chars().filter(|c| *c != '\r' && *c != '\n').collect())
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Clamp `pos` to `[0, s.len()]`, then snap down to the nearest UTF-8 char
+/// boundary at or before it (#312). Used to sanitize a caret/anchor byte
+/// offset a backend computed against text that may since have changed
+/// shape underneath it.
+fn clamp_to_char_boundary(s: &str, pos: usize) -> usize {
+    let mut pos = pos.min(s.len());
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
 }
 
 impl Default for AppTree {
@@ -1361,6 +1592,176 @@ mod tests {
 
         assert!(!tree.set_button_props(button, "Pause", ButtonVariant::Primary, None));
         assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn push_text_field_places_the_caret_at_the_values_end() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "hello", "", "", false, false)
+            .unwrap();
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.value, "hello");
+        assert_eq!(props.caret, 5);
+        assert_eq!(props.anchor, None);
+        assert!(!props.disabled);
+        assert!(!props.invalid);
+    }
+
+    #[test]
+    fn push_text_field_carries_placeholder_disabled_and_invalid() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "", "Email", "", true, true)
+            .unwrap();
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.placeholder, "Email");
+        assert!(props.disabled);
+        assert!(props.invalid);
+    }
+
+    #[test]
+    fn set_text_field_value_replaces_value_caret_and_anchor() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "ab", "", "", false, false)
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(tree.set_text_field_value(field, "abc", 3, Some(1)));
+
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.value, "abc");
+        assert_eq!(props.caret, 3);
+        assert_eq!(props.anchor, Some(1));
+        assert!(tree.is_dirty());
+    }
+
+    #[test]
+    fn set_text_field_value_with_unchanged_values_is_a_no_op() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "ab", "", "", false, false)
+            .unwrap();
+        tree.clear_dirty();
+
+        assert!(!tree.set_text_field_value(field, "ab", 2, None));
+        assert!(!tree.is_dirty());
+    }
+
+    #[test]
+    fn set_text_field_value_clamps_an_out_of_range_caret_and_anchor() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "ab", "", "", false, false)
+            .unwrap();
+        // Move the caret away from the end first, so clamping 999 back down
+        // to it is an observable change rather than a coincidental no-op.
+        tree.set_text_field_value(field, "ab", 0, None);
+
+        assert!(tree.set_text_field_value(field, "ab", 999, Some(999)));
+
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.caret, 2);
+        // Clamped anchor equals the clamped caret, so it collapses to `None`.
+        assert_eq!(props.anchor, None);
+    }
+
+    #[test]
+    fn set_text_field_value_snaps_a_mid_char_offset_down_to_a_char_boundary() {
+        let mut tree = AppTree::new();
+        // "é" is a 2-byte UTF-8 char; byte offset 1 lands inside it.
+        let field = tree
+            .push_text_field(tree.root(), "é", "", "", false, false)
+            .unwrap();
+
+        assert!(tree.set_text_field_value(field, "é", 1, None));
+
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.caret, 0);
+    }
+
+    #[test]
+    fn set_text_field_value_strips_line_breaks() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "", "", "", false, false)
+            .unwrap();
+
+        tree.set_text_field_value(field, "a\nb\rc", 5, None);
+
+        let NodeKind::TextField(props) = &tree.get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(props.value, "abc");
+    }
+
+    #[test]
+    fn set_text_field_value_on_a_non_text_field_node_returns_false() {
+        let mut tree = AppTree::new();
+        let button = tree
+            .push_button(tree.root(), "Go", ButtonVariant::Primary, "", None)
+            .unwrap();
+
+        assert!(!tree.set_text_field_value(button, "x", 1, None));
+    }
+
+    #[test]
+    fn focus_text_field_sets_and_replaces_the_singleton_focus() {
+        let mut tree = AppTree::new();
+        let a = tree
+            .push_text_field(tree.root(), "a", "", "", false, false)
+            .unwrap();
+        let b = tree
+            .push_text_field(tree.root(), "b", "", "", false, false)
+            .unwrap();
+
+        assert_eq!(tree.focused_text_field(), None);
+        assert!(tree.focus_text_field(a));
+        assert_eq!(tree.focused_text_field(), Some(a));
+
+        assert!(tree.focus_text_field(b));
+        assert_eq!(tree.focused_text_field(), Some(b));
+
+        // Focusing the already-focused node is a no-op.
+        assert!(!tree.focus_text_field(b));
+    }
+
+    #[test]
+    fn blur_text_field_clears_focus() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "a", "", "", false, false)
+            .unwrap();
+        tree.focus_text_field(field);
+
+        assert!(tree.blur_text_field());
+        assert_eq!(tree.focused_text_field(), None);
+        // Already blurred — no-op.
+        assert!(!tree.blur_text_field());
+    }
+
+    #[test]
+    fn removing_the_focused_text_field_clears_focus() {
+        let mut tree = AppTree::new();
+        let field = tree
+            .push_text_field(tree.root(), "a", "", "", false, false)
+            .unwrap();
+        tree.focus_text_field(field);
+
+        tree.remove_node(field);
+
+        assert_eq!(tree.focused_text_field(), None);
     }
 
     #[test]

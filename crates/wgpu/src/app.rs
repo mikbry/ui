@@ -33,9 +33,9 @@ use crate::render::{RenderOutcome, Renderer};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::walker::{walk_app_tree_cached, HitTestEntry, WalkCache, WalkOptions};
 #[cfg(not(target_arch = "wasm32"))]
-use mkui_runtime::RuntimeSignal;
+use mkui_runtime::{NodeId, NodeKind, RuntimeSignal};
 #[cfg(not(target_arch = "wasm32"))]
-use winit::event::{ElementState, KeyEvent};
+use winit::event::ElementState;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::keyboard::{KeyCode, PhysicalKey};
 
@@ -141,6 +141,18 @@ pub struct WgpuApp {
     /// a unit test with no live window at all.
     #[cfg(not(target_arch = "wasm32"))]
     redraw_requested: bool,
+    /// Live Shift-key state (#312), tracked from `WindowEvent::ModifiersChanged`
+    /// — nothing on the declarative-tree path needed modifier state before
+    /// a focused `TextField`'s Shift+Left/Right extend-selection gesture.
+    #[cfg(not(target_arch = "wasm32"))]
+    shift_held: bool,
+    /// Live Ctrl-key state (#312), same provenance as `shift_held` — drives
+    /// Ctrl+A select-all on a focused `TextField`. Deliberately not Cmd on
+    /// macOS; a platform-conventional modifier mapping is a documented
+    /// follow-up, not part of this promotion (clipboard/IME stay
+    /// backend-platform concerns per the issue's own scope note).
+    #[cfg(not(target_arch = "wasm32"))]
+    ctrl_held: bool,
 }
 
 /// Lower bound [`WgpuApp::set_ui_scale`] clamps to — small enough to still
@@ -256,6 +268,10 @@ impl WgpuApp {
             last_surface_size: None,
             #[cfg(not(target_arch = "wasm32"))]
             redraw_requested: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            shift_held: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            ctrl_held: false,
         }
     }
 
@@ -882,6 +898,121 @@ impl WgpuApp {
             .iter()
             .any(|s| matches!(s, RuntimeSignal::RequestRedraw))
     }
+
+    /// Decide and apply the click-to-focus/blur consequence of a mouse
+    /// release (#312). `clicked` is whatever `NodeId` the press-to-arm
+    /// gesture resolved to (`None` on a miss). Focuses `clicked` if it
+    /// names a live, enabled `TextField`; otherwise blurs whichever field
+    /// (if any) was focused — covering both "clicked empty space" and
+    /// "clicked some other control" the same way a real `<input>` loses
+    /// focus to a click anywhere else on the page. Returns whether the
+    /// tree's focus state actually changed (the caller's signal to
+    /// rebuild + redraw).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn handle_text_field_focus_click(&mut self, clicked: Option<NodeId>) -> bool {
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        let focusable = clicked.filter(|id| {
+            core.borrow()
+                .tree()
+                .get(*id)
+                .is_some_and(|node| matches!(&node.kind, NodeKind::TextField(f) if !f.disabled))
+        });
+        let mut core_mut = core.borrow_mut();
+        let tree = core_mut.tree_mut();
+        match focusable {
+            Some(id) => tree.focus_text_field(id),
+            None => tree.blur_text_field(),
+        }
+    }
+
+    /// Blur whichever `TextField` is focused, if any (#312). Returns
+    /// whether anything actually changed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn blur_focused_text_field(&mut self) -> bool {
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        core.borrow_mut().tree_mut().blur_text_field()
+    }
+
+    /// Apply one key press to the focused `TextField`, if any (#312).
+    /// Reuses [`crate::text_edit::TextEditState`]'s existing, already-
+    /// tested editing operations — the exact same logic #185 shipped,
+    /// driven through a transient state built fresh from the node's
+    /// current `value`/`caret`/`anchor` (`TextEditState::from_parts`)
+    /// rather than a caller-owned instance — so this promotion adds a new
+    /// *entry path* into that logic, not a parallel reimplementation of
+    /// it. `text` is the key event's composed character input (`None` for
+    /// a bare named key like an arrow or Backspace). Returns `false`
+    /// (nothing applied — the caller must not rebuild/redraw) when
+    /// nothing is focused, the focused node is disabled or has gone
+    /// stale, or the key isn't one this path handles (every unhandled key
+    /// — including every control-bound key the embedding-host
+    /// [`crate::input_router::InputRouter`] contract separately swallows
+    /// — simply falls through to the host/gameplay layer, same as before
+    /// this promotion).
+    ///
+    /// Deliberately out of scope here (documented follow-up, not a silent
+    /// gap): real OS clipboard for Ctrl+C/X/V, and `winit::event::Ime`
+    /// composition events — both are the "platform concerns each backend
+    /// implements against its own primitives" the issue scopes out of the
+    /// shared contract; `TextEditState::copy`/`cut`/`paste`/
+    /// `set_composing` remain exactly as #185 shipped them, exercised by
+    /// their own existing unit tests, just not yet wired to a live OS
+    /// clipboard or `Ime` event from *this* declarative-tree entry point.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_focused_text_field_key(
+        &mut self,
+        physical_key: PhysicalKey,
+        text: Option<&str>,
+    ) -> bool {
+        let Some(core) = self.core.as_ref() else {
+            return false;
+        };
+        let Some(id) = core.borrow().tree().focused_text_field() else {
+            return false;
+        };
+        let Some((value, caret, anchor)) = ({
+            let core_ref = core.borrow();
+            core_ref.tree().get(id).and_then(|node| match &node.kind {
+                NodeKind::TextField(f) if !f.disabled => Some((f.value.clone(), f.caret, f.anchor)),
+                _ => None,
+            })
+        }) else {
+            return false;
+        };
+
+        let mut state = crate::text_edit::TextEditState::from_parts(value, caret, anchor);
+        let extend = self.shift_held;
+        match physical_key {
+            PhysicalKey::Code(KeyCode::ArrowLeft) => state.move_left(extend),
+            PhysicalKey::Code(KeyCode::ArrowRight) => state.move_right(extend),
+            PhysicalKey::Code(KeyCode::Home) => state.move_home(extend),
+            PhysicalKey::Code(KeyCode::End) => state.move_end(extend),
+            PhysicalKey::Code(KeyCode::Backspace) => state.backspace(),
+            PhysicalKey::Code(KeyCode::Delete) => state.delete(),
+            PhysicalKey::Code(KeyCode::KeyA) if self.ctrl_held => state.select_all(),
+            _ => match text {
+                // A "control character" composed text (Tab, Enter, Esc,
+                // Backspace itself on some layouts) isn't an insertion —
+                // only genuinely printable composed text is.
+                Some(text) if !text.is_empty() && !text.chars().any(|c| c.is_control()) => {
+                    state.insert_str(text)
+                }
+                _ => return false,
+            },
+        }
+
+        core.borrow_mut().tree_mut().set_text_field_value(
+            id,
+            state.text(),
+            state.caret(),
+            state.anchor(),
+        );
+        true
+    }
 }
 
 impl std::fmt::Debug for WgpuApp {
@@ -1063,18 +1194,38 @@ impl ApplicationHandler for WgpuApp {
                 // firing (Codex round-10 Q4 — drag-cancel affordance).
                 self.pointer.cancel();
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        state: ElementState::Pressed,
-                        ..
-                    },
-                ..
-            } => {
-                // User-driven cancel: Escape clears the armed slot
-                // without firing.
-                self.pointer.cancel();
+            WindowEvent::ModifiersChanged(modifiers) => {
+                // #312: tracked only so a focused `TextField`'s
+                // Shift+Left/Right (extend selection) and Ctrl+A
+                // (select-all) have modifier state to read — nothing on
+                // this declarative-tree path needed it before.
+                self.shift_held = modifiers.state().shift_key();
+                self.ctrl_held = modifiers.state().control_key();
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if matches!(event.physical_key, PhysicalKey::Code(KeyCode::Escape))
+                    && event.state == ElementState::Pressed
+                {
+                    // User-driven cancel: Escape clears the armed slot
+                    // without firing, and blurs any focused text field
+                    // (#312) so a stray release can't resurrect either.
+                    self.pointer.cancel();
+                    if self.blur_focused_text_field() {
+                        self.rebuild_scene_from_tree();
+                        if let Some(state) = self.state.as_ref() {
+                            state.window.request_redraw();
+                        }
+                    }
+                    return;
+                }
+                if event.state == ElementState::Pressed
+                    && self.apply_focused_text_field_key(event.physical_key, event.text.as_deref())
+                {
+                    self.rebuild_scene_from_tree();
+                    if let Some(state) = self.state.as_ref() {
+                        state.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let Some(state) = left_button_state(button, state) else {
@@ -1090,13 +1241,28 @@ impl ApplicationHandler for WgpuApp {
                         self.pointer.on_press(&self.hit_tests, cursor);
                     }
                     ElementState::Released => {
-                        let Some(click) = self.pointer.on_release(&self.hit_tests, cursor) else {
+                        let click = self.pointer.on_release(&self.hit_tests, cursor);
+                        // #312: a click on a `TextField` focuses it instead
+                        // of firing (text fields never carry an action);
+                        // a click anywhere else — a `None` miss, or a hit
+                        // on some other node — blurs whichever field was
+                        // focused, matching a real `<input>` losing focus
+                        // to a click elsewhere on the page.
+                        let focus_changed =
+                            self.handle_text_field_focus_click(click.map(|c| c.node));
+                        let Some(click) = click else {
+                            if focus_changed {
+                                self.rebuild_scene_from_tree();
+                                if let Some(state) = self.state.as_ref() {
+                                    state.window.request_redraw();
+                                }
+                            }
                             // Release on different node / empty space /
                             // after cancel — armed slot already cleared
                             // inside `on_release`. Nothing to fire.
                             return;
                         };
-                        if self.fire_action(click) {
+                        if self.fire_action(click) || focus_changed {
                             // Action requested a redraw — rebuild from
                             // the (now-dirty) tree and ask winit for a
                             // redraw. The `request_redraw` call is made
@@ -2127,5 +2293,174 @@ mod tests {
             !app.cursor_moved_should_request_redraw(),
             "non-macOS: the M2 cursor bridge must be compiled out / disabled"
         );
+    }
+
+    // ---- #312: TextField click-to-focus / keyboard editing ----
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn text_field_node(app: &WgpuApp) -> NodeId {
+        let core = app.core.as_ref().expect("app built with_app_tree");
+        let core_ref = core.borrow();
+        let root = core_ref.tree().get(core_ref.tree().root()).unwrap();
+        root.children[0]
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clicking_an_enabled_text_field_focuses_it() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("hi"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+
+        assert!(app.handle_text_field_focus_click(Some(field)));
+        assert_eq!(
+            app.core
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .tree()
+                .focused_text_field(),
+            Some(field)
+        );
+        // Focusing the already-focused field again is a no-op.
+        assert!(!app.handle_text_field_focus_click(Some(field)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clicking_a_disabled_text_field_does_not_focus_it() {
+        let core = mkui_core::components::Mkui::new()
+            .child(mkui_core::components::TextField::new("hi").disabled(true));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+
+        assert!(!app.handle_text_field_focus_click(Some(field)));
+        assert_eq!(
+            app.core
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .tree()
+                .focused_text_field(),
+            None
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clicking_elsewhere_blurs_the_focused_text_field() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("hi"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+
+        assert!(app.handle_text_field_focus_click(None));
+        assert_eq!(
+            app.core
+                .as_ref()
+                .unwrap()
+                .borrow()
+                .tree()
+                .focused_text_field(),
+            None
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn typing_into_a_focused_text_field_updates_its_value_and_caret() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("ab"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+
+        assert!(app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyC), Some("c")));
+
+        let core = app.core.as_ref().unwrap().borrow();
+        let NodeKind::TextField(f) = &core.tree().get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(f.value, "abc");
+        assert_eq!(f.caret, 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn backspace_deletes_the_char_before_the_caret() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("ab"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+
+        assert!(app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::Backspace), None));
+
+        let core = app.core.as_ref().unwrap().borrow();
+        let NodeKind::TextField(f) = &core.tree().get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(f.value, "a");
+        assert_eq!(f.caret, 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn shift_arrow_left_extends_a_selection_from_the_end() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("abc"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.handle_text_field_focus_click(Some(field));
+        app.shift_held = true;
+
+        assert!(app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::ArrowLeft), None));
+
+        let core = app.core.as_ref().unwrap().borrow();
+        let NodeKind::TextField(f) = &core.tree().get(field).unwrap().kind else {
+            panic!("expected TextField")
+        };
+        assert_eq!(f.caret, 2);
+        assert_eq!(f.anchor, Some(3));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn key_press_with_nothing_focused_is_a_no_op() {
+        let core =
+            mkui_core::components::Mkui::new().child(mkui_core::components::TextField::new("ab"));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+
+        assert!(!app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyC), Some("c")));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn key_press_on_a_disabled_focused_like_field_is_a_no_op() {
+        // A disabled field can never actually become focused (the click
+        // handler refuses it), but `apply_focused_text_field_key` defends
+        // in depth against a stale/forged focus anyway.
+        let core = mkui_core::components::Mkui::new()
+            .child(mkui_core::components::TextField::new("ab").disabled(true));
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        let field = text_field_node(&app);
+        app.core
+            .as_ref()
+            .unwrap()
+            .borrow_mut()
+            .tree_mut()
+            .focus_text_field(field);
+
+        assert!(!app.apply_focused_text_field_key(PhysicalKey::Code(KeyCode::KeyC), Some("c")));
     }
 }

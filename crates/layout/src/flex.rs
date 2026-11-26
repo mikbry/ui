@@ -365,6 +365,12 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
                 .size
                 .width
         }
+        NodeKind::TextField(f) => {
+            measure
+                .measure_text_field(&f.value, &f.placeholder, &node.resolved, None)
+                .size
+                .width
+        }
         NodeKind::Custom { type_name, props } => {
             measure
                 .measure_custom(type_name, props, &node.resolved, None)
@@ -405,6 +411,15 @@ fn layout_subtree(
             let m = measure.measure_button(
                 &b.label,
                 b.variant,
+                &node.resolved,
+                Some(avail_width.max(0.0)),
+            );
+            ComputedNode::leaf(m.size)
+        }
+        NodeKind::TextField(f) => {
+            let m = measure.measure_text_field(
+                &f.value,
+                &f.placeholder,
                 &node.resolved,
                 Some(avail_width.max(0.0)),
             );

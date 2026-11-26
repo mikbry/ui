@@ -78,12 +78,46 @@ impl TextEditState {
         }
     }
 
+    /// Build state from an existing `(value, caret, anchor)` triple — the
+    /// shape `mkui_runtime::TextFieldProps` carries (#312) — rather than
+    /// always placing the caret at the end like [`Self::new`]. `caret`/
+    /// `anchor` are clamped to a valid char boundary within `value` the
+    /// same way `AppTree::set_text_field_value` does, so a caller
+    /// round-tripping through the tree never has to re-derive that safety
+    /// itself. Like [`Self::new`], line breaks are stripped (single-line
+    /// field).
+    pub fn from_parts(value: impl Into<String>, caret: usize, anchor: Option<usize>) -> Self {
+        let text = strip_line_breaks(&value.into()).into_owned();
+        let caret = clamp_to_char_boundary(&text, caret);
+        let anchor = anchor
+            .map(|a| clamp_to_char_boundary(&text, a))
+            .filter(|a| *a != caret);
+        Self {
+            text,
+            caret,
+            anchor,
+            composing: None,
+        }
+    }
+
     pub fn text(&self) -> &str {
         &self.text
     }
 
     pub fn caret(&self) -> usize {
         self.caret
+    }
+
+    /// The raw, directional selection anchor (#312) — `None` when there's
+    /// no selection, otherwise the byte offset the selection extends
+    /// *from* (which may be before or after [`Self::caret`]). Unlike
+    /// [`Self::selection`], this is not normalized to `start <= end`: it's
+    /// the shape `mkui_runtime::TextFieldProps::anchor` carries, so a
+    /// caller writing this state back into the tree (e.g. after a
+    /// Shift+Left/Right key) round-trips it exactly rather than losing
+    /// which end is the moving one.
+    pub fn anchor(&self) -> Option<usize> {
+        self.anchor
     }
 
     /// Normalized `(start, end)` with `start <= end`, or `None` when there's
@@ -399,6 +433,19 @@ fn strip_line_breaks_with_cursor(s: &str, cursor: usize) -> (std::borrow::Cow<'_
 
 /// The byte offset of the char immediately before `byte_idx` (which must be
 /// a valid char boundary), or `0` at the start of the string.
+/// Clamp `pos` to `[0, s.len()]`, then snap down to the nearest UTF-8 char
+/// boundary at or before it (#312). Mirrors `mkui_runtime::tree`'s private
+/// helper of the same name/shape — kept duplicated rather than shared
+/// across the crate boundary, same as the rest of this module's pure
+/// byte-offset logic.
+fn clamp_to_char_boundary(s: &str, pos: usize) -> usize {
+    let mut pos = pos.min(s.len());
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
 fn prev_char_boundary(s: &str, byte_idx: usize) -> usize {
     if byte_idx == 0 {
         return 0;
@@ -430,6 +477,37 @@ mod tests {
         assert_eq!(state.text(), "hello");
         assert_eq!(state.caret(), 5);
         assert_eq!(state.selection(), None);
+    }
+
+    #[test]
+    fn from_parts_round_trips_value_caret_and_anchor() {
+        let state = TextEditState::from_parts("hello", 2, Some(4));
+        assert_eq!(state.text(), "hello");
+        assert_eq!(state.caret(), 2);
+        assert_eq!(state.anchor(), Some(4));
+        assert_eq!(state.selection(), Some((2, 4)));
+    }
+
+    #[test]
+    fn from_parts_clamps_an_out_of_range_caret_and_anchor() {
+        let state = TextEditState::from_parts("hi", 999, Some(999));
+        assert_eq!(state.caret(), 2);
+        assert_eq!(state.anchor(), None);
+    }
+
+    #[test]
+    fn from_parts_snaps_a_mid_char_offset_down_to_a_char_boundary() {
+        let state = TextEditState::from_parts("é", 1, None);
+        assert_eq!(state.caret(), 0);
+    }
+
+    #[test]
+    fn anchor_tracks_which_end_is_moving_after_a_shift_left() {
+        let mut state = TextEditState::from_parts("hello", 2, None);
+        state.move_left(true);
+        // The anchor is the stationary end (2); the caret is the moving one.
+        assert_eq!(state.anchor(), Some(2));
+        assert_eq!(state.caret(), 1);
     }
 
     #[test]
