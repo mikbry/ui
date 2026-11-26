@@ -33,9 +33,11 @@
 //! }
 //! ```
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use mkui_runtime::{AppTree, ButtonVariant, NodeId, NodeKind};
+use mkui_runtime::{AppTree, ButtonVariant, NodeId, NodeKind, RuntimeSignal};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element};
@@ -159,6 +161,7 @@ pub fn render_tree(
     document: &Document,
     registry: &WebRendererRegistry,
     wrapper_class: &str,
+    owner: &Rc<RefCell<AppTree>>,
 ) -> Result<Element, JsValue> {
     let wrapper = document.create_element("div")?;
     if !wrapper_class.is_empty() {
@@ -168,7 +171,7 @@ pub fn render_tree(
         .get(tree.root())
         .ok_or_else(|| JsValue::from_str("AppTree root is missing"))?;
     for child_id in &root.children {
-        let element = render_node(tree, *child_id, document, registry)?;
+        let element = render_node(tree, *child_id, document, registry, owner)?;
         wrapper.append_child(&element)?;
     }
     Ok(wrapper)
@@ -179,6 +182,7 @@ fn render_node(
     id: NodeId,
     document: &Document,
     registry: &WebRendererRegistry,
+    owner: &Rc<RefCell<AppTree>>,
 ) -> Result<Element, JsValue> {
     let node = tree
         .get(id)
@@ -191,7 +195,7 @@ fn render_node(
                 el.set_class_name(node.class.raw());
             }
             for child_id in &node.children {
-                let child = render_node(tree, *child_id, document, registry)?;
+                let child = render_node(tree, *child_id, document, registry, owner)?;
                 el.append_child(&child)?;
             }
             el
@@ -205,7 +209,7 @@ fn render_node(
             // Children of a Text node are unusual but the schema permits
             // them — emit them so the DOM still mirrors the tree.
             for child_id in &node.children {
-                let child = render_node(tree, *child_id, document, registry)?;
+                let child = render_node(tree, *child_id, document, registry, owner)?;
                 el.append_child(&child)?;
             }
             el
@@ -221,12 +225,12 @@ fn render_node(
             };
             el.set_class_name(&class);
             for child_id in &node.children {
-                let child = render_node(tree, *child_id, document, registry)?;
+                let child = render_node(tree, *child_id, document, registry, owner)?;
                 el.append_child(&child)?;
             }
             el
         }
-        NodeKind::Button(b) => render_button(tree, node, b, document)?,
+        NodeKind::Button(b) => render_button(tree, node, b, document, owner)?,
         NodeKind::Custom { type_name, props } => {
             // Custom renderers are responsible for their own children; we
             // do not recurse automatically because a Custom may want to
@@ -242,6 +246,7 @@ fn render_button(
     node: &mkui_runtime::Node,
     b: &mkui_runtime::ButtonProps,
     document: &Document,
+    owner: &Rc<RefCell<AppTree>>,
 ) -> Result<Element, JsValue> {
     let button = document
         .create_element("button")?
@@ -273,19 +278,22 @@ fn render_button(
 
     if !b.disabled {
         if let Some(action_id) = b.on_press {
-            // Capture the action id; firing routes through the tree's
-            // action registry from inside the renderer's owning Mkui
-            // state. The closure path goes through a thread-local pointer
-            // because wasm_bindgen closures must be `'static +
-            // FnMut(JsValue)`.
-            //
-            // For Sprint 4 we wire the closure to look the action up by id
-            // via the global tree pointer that `high_level::Mkui::run`
-            // installs before mounting; see `crate::high_level::with_tree`.
+            // Capture the action id *and* a clone of this button's own
+            // mount's tree. wasm_bindgen closures must be `'static +
+            // FnMut(JsValue)`, so a borrowed `&AppTree` can't cross into
+            // the closure — but a thread-local pointer (the pre-#305
+            // design) is scoped to the *process*, not the mount: a second
+            // `Mkui::run()` in the same document overwrites it, so a stale
+            // closure from the first mount resolves its action against the
+            // second mount's registry whenever the two reuse the same raw
+            // `ActionId`. Cloning `owner` here ties resolution to the exact
+            // tree this button was rendered from, regardless of how many
+            // other trees are mounted in the document.
             let action_idx = action_id.index();
             let action_gen = action_id.generation();
+            let owner = Rc::clone(owner);
             let onclick = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                crate::high_level::fire_action_global(action_idx, action_gen);
+                fire_action(&owner, action_idx, action_gen);
             }) as Box<dyn FnMut(_)>);
             button
                 .dyn_ref::<web_sys::HtmlElement>()
@@ -297,6 +305,50 @@ fn render_button(
 
     let _ = tree; // children currently unused on Button
     Ok(button.into())
+}
+
+/// Fire `(index, generation)` against `owner` and propagate its
+/// [`mkui_runtime::RuntimeCtx`] signals to that tree.
+///
+/// ## Listener ownership
+///
+/// Each button's onclick closure (installed in [`render_button`]) holds a
+/// strong `Rc` clone of the tree it was rendered from — not a lookup
+/// through shared/global state. That is what scopes dispatch to "the tree
+/// that owns the mount": two `Mkui::run()` calls in the same document, even
+/// if their trees allocated the same raw `ActionId`, each resolve through
+/// their own closure's own `owner`, never each other's.
+///
+/// ## If the mount has been dropped
+///
+/// `render_button` always `Closure::forget()`s the onclick handler, which
+/// deliberately leaks it for the life of the page — so as long as *any* of
+/// a mount's buttons remain wired up, `owner` keeps that mount's tree
+/// alive, and there is no path through this API where `owner` itself can
+/// go stale. The staleness that can happen instead is per-action: `id`'s
+/// generation stops matching the tree's slot once the action has been
+/// removed (`ActionRegistry::remove`, e.g. via `AppTree::remove_node`) —
+/// expected when a button's DOM node outlives its tree-side removal because
+/// there is no live re-render loop yet (#296). `ActionRegistry::fire`
+/// already treats a generation mismatch as "nothing to fire": it returns a
+/// non-dirty `RuntimeCtx` with no emitted signals, so a stale click is a
+/// silent no-op rather than firing a recycled slot's unrelated callback.
+fn fire_action(owner: &Rc<RefCell<AppTree>>, index: u32, generation: u32) -> bool {
+    let id = mkui_runtime::ActionId::from_raw(index, generation);
+    // Fire on an immutable borrow (the registry only needs `&self`), then
+    // re-borrow mutably to propagate the dirty bit if needed. Splitting the
+    // borrows keeps `RefCell` happy without holding a mutable borrow across
+    // `fire`.
+    let mut ctx = owner.borrow().actions().fire(id);
+    if ctx.is_dirty() {
+        owner.borrow_mut().mark_dirty();
+    }
+    // Drain the signal list so a future re-entry doesn't see stale
+    // emissions; today we only ack `RequestRedraw`, but the runtime is set
+    // up for additional signals (text input, focus moves).
+    ctx.drain_emitted()
+        .iter()
+        .any(|s| matches!(s, RuntimeSignal::RequestRedraw))
 }
 
 #[cfg(test)]

@@ -627,6 +627,14 @@ jobs:
         run: cargo test -p mkui-core --target wasm32-unknown-unknown --no-run --locked
       - name: Build mkui-web (wasm32-unknown-unknown)
         run: cargo build -p mkui-web --target wasm32-unknown-unknown --locked
+      # Same `--no-run` rationale as the mkui-core step above: this job has
+      # no browser/chromedriver, so it can't execute `#[wasm_bindgen_test]`
+      # tests (crates/web/tests/dispatch_scope.rs, #305's two-mount
+      # regression). Compiling still catches a build regression; running it
+      # for real is `wasm-pack test --headless --chrome crates/web` locally,
+      # tracked as a follow-up to wire into CI.
+      - name: Compile mkui-web tests (wasm32-unknown-unknown)
+        run: cargo test -p mkui-web --target wasm32-unknown-unknown --no-run --locked
       - name: Build mkui bridge (web backend, wasm32-unknown-unknown)
         run: cargo build -p mkui --no-default-features --features web --target wasm32-unknown-unknown --locked
       - name: Build web-showcase (wasm32-unknown-unknown)
