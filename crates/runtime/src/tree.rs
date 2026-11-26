@@ -17,7 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::actions::{ActionId, ActionRegistry};
-use crate::props::{ButtonVariant, TextVariant};
+use crate::props::{ButtonVariant, ImageFit, ImageFormat, TextVariant};
 use crate::style::{ClassParseError, ResolvedStyle, StyleClass};
 
 /// Opaque handle to a node in the [`AppTree`].
@@ -94,6 +94,13 @@ pub enum NodeKind {
     /// `mkui-console`: a bracketed row) rather than `mkui-wgpu` staying
     /// the sole owner of the component's existence.
     TextField(TextFieldProps),
+    /// Source from either a GPU texture already in VRAM (host-supplied
+    /// handle) or decoded image bytes (PNG/WebP, #196). A leaf — measured by
+    /// [`ImageProps::width`]/[`ImageProps::height`], never a children
+    /// container. Corner radius/clip is the same "comes from each backend's
+    /// own theme" story as [`Card`](NodeKind::Card)'s chrome, so it is not a
+    /// field here either.
+    Image(ImageProps),
     /// Extension slot. `type_name` identifies the component (`"test_widget"`,
     /// `"separator"`, …) and `props` is a renderer-readable JSON payload.
     Custom {
@@ -172,6 +179,44 @@ impl Default for TextFieldProps {
     fn default() -> Self {
         Self::new(String::new())
     }
+}
+
+/// Opaque handle to a GPU texture a host has already uploaded to VRAM
+/// (#196). `mkui-runtime`/`mkui-core` never touch a real GPU resource —
+/// this is just an id a renderer (e.g. `mkui-wgpu::Renderer::register_texture`)
+/// hands back and later resolves through its own registry. Two handles are
+/// equal iff a single registration produced both — the host, not this
+/// crate, owns uniqueness.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct TextureHandle(pub u64);
+
+/// Where an `Image` node's pixels come from (#196).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageSource {
+    /// Already in VRAM — a backend resolves `handle` through its own
+    /// texture registry rather than decoding anything.
+    Texture(TextureHandle),
+    /// Still-encoded bytes in `format`, decoded by whichever backend needs
+    /// raw pixels (`mkui-wgpu`, via the `png`/`image-webp` crates it now
+    /// depends on for exactly this). Kept encoded rather than pre-decoded so
+    /// a backend with its own decoder (a browser's native `<img>`) never
+    /// pays for a redundant decode.
+    Encoded { format: ImageFormat, bytes: Vec<u8> },
+}
+
+/// Payload for an `Image` node (#196): its source, how it fits a box whose
+/// aspect ratio may not match the image's own, and the intrinsic size
+/// `mkui-layout` measures it by. `width`/`height` are always known at
+/// construction time — [`ImageSource::Encoded`]'s are read from the decoded
+/// header, [`ImageSource::Texture`]'s are supplied by the host alongside the
+/// handle — so, unlike `Text`/`Button`, an `Image` needs no
+/// `LeafMeasure` callback to size itself.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageProps {
+    pub source: ImageSource,
+    pub fit: ImageFit,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Payload for a `Text` node: the string to render plus the semantic
@@ -596,6 +641,40 @@ impl AppTree {
         props.disabled = disabled;
         props.invalid = invalid;
         self.alloc_and_attach(parent, NodeKind::TextField(props), class)
+    }
+
+    /// Append an `Image` under `parent` (#196). `width`/`height` are the
+    /// intrinsic size `mkui-layout` measures the leaf by.
+    pub fn push_image(
+        &mut self,
+        parent: NodeId,
+        source: ImageSource,
+        fit: ImageFit,
+        width: u32,
+        height: u32,
+        class: impl Into<String>,
+    ) -> Result<NodeId, ClassParseError> {
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(self.push_image_unchecked(parent, source, fit, width, height, style))
+    }
+
+    pub fn push_image_unchecked(
+        &mut self,
+        parent: NodeId,
+        source: ImageSource,
+        fit: ImageFit,
+        width: u32,
+        height: u32,
+        class: StyleClass,
+    ) -> NodeId {
+        let kind = NodeKind::Image(ImageProps {
+            source,
+            fit,
+            width,
+            height,
+        });
+        self.alloc_and_attach(parent, kind, class)
     }
 
     /// Append a custom (registry-style) node under `parent`. Used by the

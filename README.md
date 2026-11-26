@@ -452,8 +452,8 @@ cargo run -p native-window --release
 ```
 
 The web backend is exercised by `examples/web-showcase` via `wasm-pack`.
-For application-owned themes, see the opt-in [public Card and disabled Button
-CSS recipe](crates/web/README.md). The standalone
+For application-owned themes, see the opt-in [public Card, Image, and
+disabled Button CSS recipe](crates/web/README.md). The standalone
 [browser recipe smoke](examples/web-recipe-smoke/README.md) checks computed
 styling and overlapping disabled controls without showcase assets. The
 [shadcn/ui parity fixture](examples/shadcn-parity/README.md) renders Card

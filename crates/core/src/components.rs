@@ -42,6 +42,15 @@ use mkui_runtime::{
 };
 use serde_json::json;
 
+// Re-exported so a caller building an `Image` (e.g. `Image::new().fit(...)`)
+// does not need a direct `mkui-runtime` dependency just to name these
+// types — the same "mkui-core re-exports the runtime-level type its
+// builder's public API needs" shape `headless::button`/`headless::text`
+// already establish for `ButtonVariant`/`TextVariant`.
+pub use mkui_runtime::{ImageFit, ImageSource, TextureHandle};
+
+use crate::image::{decode_rgba8, sniff_format, ImageDecodeError};
+
 /// Marker trait for every renderable component.
 ///
 /// `Component` is `Any` so the [`LoweringRegistry`] can dispatch by
@@ -110,6 +119,7 @@ impl LoweringRegistry {
         reg.register::<Button>();
         reg.register::<Card>();
         reg.register::<TextField>();
+        reg.register::<Image>();
         reg.register::<MenuList>();
         reg
     }
@@ -707,6 +717,110 @@ impl LowerToTree for TextField {
 }
 
 // -------------------------------------------------------------------------
+// Image — GPU-texture or decoded-bytes source, contain/cover fit (#196)
+// -------------------------------------------------------------------------
+
+/// Cross-platform `Image` component — sources from either a GPU texture
+/// already in VRAM (a host-supplied [`TextureHandle`]) or encoded PNG/WebP
+/// bytes, decoded once at construction time via [`crate::image`]. See
+/// ADR 0015 for the promotion process this follows (leaf, not container;
+/// corner radius comes from each backend's own theme, same as
+/// [`Card`]'s chrome, rather than a field here).
+pub struct Image {
+    class: String,
+    source: Option<ImageSource>,
+    fit: ImageFit,
+    width: u32,
+    height: u32,
+}
+
+impl Image {
+    /// Build from already-encoded PNG or WebP bytes (#196): sniffs the
+    /// format and decodes it once, up front, to validate the bytes and
+    /// recover `width`/`height` — construction fails on bad bytes rather
+    /// than surfacing a decode error later at lowering or render time. The
+    /// node's source keeps the *original encoded bytes*, not the decoded
+    /// pixels, so a backend with its own decoder (a browser's native
+    /// `<img>`) never pays for a redundant decode.
+    pub fn from_encoded(bytes: impl Into<Vec<u8>>) -> Result<Self, ImageDecodeError> {
+        let bytes = bytes.into();
+        let format = sniff_format(&bytes)?;
+        let decoded = decode_rgba8(&bytes, format)?;
+        Ok(Self {
+            class: String::new(),
+            source: Some(ImageSource::Encoded { format, bytes }),
+            fit: ImageFit::Contain,
+            width: decoded.width,
+            height: decoded.height,
+        })
+    }
+
+    /// Build from a GPU texture a host already registered with its own
+    /// renderer (e.g. `mkui_wgpu::Renderer::register_texture`). `width`/
+    /// `height` are the host's own — this crate never touches a real GPU
+    /// resource to ask a texture its size.
+    pub fn from_texture(handle: TextureHandle, width: u32, height: u32) -> Self {
+        Self {
+            class: String::new(),
+            source: Some(ImageSource::Texture(handle)),
+            fit: ImageFit::Contain,
+            width,
+            height,
+        }
+    }
+
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    /// Default is [`ImageFit::Contain`] — never crops, matching this crate's
+    /// general bias toward the non-destructive default where CSS itself
+    /// defaults to `fill` (distorting the aspect ratio, which this
+    /// component does not offer at all).
+    pub fn fit(mut self, fit: ImageFit) -> Self {
+        self.fit = fit;
+        self
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class
+    }
+
+    pub fn image_fit(&self) -> ImageFit {
+        self.fit
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+impl Component for Image {}
+
+impl LowerToTree for Image {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        _registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let class = std::mem::take(&mut self.class);
+        let source = self
+            .source
+            .take()
+            .expect("Image: lower_to_tree called more than once");
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(tree.push_image_unchecked(parent, source, self.fit, self.width, self.height, style))
+    }
+}
+
+// -------------------------------------------------------------------------
 // MenuList — keyboard/gamepad-selectable list (#189, C4 of #173)
 // -------------------------------------------------------------------------
 
@@ -951,6 +1065,74 @@ mod tests {
         assert!(matches!(card.kind, NodeKind::Card(_)));
         assert_eq!(card.class.raw(), "p-6");
         assert_eq!(card.children.len(), 2);
+    }
+
+    fn tiny_png_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        }
+        bytes
+    }
+
+    #[test]
+    fn image_from_encoded_recovers_dimensions_from_the_png_header() {
+        let image = Image::from_encoded(tiny_png_bytes()).unwrap();
+        assert_eq!(image.width(), 2);
+        assert_eq!(image.height(), 1);
+        assert_eq!(
+            image.image_fit(),
+            ImageFit::Contain,
+            "default fit is Contain"
+        );
+    }
+
+    #[test]
+    fn image_from_encoded_rejects_bytes_that_do_not_decode() {
+        assert!(Image::from_encoded(b"not an image".to_vec()).is_err());
+    }
+
+    #[test]
+    fn image_lowers_to_an_image_node_carrying_its_source_and_fit() {
+        let app = Mkui::new().child(
+            Image::from_encoded(tiny_png_bytes())
+                .unwrap()
+                .class("rounded-lg")
+                .fit(ImageFit::Cover),
+        );
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Image(img) = &node.kind else {
+            panic!("expected Image")
+        };
+        assert_eq!(img.fit, ImageFit::Cover);
+        assert_eq!(img.width, 2);
+        assert_eq!(img.height, 1);
+        assert!(matches!(
+            img.source,
+            mkui_runtime::ImageSource::Encoded { .. }
+        ));
+        assert_eq!(node.class.raw(), "rounded-lg");
+    }
+
+    #[test]
+    fn image_from_texture_carries_the_host_supplied_handle_and_size() {
+        let app = Mkui::new().child(Image::from_texture(TextureHandle(42), 64, 32));
+        let root = app.tree().get(app.tree().root()).unwrap();
+        let node = app.tree().get(root.children[0]).unwrap();
+        let NodeKind::Image(img) = &node.kind else {
+            panic!("expected Image")
+        };
+        assert_eq!(img.width, 64);
+        assert_eq!(img.height, 32);
+        assert!(matches!(
+            img.source,
+            mkui_runtime::ImageSource::Texture(TextureHandle(42))
+        ));
     }
 
     #[test]

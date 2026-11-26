@@ -15,6 +15,15 @@ serde = { workspace = true, optional = true }
 # `NodeKind::Custom` extension slot, whose `props` field is a
 # `serde_json::Value` (#189).
 serde_json = { workspace = true }
+# Decode support for `components::Image`'s encoded-bytes source (#196):
+# PNG via `png` (promoted here from its previous `mkui-wgpu` dev-dependency
+# role — see that crate's `Cargo.toml`), WebP via `image-webp`. Decoding
+# lives here, once, so every backend consumes the same validated
+# `width`/`height` + (on demand) the same decoded RGBA8 — `mkui-wgpu`'s
+# texture upload calls back into `mkui_core::image::decode_rgba8` rather
+# than depending on either crate itself.
+png = { workspace = true }
+image-webp = { workspace = true }
 
 [dev-dependencies]
 # Parity tests need the runtime snapshot feature to compare the canonical

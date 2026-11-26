@@ -377,6 +377,11 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
                 .size
                 .width
         }
+        // #196: an `Image`'s intrinsic size is already known data on the
+        // node itself (the decoded header's dimensions, or whatever the
+        // host supplied alongside its texture handle) — unlike
+        // `Text`/`Button` it needs no `LeafMeasure` callback to size itself.
+        NodeKind::Image(img) => img.width as f32,
     }
 }
 
@@ -433,6 +438,33 @@ fn layout_subtree(
                 Some(avail_width.max(0.0)),
             );
             ComputedNode::leaf(m.size)
+        }
+        // #196: without `flex-1`, an `Image` keeps its own intrinsic
+        // width regardless of `avail_width` — unlike `Text`, it never
+        // "wraps" to a container's width, so `avail_width` is not a
+        // constraint to honor by default (a `Column`'s default
+        // `Align::Stretch` hands every child the *full* `inner_width`
+        // regardless of child kind — see `layout_column_children` — so
+        // using it unconditionally here would silently stretch every
+        // plain `Image` under a stretch-aligned column to the column's
+        // width). `flex-1` (`ResolvedStyle::flex_grow`) is the explicit
+        // opt-in: a `Row`'s flex algorithm already resolves `avail_width`
+        // to more than the natural basis once a `flex-1` child's share of
+        // the free space is distributed (`layout_row_children`'s
+        // `distribute_main_axis` call), so using it only in that case is
+        // what lets a box's aspect ratio actually diverge from the
+        // image's own intrinsic one — the scenario `ImageFit::Contain`/
+        // `Cover` exist to handle — with no separate per-leaf `w-*`
+        // override mechanism needed. Height stays the image's own
+        // intrinsic height either way — unlike width there is no
+        // flex-distributed cross-axis budget to prefer over it here.
+        NodeKind::Image(img) => {
+            let width = if node.resolved.flex_grow {
+                avail_width.max(0.0)
+            } else {
+                img.width as f32
+            };
+            ComputedNode::leaf(Size::new(width, img.height as f32))
         }
     }
 }

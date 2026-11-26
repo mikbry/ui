@@ -1,6 +1,18 @@
 use mkui::prelude::*;
-use mkui_core::components::{Button, Card, Text, TextField, View};
+use mkui_core::components::{Button, Card, Image, ImageFit, Text, TextField, View};
 use mkui_core::headless::{ButtonVariant, TextVariant};
+
+/// A tiny (8x8) orange/blue checkerboard, generated once at
+/// `python3 -c` time (see the #196 PR body) rather than shipped as a
+/// binary asset file — the showcase needs no real-world image, just
+/// *some* decodable PNG bytes to prove the decoded-bytes source path end
+/// to end across every backend (ADR 0015 step 7).
+const CHECKERBOARD_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 6, 0,
+    0, 0, 196, 15, 190, 139, 0, 0, 0, 30, 73, 68, 65, 84, 120, 218, 99, 120, 86, 167, 244, 31, 25,
+    155, 204, 184, 141, 130, 25, 232, 160, 0, 93, 0, 93, 3, 29, 20, 0, 0, 34, 83, 165, 97, 145,
+    176, 137, 73, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
 
 // Create the common showcase UI structure
 pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
@@ -210,6 +222,77 @@ pub fn create_showcase_ui() -> Result<Mkui, MkuiError> {
                                                     TextField::new("not-an-email")
                                                         .placeholder("Email")
                                                         .invalid(true)
+                                                )
+                                        )
+                                )
+                                .child(
+                                    // Image showcase section (#196) — the second
+                                    // decoded-bytes/GPU-texture component promoted
+                                    // through every backend per ADR 0015's
+                                    // checklist. `Image::from_encoded` cannot fail
+                                    // on this hardcoded, known-good checkerboard,
+                                    // so `.expect(...)` here documents that rather
+                                    // than hiding a real fallibility concern.
+                                    Card::new()
+                                        .class("p-6")
+                                        .child(
+                                            View::new()
+                                                .class("mb-6")
+                                                .child(
+                                                    Text::new("Image Component")
+                                                        .variant(TextVariant::Heading2)
+                                                        .class("text-2xl font-semibold leading-none tracking-tight")
+                                                )
+                                                .child(
+                                                    Text::new("Decoded-bytes source, contain vs. cover fit, rounded clip")
+                                                        .variant(TextVariant::Caption)
+                                                        .class("text-sm text-muted-foreground mt-2")
+                                                )
+                                        )
+                                        .child(
+                                            // Natural size: the 8x8 checkerboard at its own
+                                            // intrinsic dimensions — no `flex-1`, so the box
+                                            // matches the source exactly and neither fit mode
+                                            // has anything to do.
+                                            View::new()
+                                                .class("flex mb-4")
+                                                .child(
+                                                    Image::from_encoded(CHECKERBOARD_PNG)
+                                                        .expect("hardcoded checkerboard PNG always decodes")
+                                                )
+                                        )
+                                        .child(
+                                            // `flex-1` grows the box to the row's full width —
+                                            // mkui-layout's only per-leaf sizing lever (there is
+                                            // no standalone `w-*`/`h-*` leaf override) — while
+                                            // height stays the image's own intrinsic 8px, so the
+                                            // box ends up far wider than tall relative to the
+                                            // square source. Contain scales the image down to
+                                            // fit *within* that box (here: it already fits both
+                                            // axes, so it stays native-sized) and letterboxes
+                                            // the rest transparent either side, rather than
+                                            // cropping or stretching.
+                                            View::new()
+                                                .class("flex mb-4")
+                                                .child(
+                                                    Image::from_encoded(CHECKERBOARD_PNG)
+                                                        .expect("hardcoded checkerboard PNG always decodes")
+                                                        .class("flex-1")
+                                                        .fit(ImageFit::Contain)
+                                                )
+                                        )
+                                        .child(
+                                            // Same grown, mismatched box, same source — Cover
+                                            // instead scales the image *up* until it fully
+                                            // covers the box, cropping the overflow instead of
+                                            // letterboxing it.
+                                            View::new()
+                                                .class("flex")
+                                                .child(
+                                                    Image::from_encoded(CHECKERBOARD_PNG)
+                                                        .expect("hardcoded checkerboard PNG always decodes")
+                                                        .class("flex-1")
+                                                        .fit(ImageFit::Cover)
                                                 )
                                         )
                                 )

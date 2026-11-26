@@ -419,6 +419,16 @@ pub struct CardStyle {
     pub corner_radius: f32,
 }
 
+/// Chrome for an `Image` node (#196): just the rounded-corner clip radius —
+/// an image's own pixels supply its fill, so there is no analogue of
+/// [`CardStyle::fill`]/`stroke`. Reuses [`SpacingTokens::radius_card`]
+/// rather than a dedicated token, the same "default surface chrome" radius
+/// [`WgpuTheme::card_selected`] already shares with [`WgpuTheme::card`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageStyle {
+    pub corner_radius: f32,
+}
+
 /// Badge look-and-feel variant, matching shadcn's six canonical
 /// non-interactive badge variants 1:1. Product-specific signals (state
 /// pills, role tags, tier markers) compose a badge in downstream crates;
@@ -686,6 +696,14 @@ impl WgpuTheme {
             fill: self.tokens.card_fill,
             stroke: self.tokens.card_border,
             stroke_width: self.tokens.spacing.stroke_width_hairline,
+            corner_radius: self.tokens.spacing.radius_card,
+        }
+    }
+
+    /// Default `Image` chrome (#196) — see [`ImageStyle`]'s docs for why
+    /// this reuses [`SpacingTokens::radius_card`].
+    pub fn image(&self) -> ImageStyle {
+        ImageStyle {
             corner_radius: self.tokens.spacing.radius_card,
         }
     }

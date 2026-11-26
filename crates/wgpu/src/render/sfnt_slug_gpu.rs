@@ -482,6 +482,9 @@ fn cross_provider_slug_and_bitmap_fallback_compose_in_order() {
                 RenderCommand::Backdrop(_) => {
                     panic!("test scene has no Backdrop primitives; Backdrop command unexpected");
                 }
+                RenderCommand::Image(_) => {
+                    panic!("test scene has no Image primitives; Image command unexpected");
+                }
             }
         }
     }

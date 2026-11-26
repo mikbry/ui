@@ -37,7 +37,7 @@ fn count_nodes(app: &Mkui) -> NodeCounts {
             NodeKind::Button(_) => counts.buttons += 1,
             NodeKind::Card(_) => counts.cards += 1,
             NodeKind::TextField(_) => counts.text_fields += 1,
-            NodeKind::Root | NodeKind::Custom { .. } => {}
+            NodeKind::Root | NodeKind::Image(_) | NodeKind::Custom { .. } => {}
         }
     }
     counts

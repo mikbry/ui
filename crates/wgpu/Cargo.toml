@@ -79,5 +79,7 @@ pollster = { workspace = true }
 # Phase 1): reads the ratified reference-harness's committed known-good
 # goldens for a byte-level comparison. Same pin as
 # `docs/chevalier/mkui-slug-rewrite/reference-harness/Cargo.toml` so both
-# sides decode identically.
-png = "0.17.16"
+# sides decode identically. Unrelated to #196's `Image` component — this
+# crate decodes a node's `Image` pixels through `mkui_core::image`
+# (a real, non-dev dependency there), never its own `png`/`image-webp`.
+png = { workspace = true }
