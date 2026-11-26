@@ -7,7 +7,7 @@
 //! observes them.
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     style::{Color, StyledContent, Stylize},
 };
 use mkui_core::components::Component;
@@ -68,7 +68,7 @@ impl Mkui {
             // reads. A MenuList with items always has *something* here
             // now, so a menu-only tree takes the interactive path below
             // instead of this early return (#189 round 3).
-            return self.render(false);
+            return self.render(false, false);
         }
 
         // Seed the cursor from a `MenuList`'s construction-time
@@ -85,6 +85,20 @@ impl Mkui {
 
         self.app.renderer().enter_alt_screen()?;
 
+        // #312: whether the currently-selected row is in typed-input edit
+        // mode. A `TextField` can't just read arrow keys as "type into
+        // me" — Up/Down/Left/Right are this loop's existing navigation
+        // keys — so Enter toggles a dedicated edit mode (vim-style modal
+        // editing) the same way a real `<input>` needs a click to focus
+        // before typing does anything: while `editing` is set, every key
+        // this match handles is interpreted as *content* for the
+        // selected field instead of navigation, and Enter/Esc commits
+        // back out to navigation. Caret/selection are a documented
+        // follow-up (#312's own acceptance criteria allow this for
+        // console specifically) — editing only ever appends/removes at
+        // the end of the value.
+        let mut editing = false;
+
         loop {
             let current_size = self.app.renderer().size();
             if current_size != self.app.last_terminal_size() {
@@ -92,10 +106,28 @@ impl Mkui {
                 self.app.renderer().clear_all()?;
             }
 
-            self.render(true)?;
+            self.render(true, editing)?;
 
             let evt = event::read()?;
             match evt {
+                // Crossterm also reports `KeyEventKind::Release`/`Repeat`
+                // on platforms that support them (Windows in particular) —
+                // without this filter, a single physical keystroke would
+                // insert its character twice on those platforms.
+                Event::Key(KeyEvent {
+                    kind: KeyEventKind::Release,
+                    ..
+                }) => continue,
+                Event::Key(KeyEvent { code, .. }) if editing => match code {
+                    KeyCode::Enter | KeyCode::Esc => editing = false,
+                    KeyCode::Backspace => self.edit_selected_text_field(|value| {
+                        value.pop();
+                    }),
+                    KeyCode::Char(c) => self.edit_selected_text_field(|value| {
+                        value.push(c);
+                    }),
+                    _ => {}
+                },
                 Event::Key(KeyEvent { code, .. }) => match code {
                     KeyCode::Left | KeyCode::Up => {
                         self.app.select_prev(self.selectables.len());
@@ -103,33 +135,13 @@ impl Mkui {
                     KeyCode::Right | KeyCode::Down => {
                         self.app.select_next(self.selectables.len());
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
-                        if let Some(selectable) = self.selectables.get(self.app.selected_index()) {
-                            if let Some(action_id) = selectable.on_activate() {
-                                // Fire through the tree's action registry,
-                                // **capture** the returned `RuntimeCtx`,
-                                // and propagate its dirty bit to the tree.
-                                // Dropping the ctx (the Codex round-7
-                                // anti-pattern) means action-driven state
-                                // changes never trigger a redraw — the
-                                // console loop re-renders every iteration
-                                // so we'd survive, but the substrate's
-                                // contract is broken without this hop.
-                                let ctx = self.core.tree().actions().fire(action_id);
-                                if ctx.is_dirty() {
-                                    self.core.tree_mut().mark_dirty();
-                                }
-                                // Re-walk the tree so any structural changes
-                                // the action made (future scope — toggling
-                                // child visibility, etc.) surface immediately
-                                // rather than waiting for the next event.
-                                // The cursor itself lives in `self.app`, not
-                                // in the rebuilt `self.selectables`, so this
-                                // refresh does not reset it.
-                                self.build_layout();
-                            }
+                    KeyCode::Enter => match self.selectables.get(self.app.selected_index()) {
+                        Some(Selectable::TextField(field)) if !field.disabled => {
+                            editing = true;
                         }
-                    }
+                        _ => self.activate_selected(),
+                    },
+                    KeyCode::Char(' ') => self.activate_selected(),
                     KeyCode::Char('q') | KeyCode::Esc => break,
                     _ => {}
                 },
@@ -142,6 +154,61 @@ impl Mkui {
         Ok(())
     }
 
+    /// Fire the currently-selected control's registered action (Enter/Space
+    /// on a `Button`/`MenuList` item), if it has one. Split out of `run`'s
+    /// match arms so Enter's `TextField`-vs-everything-else branch (#312)
+    /// doesn't duplicate the fire-and-rebuild sequence.
+    fn activate_selected(&mut self) {
+        let Some(selectable) = self.selectables.get(self.app.selected_index()) else {
+            return;
+        };
+        let Some(action_id) = selectable.on_activate() else {
+            return;
+        };
+        // Fire through the tree's action registry, **capture** the
+        // returned `RuntimeCtx`, and propagate its dirty bit to the tree.
+        // Dropping the ctx (the Codex round-7 anti-pattern) means
+        // action-driven state changes never trigger a redraw — the
+        // console loop re-renders every iteration so we'd survive, but
+        // the substrate's contract is broken without this hop.
+        let ctx = self.core.tree().actions().fire(action_id);
+        if ctx.is_dirty() {
+            self.core.tree_mut().mark_dirty();
+        }
+        // Re-walk the tree so any structural changes the action made
+        // (future scope — toggling child visibility, etc.) surface
+        // immediately rather than waiting for the next event. The cursor
+        // itself lives in `self.app`, not in the rebuilt `self.selectables`,
+        // so this refresh does not reset it.
+        self.build_layout();
+    }
+
+    /// Apply `edit` to the currently-selected `TextField`'s value, then
+    /// write the result back into the tree via
+    /// `mkui_runtime::AppTree::set_text_field_value` and re-walk (#312).
+    /// A no-op if the selection isn't an enabled `TextField` — e.g. a
+    /// stray character key pressed while `editing` is somehow still set
+    /// but the cursor has moved (shouldn't happen since `editing` only
+    /// ever toggles for the selected row, but this stays defensive rather
+    /// than assuming it).
+    fn edit_selected_text_field(&mut self, edit: impl FnOnce(&mut String)) {
+        let Some(Selectable::TextField(field)) = self.selectables.get(self.app.selected_index())
+        else {
+            return;
+        };
+        if field.disabled {
+            return;
+        }
+        let node = field.node;
+        let mut value = field.value.clone();
+        edit(&mut value);
+        let caret = value.len();
+        self.core
+            .tree_mut()
+            .set_text_field_value(node, &value, caret, None);
+        self.build_layout();
+    }
+
     fn build_layout(&mut self) {
         let mut layout = Vec::new();
         let mut selectables = Vec::new();
@@ -150,7 +217,7 @@ impl Mkui {
         self.selectables = selectables;
     }
 
-    fn render(&self, interactive: bool) -> std::io::Result<()> {
+    fn render(&self, interactive: bool, editing: bool) -> std::io::Result<()> {
         let renderer: &ConsoleRenderer = self.app.renderer();
         let (width, height) = renderer.size();
         let width = width as usize;
@@ -223,11 +290,27 @@ impl Mkui {
                         current_row += 1;
                     }
                 }
+                Line::TextField(index) => {
+                    if let Some(Selectable::TextField(field)) = self.selectables.get(*index) {
+                        let is_selected = self.app.selected_index() == *index;
+                        let is_editing = is_selected && editing;
+                        renderer.print_styled(
+                            4,
+                            current_row,
+                            text_field_styled_content(field, is_selected, is_editing),
+                        )?;
+                        current_row += 1;
+                    }
+                }
             }
         }
 
         if interactive {
-            let instructions = "↑↓/←→: Select | Space/Enter: Activate | q: Quit";
+            let instructions = if editing {
+                "Type to edit | Enter/Esc: Done editing"
+            } else {
+                "↑↓/←→: Select | Space/Enter: Activate | q: Quit"
+            };
             let instr_y = (height.saturating_sub(1)).min(current_row as usize + 2);
             renderer.print_footer(instr_y as u16, instructions)?;
         }
@@ -312,6 +395,59 @@ fn button_styled_content(
         // to the Primary style until their own arm lands.
         (true, _) => text.white().on_blue().bold(),
         (false, _) => text.white().on_blue(),
+    }
+}
+
+/// Decide the styled text for one `TextField` row (#312).
+///
+/// Shows `[value]` (bracketed, the same "this is a control" convention
+/// `button_styled_content` uses), falling back to the placeholder when
+/// `value` is empty. A disabled field dims to flat grey, mirroring
+/// `button_styled_content`'s disabled treatment exactly. An invalid field
+/// gets a trailing `*` — a marker that reads even without color (no-color
+/// terminals, piped output), the documented console-native convention
+/// for #312's `aria-invalid` equivalent, since this crate has no
+/// theme/color-role system to hang a border-color change on the way
+/// `mkui-web`/`mkui-wgpu` do. A field in typed-input edit mode (#312)
+/// shows a trailing block cursor so the user can tell typing is live.
+fn text_field_styled_content(
+    field: &crate::components::ConsoleTextField,
+    is_selected: bool,
+    is_editing: bool,
+) -> StyledContent<String> {
+    let shown = if field.value.is_empty() {
+        field.placeholder.as_str()
+    } else {
+        field.value.as_str()
+    };
+    let cursor = if is_editing { "\u{2588}" } else { "" };
+    let invalid_marker = if field.invalid { "*" } else { "" };
+    let text = format!("[{shown}{cursor}]{invalid_marker}");
+
+    if field.disabled {
+        return if is_selected {
+            text.dark_grey().underlined()
+        } else {
+            text.dark_grey()
+        };
+    }
+
+    if is_editing {
+        return text.black().on_white().bold();
+    }
+
+    if field.invalid {
+        return if is_selected {
+            text.red().on_grey().bold()
+        } else {
+            text.red()
+        };
+    }
+
+    if is_selected {
+        text.white().on_blue()
+    } else {
+        text.white()
     }
 }
 
@@ -622,5 +758,120 @@ mod tests {
         assert_eq!(button.style.hover_colors(), None);
         let selected = button_styled_content(button, true);
         assert_eq!(selected.style().background_color, Some(Color::Blue));
+    }
+
+    // ---- #312: TextField typed-input edit mode ----
+
+    #[test]
+    fn edit_selected_text_field_appends_and_backspaces_through_the_tree() {
+        let app = Mkui::new().expect("init mkui-console");
+        let mut app = app.child(mkui_core::components::TextField::new("ab"));
+        app.build_layout();
+
+        app.edit_selected_text_field(|value| value.push('c'));
+
+        let Selectable::TextField(field) = &app.selectables[0] else {
+            panic!("expected a TextField selectable")
+        };
+        assert_eq!(field.value, "abc");
+
+        app.edit_selected_text_field(|value| {
+            value.pop();
+        });
+        let Selectable::TextField(field) = &app.selectables[0] else {
+            panic!("expected a TextField selectable")
+        };
+        assert_eq!(field.value, "ab");
+    }
+
+    #[test]
+    fn edit_selected_text_field_is_a_no_op_on_a_disabled_field() {
+        let app = Mkui::new().expect("init mkui-console");
+        let mut app = app.child(mkui_core::components::TextField::new("ab").disabled(true));
+        app.build_layout();
+
+        app.edit_selected_text_field(|value| value.push('c'));
+
+        let Selectable::TextField(field) = &app.selectables[0] else {
+            panic!("expected a TextField selectable")
+        };
+        assert_eq!(field.value, "ab", "a disabled field must not accept edits");
+    }
+
+    #[test]
+    fn enter_on_a_text_field_does_not_fire_any_action() {
+        // `on_activate` must stay `None` for a TextField — Enter toggling
+        // edit mode is handled entirely in `run`'s match arms, never
+        // through the `ActionRegistry` (unlike Button/MenuList).
+        let app = Mkui::new().expect("init mkui-console");
+        let mut app = app.child(mkui_core::components::TextField::new("ab"));
+        app.build_layout();
+
+        app.activate_selected(); // must not panic / must be a no-op
+        let Selectable::TextField(field) = &app.selectables[0] else {
+            panic!("expected a TextField selectable")
+        };
+        assert_eq!(field.value, "ab");
+    }
+
+    #[test]
+    fn disabled_text_field_renders_dimmed_regardless_of_selection() {
+        let field = crate::components::ConsoleTextField {
+            node: mkui_runtime::NodeId::from_raw(0, 0),
+            value: "x".to_string(),
+            placeholder: String::new(),
+            disabled: true,
+            invalid: false,
+        };
+        for selected in [true, false] {
+            let styled = text_field_styled_content(&field, selected, false);
+            assert_eq!(styled.style().foreground_color, Some(Color::DarkGrey));
+            assert_eq!(styled.style().background_color, None);
+        }
+    }
+
+    #[test]
+    fn invalid_text_field_gets_a_trailing_marker_and_distinct_color() {
+        let field = crate::components::ConsoleTextField {
+            node: mkui_runtime::NodeId::from_raw(0, 0),
+            value: "x".to_string(),
+            placeholder: String::new(),
+            disabled: false,
+            invalid: true,
+        };
+        let styled = text_field_styled_content(&field, false, false);
+        assert!(
+            styled.content().ends_with('*'),
+            "an invalid field's content must carry a no-color-terminal-visible marker"
+        );
+        assert_eq!(styled.style().foreground_color, Some(Color::Red));
+    }
+
+    #[test]
+    fn empty_text_field_shows_its_placeholder() {
+        let field = crate::components::ConsoleTextField {
+            node: mkui_runtime::NodeId::from_raw(0, 0),
+            value: String::new(),
+            placeholder: "Email".to_string(),
+            disabled: false,
+            invalid: false,
+        };
+        let styled = text_field_styled_content(&field, false, false);
+        assert!(styled.content().contains("Email"));
+    }
+
+    #[test]
+    fn editing_text_field_shows_a_block_cursor() {
+        let field = crate::components::ConsoleTextField {
+            node: mkui_runtime::NodeId::from_raw(0, 0),
+            value: "ab".to_string(),
+            placeholder: String::new(),
+            disabled: false,
+            invalid: false,
+        };
+        let editing = text_field_styled_content(&field, true, true);
+        let not_editing = text_field_styled_content(&field, true, false);
+        assert_ne!(editing.content(), not_editing.content());
+        assert!(editing.content().contains('\u{2588}'));
     }
 }

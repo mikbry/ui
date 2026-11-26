@@ -67,3 +67,28 @@ fn card_and_disabled_button_lower_into_runtime_correctly() {
     assert_eq!(cards, 1);
     assert_eq!(disabled_buttons, 1);
 }
+
+#[test]
+fn text_field_lowers_into_runtime_with_its_props() {
+    // #312: exercised through the same lowering path `render_tree`
+    // consumes — DOM construction itself needs a real browser (see the
+    // module doc).
+    let core = mkui_core::components::Mkui::new().child(
+        TextField::new("hi")
+            .placeholder("Email")
+            .disabled(false)
+            .invalid(true),
+    );
+
+    let mut fields = 0;
+    for node in core.tree().nodes() {
+        if let NodeKind::TextField(f) = &node.kind {
+            fields += 1;
+            assert_eq!(f.value, "hi");
+            assert_eq!(f.placeholder, "Email");
+            assert!(!f.disabled);
+            assert!(f.invalid);
+        }
+    }
+    assert_eq!(fields, 1);
+}

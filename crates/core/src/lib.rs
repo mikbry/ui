@@ -50,7 +50,7 @@ pub mod theme;
 
 pub mod prelude {
     // Components (high-level cross-platform components)
-    pub use crate::components::{Button, Card, Component, MenuList, Mkui, Text, View};
+    pub use crate::components::{Button, Card, Component, MenuList, Mkui, Text, TextField, View};
 
     // Headless components (logic-only, no rendering)
     pub use crate::headless::{

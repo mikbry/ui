@@ -52,4 +52,6 @@ pub use actions::{ActionId, ActionRegistry, LocalAction, RuntimeCtx, RuntimeSign
 pub use diff::{diff_keyed, DiffOp};
 pub use props::{ButtonVariant, ButtonVariantParseError, TextVariant, TextVariantParseError};
 pub use style::{ClassParseError, ColorRole, ResolvedStyle, StateStyle, StyleClass};
-pub use tree::{AppTree, ButtonProps, Node, NodeId, NodeKind, TextProps, ViewProps};
+pub use tree::{
+    AppTree, ButtonProps, Node, NodeId, NodeKind, TextFieldProps, TextProps, ViewProps,
+};

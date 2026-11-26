@@ -109,6 +109,7 @@ impl LoweringRegistry {
         reg.register::<Text>();
         reg.register::<Button>();
         reg.register::<Card>();
+        reg.register::<TextField>();
         reg.register::<MenuList>();
         reg
     }
@@ -598,6 +599,110 @@ impl LowerToTree for Card {
             registry.lower_boxed(child, tree, id)?;
         }
         Ok(id)
+    }
+}
+
+// -------------------------------------------------------------------------
+// TextField — single-line editable text input (#312, ADR 0015)
+// -------------------------------------------------------------------------
+
+/// Cross-platform `TextField` component — a single-line editable text
+/// input, promoted from `mkui-wgpu`'s wgpu-local `text_field`/
+/// `TextEditState` (#185) into the shared contract, following the same
+/// promotion process `Card` proved (#270/#301, ADR 0015).
+///
+/// `on_change`/a payload-carrying callback is deliberately absent:
+/// `mkui_runtime::ActionRegistry` actions are `FnMut(&mut RuntimeCtx)` with
+/// no argument slot for the new value, so there's no existing mechanism to
+/// hang one on without inventing a new, payload-carrying action shape.
+/// The current value lives in the tree itself (`NodeKind::TextField`) —
+/// any code holding a `NodeId` and the tree can read it back directly, the
+/// same way an app reads back any other node's state. Scope decision:
+/// deferred to a follow-up issue if a reactive callback turns out to be
+/// needed.
+pub struct TextField {
+    value: String,
+    placeholder: String,
+    class: String,
+    disabled: bool,
+    invalid: bool,
+}
+
+impl TextField {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            placeholder: String::new(),
+            class: String::new(),
+            disabled: false,
+            invalid: false,
+        }
+    }
+
+    pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.placeholder = placeholder.into();
+        self
+    }
+
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    /// Mark this field disabled: backends suppress focus/edit (`mkui-web`
+    /// sets the native `disabled` attribute; `mkui-wgpu`/`mkui-console`
+    /// refuse to focus it and dim its chrome).
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Mark this field invalid — the shadcn `aria-invalid` convention
+    /// (#312): `mkui-web` sets the real `aria-invalid` attribute;
+    /// `mkui-wgpu`/`mkui-console` give it their own documented visual cue.
+    pub fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
+        self
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    pub fn placeholder_text(&self) -> &str {
+        &self.placeholder
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class
+    }
+
+    pub fn is_disabled(&self) -> bool {
+        self.disabled
+    }
+
+    pub fn is_invalid(&self) -> bool {
+        self.invalid
+    }
+}
+
+impl Component for TextField {}
+
+impl LowerToTree for TextField {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        _registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let value = std::mem::take(&mut self.value);
+        let placeholder = std::mem::take(&mut self.placeholder);
+        let class = std::mem::take(&mut self.class);
+        let disabled = self.disabled;
+        let invalid = self.invalid;
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(tree.push_text_field_unchecked(parent, value, placeholder, style, disabled, invalid))
     }
 }
 

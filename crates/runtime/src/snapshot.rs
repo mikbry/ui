@@ -63,6 +63,14 @@ pub enum KindSnapshot {
         disabled: bool,
     },
     Card,
+    TextField {
+        value: String,
+        placeholder: String,
+        caret: usize,
+        anchor: Option<usize>,
+        disabled: bool,
+        invalid: bool,
+    },
     Custom {
         type_name: String,
         props: serde_json::Value,
@@ -110,6 +118,14 @@ impl NodeSnapshot {
                 disabled: b.disabled,
             },
             crate::tree::NodeKind::Card(_) => KindSnapshot::Card,
+            crate::tree::NodeKind::TextField(f) => KindSnapshot::TextField {
+                value: f.value.clone(),
+                placeholder: f.placeholder.clone(),
+                caret: f.caret,
+                anchor: f.anchor,
+                disabled: f.disabled,
+                invalid: f.invalid,
+            },
             crate::tree::NodeKind::Custom { type_name, props } => KindSnapshot::Custom {
                 type_name: type_name.clone(),
                 props: props.clone(),

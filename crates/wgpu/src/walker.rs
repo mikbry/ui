@@ -132,7 +132,8 @@ use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
 use crate::components::{card, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX};
 use crate::tessellation::map_align;
 use crate::theme::{
-    ButtonSize, ButtonVariant as ThemeButtonVariant, TextVariant as ThemeTextVariant, WgpuTheme,
+    ButtonSize, ButtonVariant as ThemeButtonVariant, InputStyle, TextVariant as ThemeTextVariant,
+    WgpuTheme,
 };
 use crate::types::{
     Color, CornerRadii, Point, Primitive, Quad, Rect, Scene, Size, Stroke, Text, TextAlign,
@@ -398,6 +399,42 @@ impl LeafMeasure for WgpuLeafMeasure<'_> {
         let spacing = &self.theme.tokens.spacing;
         let width = (label_width + spacing.button_padding_x * 2.0).max(BUTTON_MIN_WIDTH_PX);
         Measured::new(width, spacing.button_height)
+    }
+
+    /// A `TextField`'s height is fixed (theme input padding around one line
+    /// of body text, same box `render_text_field` paints); its width is
+    /// normally container-driven (`max_width_px: Some`, a real `<input>`
+    /// stretches to fill its row) — only a `None` max-content query (a
+    /// Row's flex-basis measurement) falls back to content-driven sizing,
+    /// against whichever of `value`/`placeholder` is wider.
+    fn measure_text_field(
+        &self,
+        value: &str,
+        placeholder: &str,
+        style: &ResolvedStyle,
+        max_width_px: Option<f32>,
+    ) -> Measured {
+        let input_style = self.theme.input(false);
+        let line_height = input_style.text_style.line_height_px;
+        let height = line_height + input_style.padding.top + input_style.padding.bottom;
+        match max_width_px {
+            Some(width) => Measured::new(width, height),
+            None => {
+                let value_width = self
+                    .measure_text_inner(value, TextVariant::Body, style, None)
+                    .size
+                    .width;
+                let placeholder_width = self
+                    .measure_text_inner(placeholder, TextVariant::Body, style, None)
+                    .size
+                    .width;
+                let content_width = value_width.max(placeholder_width);
+                Measured::new(
+                    content_width + input_style.padding.left + input_style.padding.right,
+                    height,
+                )
+            }
+        }
     }
 
     /// Mirrors `bridge.rs::builtins::BadgeRenderer`'s own `width`/`height`
@@ -794,6 +831,14 @@ fn walk_node(
         NodeKind::Button(b) => {
             render_button(node, b, ctx, rect.unwrap_or_else(fallback_rect), layouts)
         }
+        NodeKind::TextField(f) => render_text_field(
+            tree,
+            node,
+            f,
+            ctx,
+            rect.unwrap_or_else(fallback_rect),
+            layouts,
+        ),
         NodeKind::Custom { type_name, props } => {
             // Custom renderers may read state that lives outside the tree
             // (#229 — see the module docs): poison this subtree for caching
@@ -1104,6 +1149,95 @@ fn render_button(
             });
         }
     }
+    layouts.push(NodeLayout {
+        node: node.id,
+        rect,
+    });
+}
+
+/// Renders [`mkui_runtime::NodeKind::TextField`] (#312): `mkui-wgpu` as a
+/// *renderer of the contract's representation*, reusing the exact
+/// caret/selection/placeholder chrome [`crate::components::text_field_editable`]
+/// (#185) already painted — now driven by the node's own
+/// `value`/`caret`/`anchor`, via a transient [`crate::text_edit::TextEditState`]
+/// built fresh each frame (`TextEditState::from_parts`), instead of a
+/// caller-owned state the walker had no way to reach before this
+/// promotion. The caret paints only while this node is the tree's
+/// [`AppTree::focused_text_field`] — an unfocused field renders its
+/// value/selection with no caret, matching a real `<input>` that has lost
+/// focus. `invalid` gets its own destructive-stroke chrome
+/// ([`WgpuTheme::input_invalid`]) regardless of focus; `disabled` dims
+/// fill/stroke/text/caret by the same [`DISABLED_ALPHA_FACTOR`] `render_button`
+/// applies and leaves a non-activating hit blocker (never focusable), same
+/// shape as a disabled `Button`'s hit entry.
+fn render_text_field(
+    tree: &AppTree,
+    node: &mkui_runtime::Node,
+    field: &mkui_runtime::TextFieldProps,
+    ctx: &mut WgpuRenderCtx<'_>,
+    rect: Rect,
+    layouts: &mut Vec<NodeLayout>,
+) {
+    let theme = ctx.theme;
+    let focused = !field.disabled && tree.focused_text_field() == Some(node.id);
+    let base_style = if field.invalid {
+        theme.input_invalid(focused)
+    } else {
+        theme.input(focused)
+    };
+    let style = if field.disabled {
+        InputStyle {
+            fill: base_style.fill.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            stroke: base_style.stroke.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            text_color: base_style.text_color.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            caret_color: base_style.caret_color.multiply_alpha(DISABLED_ALPHA_FACTOR),
+            ..base_style
+        }
+    } else {
+        base_style
+    };
+
+    let state =
+        crate::text_edit::TextEditState::from_parts(&field.value, field.caret, field.anchor);
+    let text_rect = crate::components::text_field_editable(ctx.scene, rect, &state, style, focused);
+
+    // The placeholder is never part of `TextEditState` (#185's logical
+    // model has no notion of one) — painted separately, only while the
+    // field is empty, so `text_field_editable`'s own signature/tests stay
+    // untouched by this promotion.
+    if field.value.is_empty() && !field.placeholder.is_empty() {
+        let muted = if field.disabled {
+            theme
+                .tokens
+                .muted_foreground
+                .multiply_alpha(DISABLED_ALPHA_FACTOR)
+        } else {
+            theme.tokens.muted_foreground
+        };
+        let placeholder_style = TextStyle {
+            align: TextAlign::Start,
+            color: muted,
+            ..style.text_style
+        };
+        ctx.scene.text(Text {
+            rect: text_rect,
+            content: field.placeholder.clone(),
+            style: placeholder_style,
+        });
+    }
+
+    ctx.hits.push(HitTestEntry {
+        rect,
+        node: node.id,
+        // Never an action — a text field is focused by a click, not
+        // fired; `mkui-wgpu`'s `app.rs` decides focus-vs-nothing itself by
+        // inspecting `click.node`'s `NodeKind`, the same `ClickHit` a
+        // disabled/action-less `Button` hit already produces.
+        action: None,
+        disabled: field.disabled,
+        corner_radii: CornerRadii::all(style.corner_radius),
+    });
+
     layouts.push(NodeLayout {
         node: node.id,
         rect,
@@ -1529,6 +1663,159 @@ mod tests {
 
         // Card itself + the text child = 2 layout entries.
         assert_eq!(out.layouts.len(), 2);
+    }
+
+    /// #312: `NodeKind::TextField` paints the same input chrome + value
+    /// text `components::text_field_editable` (#185) already painted, and
+    /// registers a (never-firing) hit entry so `app.rs` can click-to-focus
+    /// it — the same `ClickHit` shape a disabled/action-less `Button`
+    /// already produces.
+    #[test]
+    fn text_field_paints_box_value_text_and_a_non_firing_hit_entry() {
+        let core = CoreMkui::new().child(mkui_core::components::TextField::new("hello"));
+        let out = walk(&core);
+
+        let quads = out
+            .scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Quad(_)))
+            .count();
+        assert!(quads >= 1, "text field must paint an input box");
+        let texts = text_primitives(&out.scene);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].content, "hello");
+
+        assert_eq!(out.hit_tests.len(), 1);
+        assert_eq!(out.hit_tests[0].action, None);
+        assert!(!out.hit_tests[0].disabled);
+    }
+
+    /// An empty field shows its placeholder; a non-empty one doesn't.
+    #[test]
+    fn text_field_shows_placeholder_only_when_the_value_is_empty() {
+        let core =
+            CoreMkui::new().child(mkui_core::components::TextField::new("").placeholder("Email"));
+        let out = walk(&core);
+        let texts = text_primitives(&out.scene);
+        assert!(
+            texts.iter().any(|t| t.content == "Email"),
+            "an empty field must paint its placeholder"
+        );
+
+        let core =
+            CoreMkui::new().child(mkui_core::components::TextField::new("a").placeholder("Email"));
+        let out = walk(&core);
+        let texts = text_primitives(&out.scene);
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].content, "a");
+    }
+
+    /// Disabled chrome dims fill/stroke and registers a non-firing,
+    /// disabled blocker, mirroring `disabled_button_paints_dimmed_chrome_and_registers_a_blocker`.
+    #[test]
+    fn disabled_text_field_paints_dimmed_chrome_and_registers_a_disabled_blocker() {
+        let idle = CoreMkui::new().child(mkui_core::components::TextField::new("hi"));
+        let idle_out = walk(&idle);
+        let idle_quad = idle_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => Some(*q),
+                _ => None,
+            })
+            .expect("idle field must paint a quad");
+
+        let disabled =
+            CoreMkui::new().child(mkui_core::components::TextField::new("hi").disabled(true));
+        let disabled_out = walk(&disabled);
+        let disabled_quad = disabled_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => Some(*q),
+                _ => None,
+            })
+            .expect("disabled field must still paint a quad");
+
+        assert_ne!(
+            idle_quad.fill, disabled_quad.fill,
+            "disabled must dim the fill"
+        );
+        assert_eq!(disabled_out.hit_tests.len(), 1);
+        let blocker = disabled_out.hit_tests[0];
+        assert!(blocker.disabled);
+        assert_eq!(blocker.action, None);
+    }
+
+    /// Invalid gets the destructive-stroke treatment regardless of focus
+    /// (#312's `aria-invalid` convention).
+    #[test]
+    fn invalid_text_field_uses_the_destructive_stroke_color() {
+        let valid = CoreMkui::new().child(mkui_core::components::TextField::new("hi"));
+        let valid_out = walk(&valid);
+        let valid_stroke = valid_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => q.stroke,
+                _ => None,
+            })
+            .expect("valid field must paint a stroked quad");
+
+        let invalid =
+            CoreMkui::new().child(mkui_core::components::TextField::new("hi").invalid(true));
+        let invalid_out = walk(&invalid);
+        let invalid_stroke = invalid_out
+            .scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                Primitive::Quad(q) => q.stroke,
+                _ => None,
+            })
+            .expect("invalid field must paint a stroked quad");
+
+        assert_ne!(valid_stroke.color, invalid_stroke.color);
+        assert_eq!(
+            invalid_stroke.color,
+            WgpuTheme::default().tokens.destructive
+        );
+    }
+
+    /// The caret only paints while the node is the tree's
+    /// `focused_text_field` — matching a real `<input>` that draws no
+    /// caret once it loses focus.
+    #[test]
+    fn caret_paints_only_while_the_field_is_focused() {
+        let mut core = CoreMkui::new().child(mkui_core::components::TextField::new("hi"));
+        let field = texts_first_node(&core);
+
+        let unfocused_out = walk(&core);
+        let unfocused_quads = unfocused_out
+            .scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Quad(_)))
+            .count();
+
+        core.tree_mut().focus_text_field(field);
+        let focused_out = walk(&core);
+        let focused_quads = focused_out
+            .scene
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Quad(_)))
+            .count();
+
+        assert_eq!(
+            focused_quads,
+            unfocused_quads + 1,
+            "focus must add exactly one quad (the caret bar) over the unfocused box"
+        );
     }
 
     /// Disabled chrome keeps one inert silhouette in paint order, without

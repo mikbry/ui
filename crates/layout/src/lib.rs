@@ -123,6 +123,27 @@ mod tests {
             let label_width = self.measure_str(label, None).size.width;
             Measured::new(label_width + 32.0, 36.0)
         }
+
+        fn measure_text_field(
+            &self,
+            value: &str,
+            placeholder: &str,
+            _style: &ResolvedStyle,
+            max_width_px: Option<f32>,
+        ) -> Measured {
+            // A text field fills whatever width it's given, same as a real
+            // `<input>`; with no definite width (a Row's flex-basis query)
+            // report the wider of value/placeholder's natural width, fixed
+            // height matching the `mkui-wgpu` theme's input box.
+            match max_width_px {
+                Some(width) => Measured::new(width, 28.0),
+                None => {
+                    let value_width = self.measure_str(value, None).size.width;
+                    let placeholder_width = self.measure_str(placeholder, None).size.width;
+                    Measured::new(value_width.max(placeholder_width), 28.0)
+                }
+            }
+        }
     }
 
     /// Rebuilds `examples/showcase-common::create_showcase_ui`'s structure
@@ -406,6 +427,29 @@ mod tests {
                 .size;
             let _ = variant;
             Measured::new(label_size.width + 32.0, 36.0)
+        }
+
+        fn measure_text_field(
+            &self,
+            value: &str,
+            placeholder: &str,
+            style: &ResolvedStyle,
+            max_width_px: Option<f32>,
+        ) -> Measured {
+            match max_width_px {
+                Some(width) => Measured::new(width, 28.0),
+                None => {
+                    let value_width = self
+                        .measure_text(value, TextVariant::Body, style, None)
+                        .size
+                        .width;
+                    let placeholder_width = self
+                        .measure_text(placeholder, TextVariant::Body, style, None)
+                        .size
+                        .width;
+                    Measured::new(value_width.max(placeholder_width), 28.0)
+                }
+            }
         }
     }
 

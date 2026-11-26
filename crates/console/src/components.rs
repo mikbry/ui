@@ -27,7 +27,9 @@
 //! row selected" is decided once, at render time, from that one cursor —
 //! never baked into a `Line` at walk time.
 
-use mkui_runtime::{ActionId, AppTree, ButtonVariant, NodeKind, ResolvedStyle, TextVariant};
+use mkui_runtime::{
+    ActionId, AppTree, ButtonVariant, NodeId, NodeKind, ResolvedStyle, TextVariant,
+};
 
 /// Console-side projection of a runtime `Button` node.
 ///
@@ -47,6 +49,23 @@ pub struct ConsoleButton {
     /// content`) but [`Selectable::on_activate`] refuses to hand back its
     /// action, the terminal's equivalent of "no hit rect"/"no onclick".
     pub disabled: bool,
+}
+
+/// Console-side projection of a runtime `TextField` node (#312).
+///
+/// Carries `node` (the live `NodeId`) rather than just a copy of the
+/// value — unlike a `Button`'s fire-and-forget `on_press`, the console's
+/// typed-input edit loop ([`crate::high_level::Mkui::run`]) mutates this
+/// field's `value` on every keystroke via
+/// `mkui_runtime::AppTree::set_text_field_value`, so it needs the node
+/// identity to write back to, not just a read-time snapshot.
+#[derive(Clone, Debug)]
+pub struct ConsoleTextField {
+    pub node: NodeId,
+    pub value: String,
+    pub placeholder: String,
+    pub disabled: bool,
+    pub invalid: bool,
 }
 
 /// Console-side projection of one row of a `"menu_list"` `NodeKind::Custom`
@@ -73,16 +92,21 @@ pub struct ConsoleMenuItem {
 pub enum Selectable {
     Button(ConsoleButton),
     MenuItem(ConsoleMenuItem),
+    TextField(ConsoleTextField),
 }
 
 impl Selectable {
     /// The action to fire when this control is confirmed (Enter/Space),
-    /// if any was registered.
+    /// if any was registered. A `TextField` never has one — Enter instead
+    /// toggles the run loop's typed-input edit mode (#312), handled
+    /// entirely in `crate::high_level::Mkui::run`, not through the
+    /// `ActionRegistry`.
     pub fn on_activate(&self) -> Option<ActionId> {
         match self {
             Selectable::Button(button) if button.disabled => None,
             Selectable::Button(button) => button.on_press,
             Selectable::MenuItem(item) => item.on_select,
+            Selectable::TextField(_) => None,
         }
     }
 
@@ -90,6 +114,7 @@ impl Selectable {
         match self {
             Selectable::Button(button) => &button.label,
             Selectable::MenuItem(item) => &item.label,
+            Selectable::TextField(field) => &field.value,
         }
     }
 }
@@ -111,6 +136,11 @@ pub enum Line {
     Spacer,
     Button(usize),
     MenuListItem(usize),
+    /// A `TextField` row (#312), referencing its [`Selectable::TextField`]
+    /// in the same unified cursor space as `Button`/`MenuListItem` — see
+    /// that variant's own doc for why `is this row selected/editing`
+    /// stays a render-time comparison rather than something baked in here.
+    TextField(usize),
     /// Top border of a `Card` node's bordered box (#270) — the console's
     /// own native primitive for the card chrome every other backend paints
     /// as a filled/stroked rect. Everything between a `CardTop` and its
@@ -176,6 +206,17 @@ fn walk_children(
                 }));
                 layout.push(Line::Button(index));
             }
+            NodeKind::TextField(f) => {
+                let index = selectables.len();
+                selectables.push(Selectable::TextField(ConsoleTextField {
+                    node: *child_id,
+                    value: f.value.clone(),
+                    placeholder: f.placeholder.clone(),
+                    disabled: f.disabled,
+                    invalid: f.invalid,
+                }));
+                layout.push(Line::TextField(index));
+            }
             NodeKind::Custom { type_name, props } if type_name == "menu_list" => {
                 push_menu_list_lines(props, layout, selectables);
             }
@@ -234,7 +275,7 @@ fn push_menu_list_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mkui_core::components::{Button, MenuList, Mkui, Text, View};
+    use mkui_core::components::{Button, MenuList, Mkui, Text, TextField, View};
     use mkui_core::headless::TextVariant;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -280,6 +321,40 @@ mod tests {
         let action = selectables[0].on_activate().expect("on_press");
         app.tree().actions().fire(action);
         assert!(pressed.get());
+    }
+
+    #[test]
+    fn walk_tree_produces_a_text_field_selectable_carrying_its_node_id() {
+        // #312: unlike `Button`, a `TextField` carries its live `NodeId`
+        // (so the console's edit loop can write back to it) and never has
+        // an action to fire.
+        let app = Mkui::new().child(TextField::new("hi").placeholder("Email").invalid(true));
+
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        assert_eq!(selectables.len(), 1);
+        assert!(matches!(layout.as_slice(), [Line::TextField(0)]));
+        let Selectable::TextField(field) = &selectables[0] else {
+            panic!("expected a TextField selectable")
+        };
+        assert_eq!(field.value, "hi");
+        assert_eq!(field.placeholder, "Email");
+        assert!(field.invalid);
+        assert!(!field.disabled);
+        assert_eq!(selectables[0].label(), "hi");
+        assert_eq!(
+            selectables[0].on_activate(),
+            None,
+            "a TextField never has an action to fire"
+        );
+
+        let node = app.tree().get(field.node);
+        assert!(
+            node.is_some(),
+            "the carried NodeId must resolve in the tree"
+        );
     }
 
     #[test]
@@ -350,6 +425,7 @@ mod tests {
             .map(|s| match s {
                 Selectable::MenuItem(item) => item,
                 Selectable::Button(_) => panic!("expected only menu items"),
+                Selectable::TextField(_) => panic!("expected only menu items"),
             })
             .collect();
         assert_eq!(menu_items[0].label, "New Game");
@@ -377,6 +453,7 @@ mod tests {
             .map(|s| match s {
                 Selectable::MenuItem(item) => item.initial,
                 Selectable::Button(_) => panic!("expected only menu items"),
+                Selectable::TextField(_) => panic!("expected only menu items"),
             })
             .collect();
         assert_eq!(initial_flags, vec![true, false, false]);

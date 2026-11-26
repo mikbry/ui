@@ -59,6 +59,22 @@ pub trait LeafMeasure {
         max_width_px: Option<f32>,
     ) -> Measured;
 
+    /// Measure a `TextField` node (#312). Unlike [`Self::measure_button`],
+    /// a text field's width is normally container-driven (it stretches to
+    /// fill its row, like a real `<input>`), not content-driven — callers
+    /// typically only care about the returned height when `max_width_px`
+    /// is `Some`. `value`/`placeholder` are both handed over (rather than
+    /// just whichever currently renders) so a measurer that *does* want a
+    /// content-driven max-content width (`max_width_px: None`, sizing a Row
+    /// container's flex-basis) can size against whichever is wider.
+    fn measure_text_field(
+        &self,
+        value: &str,
+        placeholder: &str,
+        style: &ResolvedStyle,
+        max_width_px: Option<f32>,
+    ) -> Measured;
+
     /// Measure a `Custom` extension node. `mkui-layout` has no registry for
     /// these — it knows only `type_name` + the opaque `props` JSON payload
     /// the tree already carries. The default contributes zero size, which

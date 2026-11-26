@@ -25,6 +25,7 @@ struct NodeCounts {
     texts: usize,
     buttons: usize,
     cards: usize,
+    text_fields: usize,
 }
 
 fn count_nodes(app: &Mkui) -> NodeCounts {
@@ -35,6 +36,7 @@ fn count_nodes(app: &Mkui) -> NodeCounts {
             NodeKind::Text(_) => counts.texts += 1,
             NodeKind::Button(_) => counts.buttons += 1,
             NodeKind::Card(_) => counts.cards += 1,
+            NodeKind::TextField(_) => counts.text_fields += 1,
             NodeKind::Root | NodeKind::Custom { .. } => {}
         }
     }
@@ -77,6 +79,35 @@ fn card_counts_as_its_own_node_kind_during_traversal() {
     assert_eq!(counts.cards, 1);
     assert_eq!(counts.texts, 1);
     assert_eq!(counts.buttons, 1);
+}
+
+#[test]
+fn text_field_counts_as_its_own_node_kind_and_carries_its_props() {
+    // #312: `TextField` is a distinct `NodeKind`, following the same
+    // promotion pattern `Card` proved (#270/#301).
+    let app = Mkui::new().child(
+        View::new().child(
+            TextField::new("hi")
+                .placeholder("Email")
+                .disabled(false)
+                .invalid(true),
+        ),
+    );
+
+    let counts = count_nodes(&app);
+    assert_eq!(counts.views, 1);
+    assert_eq!(counts.text_fields, 1);
+
+    let root = app.tree().get(app.tree().root()).unwrap();
+    let view = app.tree().get(root.children[0]).unwrap();
+    let NodeKind::TextField(f) = &app.tree().get(view.children[0]).unwrap().kind else {
+        panic!("expected TextField")
+    };
+    assert_eq!(f.value, "hi");
+    assert_eq!(f.caret, 2);
+    assert_eq!(f.placeholder, "Email");
+    assert!(!f.disabled);
+    assert!(f.invalid);
 }
 
 #[test]
