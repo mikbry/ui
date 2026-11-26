@@ -563,12 +563,32 @@ fn plan_children(tree: &AppTree, measure: &dyn LeafMeasure, node: &Node) -> Vec<
 
 /// Distribute `free` pixels of main-axis space across `basis`, growing
 /// (positive `free`) or shrinking (negative `free`) in place. Growth splits
-/// evenly across every `flex-grow` child; shrink splits proportionally to
+/// evenly across every `flex-grow` child. Shrink splits proportionally to
 /// basis size across `View` children only (see the module docs' shrink
-/// tolerance) and never below zero. Returns how much of `free` was actually
-/// consumed by grow/shrink (always `free` itself unless shrink bottoms out
-/// at zero before using all of it).
-fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], free: f32) -> f32 {
+/// tolerance), never reducing `basis[i]` below the matching `min[i]` —
+/// CSS's "automatic minimum size" floor. A plain `View`/`Card` column child
+/// is called with its own natural (pre-shrink) height as its `min`, so it
+/// never shrinks at all on the column (height) axis — matching real CSS,
+/// where block height has no narrower "min-content" than the content's own
+/// height. A container designed to absorb overflow itself (e.g. a
+/// `ScrollArea`, #328) instead passes `0.0`, the same floor the row (width)
+/// axis always used. Once every shrinkable child has bottomed out at its
+/// own `min`, any further overflow is left unresolved — the caller sees it
+/// in the gap between the returned consumed amount and `free`, and that
+/// gap becomes genuine visible overflow rather than overlap.
+///
+/// Shrinking iterates: each round splits the *remaining* overflow
+/// proportionally across children that still have room (`basis[i] >
+/// min[i]`), clamps any child that would cross its floor, and feeds
+/// whatever that clamping couldn't place into the next round across the
+/// children still with room. This is the standard CSS flex-shrink
+/// algorithm's clamping loop, simplified for this engine's single-pass-per-
+/// line usage (no `flex-shrink` weights beyond basis size).
+///
+/// Returns how much of `free` was actually consumed by grow/shrink — for
+/// shrink, this can be smaller in magnitude than `free` once every child
+/// bottoms out at its `min` before absorbing all of it.
+fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], min: &[f32], free: f32) -> f32 {
     if free > 0.0 {
         let growers: Vec<usize> = children
             .iter()
@@ -594,17 +614,41 @@ fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], free: f32) ->
         if shrinkable.is_empty() {
             return 0.0;
         }
-        let shrinkable_total: f32 = shrinkable.iter().map(|&i| basis[i]).sum();
-        if shrinkable_total <= 0.0 {
-            return 0.0;
+        let mut remaining = -free;
+        let mut consumed = 0.0_f32;
+        loop {
+            let active: Vec<usize> = shrinkable
+                .iter()
+                .copied()
+                .filter(|&i| basis[i] > min[i] + f32::EPSILON)
+                .collect();
+            if active.is_empty() || remaining <= 0.0 {
+                break;
+            }
+            let active_total: f32 = active.iter().map(|&i| basis[i]).sum();
+            if active_total <= 0.0 {
+                break;
+            }
+            let mut used_this_round = 0.0_f32;
+            let mut any_clamped = false;
+            for &i in &active {
+                let ratio = basis[i] / active_total;
+                let desired = remaining * ratio;
+                let available = basis[i] - min[i];
+                let reduction = desired.min(available);
+                basis[i] -= reduction;
+                used_this_round += reduction;
+                if reduction + f32::EPSILON < desired {
+                    any_clamped = true;
+                }
+            }
+            consumed += used_this_round;
+            remaining -= used_this_round;
+            if !any_clamped || used_this_round <= f32::EPSILON {
+                break;
+            }
         }
-        let overflow = -free;
-        for i in shrinkable {
-            let ratio = basis[i] / shrinkable_total;
-            let reduction = (overflow * ratio).min(basis[i]);
-            basis[i] -= reduction;
-        }
-        free
+        -consumed
     } else {
         0.0
     }
@@ -657,7 +701,16 @@ fn layout_column_children(
     let mut leftover = 0.0_f32;
     if let Some(budget) = budget {
         let free = budget - basis_total;
-        let consumed = distribute_main_axis(&plans, &mut heights, free);
+        // A column's main axis is height, and block height has no
+        // narrower "min-content" than a child's own natural height (see
+        // this function's module docs and `distribute_main_axis`'s doc
+        // comment) — so every shrinkable child's floor is the natural
+        // height the basis pass above already computed for it. In
+        // practice this means a plain `View`/`Card` column child never
+        // actually shrinks; any shortfall becomes visible overflow past
+        // this container's own (budget-clamped) box instead.
+        let min_heights = heights.clone();
+        let consumed = distribute_main_axis(&plans, &mut heights, &min_heights, free);
         leftover = free - consumed;
 
         // Re-resolve any child whose height actually changed, so nested
@@ -769,7 +822,12 @@ fn layout_row_children(
         let gaps_total = gap * (line.len().saturating_sub(1)) as f32;
         let total: f32 = line_basis.iter().sum::<f32>() + gaps_total;
         let free = inner_width - total;
-        distribute_main_axis(&line_plans, &mut line_basis, free);
+        // Row (width) shrink keeps its pre-existing floor of zero: unlike
+        // column/height (see `layout_column_children`'s call), there is no
+        // minimum-content-width concept in this engine yet (`natural_width`
+        // is max-content/shrink-to-fit, not min-content) — deferred, #328.
+        let zero_floor = vec![0.0_f32; line_basis.len()];
+        distribute_main_axis(&line_plans, &mut line_basis, &zero_floor, free);
 
         let mut line_computed: Vec<ComputedNode> = line_plans
             .iter()

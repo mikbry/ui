@@ -529,6 +529,90 @@ mod tests {
     }
 
     #[test]
+    fn column_children_overflow_instead_of_overlapping_when_shorter_than_content() {
+        // #328: two `View` siblings, each with real text content, whose
+        // combined natural height exceeds a deliberately short viewport.
+        // Before the fix, `distribute_main_axis` shrank both proportionally
+        // with no floor, compressing each below its own text's required
+        // height — the text inside then overflowed its own box downward,
+        // past the next sibling's top, producing visible overlap. The
+        // fix's contract: a `View` never shrinks below its subtree's own
+        // natural height, so the second sibling's top must never land
+        // above the first sibling's bottom, no matter how short the
+        // viewport is.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let first = tree.push_view(root, "").unwrap();
+        tree.push_text(
+            first,
+            "First section heading and a line of body copy under it",
+            TextVariant::Heading2,
+            "",
+        )
+        .unwrap();
+        let second = tree.push_view(root, "").unwrap();
+        tree.push_text(
+            second,
+            "Second section heading and a line of body copy under it",
+            TextVariant::Heading2,
+            "",
+        )
+        .unwrap();
+
+        let measure = FakeMeasure::new();
+        // Each `View`'s natural (unwrapped) text line is far taller than
+        // this combined budget once both are present.
+        let result = compute_layout(&tree, Size::new(200.0, 10.0), &measure);
+
+        let first_rect = result.get(first).unwrap();
+        let second_rect = result.get(second).unwrap();
+        assert!(
+            first_rect.bottom() <= second_rect.origin.y + 0.01,
+            "siblings must never overlap: first bottom {} vs second top {}",
+            first_rect.bottom(),
+            second_rect.origin.y
+        );
+
+        // Each `View`'s own box must still be at least as tall as its
+        // child's natural content height — the floor the fix adds.
+        let first_text = result
+            .iter()
+            .find(|(id, _)| tree.get(*id).unwrap().parent == Some(first))
+            .map(|(_, r)| r)
+            .unwrap();
+        assert!(
+            first_rect.size.height + 0.01 >= first_text.size.height,
+            "a View must not shrink below its own subtree's required height"
+        );
+    }
+
+    #[test]
+    fn canonical_showcase_tree_does_not_overlap_at_a_short_viewport() {
+        // Same contract as the minimal repro above, exercised against the
+        // full canonical showcase tree (header / hero / card / footer) at
+        // a viewport far shorter than its natural content height.
+        let showcase = build_showcase_tree();
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&showcase.tree, Size::new(800.0, 300.0), &measure);
+
+        let header_row = result.get(showcase.header_row).unwrap();
+        let main = result.get(showcase.main_container).unwrap();
+        assert!(
+            header_row.bottom() <= main.origin.y + 0.01,
+            "header must stay above the main content even when the window is too short: \
+             header bottom {} vs main top {}",
+            header_row.bottom(),
+            main.origin.y
+        );
+
+        let heading = result.get(showcase.hero_heading).unwrap();
+        assert!(
+            heading.origin.y >= main.origin.y - 0.01,
+            "hero heading must stay inside the main container's top edge"
+        );
+    }
+
+    #[test]
     fn image_without_flex_grow_keeps_its_intrinsic_width_under_a_stretch_aligned_column() {
         // Regression: a `Column`'s default `Align::Stretch` hands *every*
         // child the full `inner_width` as `avail_width` regardless of
