@@ -92,6 +92,17 @@ impl From<SlugEncodeError> for TextExtractionError {
                 TextExtractionError::MissingOutlineData("outline is empty: no drawable curves")
             }
             SlugEncodeError::UnsupportedSegment => TextExtractionError::NonQuadraticCurve,
+            // #304: `encode_slug_glyph` now typed-rejects a non-`NonZero`
+            // fill rule or a non-identity transform. `outline_to_path` below
+            // always builds a `NonZero`/`Affine2::IDENTITY` `VectorPath`, so
+            // neither is reachable through this bridge today — a defensive
+            // mapping keeps this `From` total against `SlugEncodeError`
+            // being `#[non_exhaustive]` rather than an `unreachable!()` panic.
+            SlugEncodeError::UnsupportedFillRule | SlugEncodeError::UnsupportedTransform => {
+                TextExtractionError::MissingOutlineData(
+                    "resolved outline carried a non-default fill rule or transform",
+                )
+            }
         }
     }
 }

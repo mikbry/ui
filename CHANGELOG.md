@@ -182,6 +182,39 @@ breaking changes can land on minor bumps).
   proving each only ever updates its own counter; it fails against the
   pre-fix code (clicking the first app's button bumps the second app's
   counter instead) and passes against the fix.
+- **`mkui-vector2d`'s general path encoder now honors `VectorPath::fill` and
+  `VectorPath::transform` instead of silently hard-coding non-zero winding
+  and ignoring the local transform (#304, following up on #137's
+  intentionally-scoped nonzero-only ship).** `encode_vector_path` carries the
+  source fill rule verbatim into a new `SlugGlyph::fill_rule` field, and
+  applies `Affine2::transform_point` to every authored point — including a
+  cubic's control points, before subdivision — before flattening, bounds
+  derivation, and band partitioning; a non-finite transform field, a
+  transformed point that overflows to infinity, or a transform with a
+  zero-determinant linear part are each rejected with a typed
+  `VectorPathEncodeError` variant rather than producing degenerate geometry.
+  `stroke_to_fill` now carries the centreline's transform onto the generated
+  outline (previously reset to `Affine2::IDENTITY`, silently dropping it)
+  while always keeping the outline itself `FillRule::NonZero` regardless of
+  the centreline's own rule, since the stroker's overlapping same-wound
+  convex pieces would otherwise gain spurious holes under an even-odd leak.
+  The actual non-zero-vs-even-odd rasterization decision lives in
+  `mkui-vector2d-wgpu`'s `slug.wgsl`: `calc_coverage` now takes a `fill_rule`
+  (threaded through `SlugGlyph` → `GpuGlyph`, reusing the formerly-spare
+  `_pad` field, so the GPU struct stays 96 bytes) and folds the winding
+  accumulation through an even-odd parity wave when set, so two same-winding
+  nested contours correctly punch a hole under even-odd while staying filled
+  under non-zero — covered by new Lavapipe pixel-regression tests
+  (`mkui-wgpu`'s `gpu-tests,slug`-gated `render::vector_path_fill_rule_gpu`)
+  plus CPU-level geometry/plumbing tests in `mkui-vector2d` and
+  `mkui-vector2d-wgpu`. The glyph lane (`encode_slug_glyph`) is unchanged in
+  behavior but now typed-rejects a non-`NonZero` fill rule or a non-identity
+  transform instead of silently ignoring them, since that lane trusts a
+  provider-resolved outline's bounds verbatim and has no rasterization
+  support of its own for either. `VectorPathKey`'s canonical cache key now
+  includes the fill rule and transform (format version bumped to 2) so two
+  geometrically-identical paths differing only in rule or transform no
+  longer alias the same cached blob.
 - **`mkui-runtime`'s class parser no longer panics on an unrecognized
   utility — it's dropped (logged, and counted on
   `ResolvedStyle::unknown_count`) instead, and every other class on the

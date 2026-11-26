@@ -2,10 +2,14 @@
 //!
 //! A [`VectorPath`] is a renderer-independent description of filled vector
 //! geometry: a sequence of [`PathCommand`]s plus a [`FillRule`], a path-local
-//! [`Affine2`] transform, and a [`Bounds`] rectangle. It can represent icons,
-//! analytic primitives, and strokes in principle, but Sprint 7 only drives the
-//! **glyph lane** end-to-end (see [`crate::outline`]). No GPU type ever appears
-//! in this module.
+//! [`Affine2`] transform, and a [`Bounds`] rectangle. The glyph lane (see
+//! [`crate::outline`], [`crate::slug`]) always carries [`FillRule::NonZero`]
+//! and [`Affine2::IDENTITY`] — a resolved outline arrives pre-transformed and
+//! is never re-transformed there. The general path lane (see [`crate::encode`])
+//! honours both fields: [`FillRule::EvenOdd`] actually punches a hole in
+//! same-winding nested contours, and a non-identity `transform` moves, scales,
+//! rotates, or skews the encoded geometry (#304). No GPU type ever appears in
+//! this module.
 //!
 //! Coordinates are `f32` in the source geometry's own units. For glyph
 //! outlines that is *font units, y-up* (see [`crate::GlyphOutline`]).
@@ -88,9 +92,23 @@ impl Bounds {
 }
 
 /// A path-local 2×3 affine transform in `f32` (distinct from the canonical
-/// fixed-point [`mkui_text::Affine2Fixed`] used in cache keys). For the
-/// Sprint 7 glyph lane this is always [`Affine2::IDENTITY`] — outline points
-/// arrive pre-resolved and are never re-transformed here.
+/// fixed-point [`mkui_text::Affine2Fixed`] used in cache keys). The glyph lane
+/// (see [`crate::slug::encode_slug_glyph`]) requires this to stay
+/// [`Affine2::IDENTITY`] — a resolved outline arrives pre-transformed and is
+/// never re-transformed there, and that encoder rejects anything else with a
+/// typed error. The general path lane
+/// ([`crate::encode::encode_vector_path`]/[`crate::stroke_expand::stroke_to_fill`],
+/// #304) applies this transform to the authored points, in the path's own
+/// *local*, y-up coordinate space, before any GPU placement: authored point →
+/// `Affine2` (this struct) → `origin_px` + `scale_px_per_unit` placement
+/// (`mkui-vector2d-wgpu`) → the adapter's y-flip into screen space. `a b c d
+/// tx ty` match the six free parameters of an SVG `matrix(a b c d e f)`
+/// transform algebraically (`e`/`f` are this struct's `tx`/`ty`) — see
+/// [`Self::transform_point`] — but SVG's own coordinate space is y-*down*
+/// while this one is y-*up*. A caller importing an authored SVG `transform`
+/// (#201) must conjugate it with that y-flip (negate `b`, `c`, and `ty`) or a
+/// `rotate`/`skewX`/`skewY` comes out mirrored — e.g. SVG's `rotate(θ)` is
+/// this struct's `rotate(−θ)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Affine2 {
     pub a: f32,
@@ -111,12 +129,23 @@ impl Affine2 {
         ty: 0.0,
     };
 
-    /// Apply the transform to a point.
+    /// Apply the transform to a point: `(a·x + c·y + tx, b·x + d·y + ty)`,
+    /// i.e. SVG's `matrix(a, b, c, d, tx, ty)` convention.
     pub fn transform_point(&self, p: Vec2) -> Vec2 {
         Vec2::new(
             self.a * p.x + self.c * p.y + self.tx,
             self.b * p.x + self.d * p.y + self.ty,
         )
+    }
+
+    /// The determinant of the transform's linear part, `a·d − b·c`. Zero
+    /// means the mapping collapses every point onto a line or a point: no
+    /// interior survives under either fill rule, and the mapping has no
+    /// inverse. `encode_vector_path` rejects a path whose transform has a
+    /// zero determinant with a typed error rather than producing degenerate
+    /// geometry.
+    pub fn determinant(&self) -> f32 {
+        self.a * self.d - self.b * self.c
     }
 }
 
@@ -127,6 +156,16 @@ impl Default for Affine2 {
 }
 
 /// A backend-neutral filled vector path.
+///
+/// `bounds` is in the same **authored, pre-transform** space as `commands` —
+/// it is never re-derived from `transform` (#304). The glyph lane trusts it
+/// verbatim as the provider's resolved ink box (and requires `transform` to
+/// stay [`Affine2::IDENTITY`], so the distinction is moot there); the general
+/// path lane ([`crate::encode::encode_vector_path`]) ignores this field
+/// entirely and derives its own bounds from the *transformed* geometry. A
+/// caller that reads `bounds` directly to approximate a screen-space box
+/// (rather than going through the encoder) must apply `transform` to it
+/// first if `transform` is not the identity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorPath {
     pub commands: Vec<PathCommand>,
@@ -136,9 +175,11 @@ pub struct VectorPath {
 }
 
 impl VectorPath {
-    /// Construct a path from already-resolved geometry. `bounds` is taken as
-    /// authoritative (the glyph lane copies the provider's resolved ink
-    /// bounds) and is **not** recomputed from the commands.
+    /// Construct a path from already-resolved geometry, with `transform` at
+    /// [`Affine2::IDENTITY`]. `bounds` is taken as authoritative in that same
+    /// authored space (the glyph lane copies the provider's resolved ink
+    /// bounds) and is **not** recomputed from `commands` or re-derived from a
+    /// `transform` set afterward — see the struct docs.
     pub fn new(commands: Vec<PathCommand>, fill: FillRule, bounds: Bounds) -> Self {
         Self {
             commands,
@@ -177,5 +218,24 @@ mod tests {
     fn affine_identity_is_a_noop() {
         let p = Vec2::new(3.0, -2.5);
         assert_eq!(Affine2::IDENTITY.transform_point(p), p);
+    }
+
+    #[test]
+    fn determinant_of_identity_is_one() {
+        assert_eq!(Affine2::IDENTITY.determinant(), 1.0);
+    }
+
+    #[test]
+    fn determinant_is_zero_for_a_collapsing_transform() {
+        // Every point lands on the line y = 2x: the linear part has rank 1.
+        let collapsing = Affine2 {
+            a: 1.0,
+            b: 2.0,
+            c: 2.0,
+            d: 4.0,
+            tx: 0.0,
+            ty: 0.0,
+        };
+        assert_eq!(collapsing.determinant(), 0.0);
     }
 }

@@ -14,6 +14,13 @@
 // the published Slug algorithm (Lengyel, JCGT 6:2), independently structured
 // to mkui's own storage-buffer curve/band records rather than the upstream
 // texture layout. It copies no upstream source.
+//
+// `calc_coverage` always computes the reference algorithm's non-zero
+// winding accumulation first; `Glyph.fill_rule` (#304) then decides whether
+// that raw accumulation is read as non-zero (`abs()` + clamp, unchanged from
+// the original algorithm) or folded through `fill_rule_fold` into an
+// even-odd (parity) coverage instead. The curve/band records and every root
+// solve are identical either way — only this final read differs.
 
 struct Viewport {
     // Logical-pixel viewport the quads are projected against. `_pad` keeps the
@@ -66,7 +73,9 @@ struct Glyph {
     vband_base: u32,
     vband_count: u32,
     vindex_base: u32,
-    _pad: u32,
+    // Winding rule this instance's coverage is read under (#304): `0u` for
+    // non-zero, `1u` for even-odd. See `calc_coverage`.
+    fill_rule: u32,
 };
 
 @group(0) @binding(0) var<uniform> viewport: Viewport;
@@ -181,12 +190,37 @@ fn solve_vert_poly(rel0: vec2<f32>, rel1: vec2<f32>, rel2: vec2<f32>) -> vec2<f3
 // the reference adapter's `calc_coverage` (which clamps internally, not at
 // its call site): the accumulator, not the final alpha, is what is allowed to
 // exceed the unit range.
-fn calc_coverage(xcov: f32, ycov: f32, xwgt: f32, ywgt: f32) -> f32 {
-    let coverage = max(
-        abs(xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0),
-        min(abs(xcov), abs(ycov)),
-    );
-    return clamp(coverage, 0.0, 1.0);
+// Even-odd coverage fold (#304): maps a continuous winding-number
+// accumulation `w` to the even-odd analytic coverage via the period-2
+// triangle wave `1 - |1 - 2*fract(w/2)|`: 0 at even integers (including 0),
+// 1 at odd integers, linear between. WGSL's `fract` is `w - floor(w)`, so
+// this is already symmetric for negative `w` with no separate `abs()`
+// (fold(-1.5) == fold(1.5) == 0.5).
+fn fill_rule_fold(w: f32) -> f32 {
+    return 1.0 - abs(1.0 - fract(w * 0.5) * 2.0);
+}
+
+// `fill_rule` (0u non-zero, 1u even-odd, #304) decides how the raw winding
+// accumulation above is read into a coverage: non-zero takes `abs()` of the
+// blended value and of the per-axis floor, exactly as this always did;
+// even-odd instead folds each through `fill_rule_fold`, including the
+// floor's two operands independently, so a sample deep inside a
+// same-winding overlap (magnitude 2, e.g. two nested same-winding contours)
+// folds to 0 (a hole) on both axes and is never pulled back to 1 by the
+// floor meant to protect genuinely-filled deep-interior samples from
+// blend-weight noise.
+fn calc_coverage(xcov: f32, ycov: f32, xwgt: f32, ywgt: f32, fill_rule: u32) -> f32 {
+    let blended = (xcov * xwgt + ycov * ywgt) / max(xwgt + ywgt, 1.0 / 65536.0);
+    var blend_cov: f32;
+    var floor_cov: f32;
+    if (fill_rule == 1u) {
+        blend_cov = fill_rule_fold(blended);
+        floor_cov = min(fill_rule_fold(xcov), fill_rule_fold(ycov));
+    } else {
+        blend_cov = abs(blended);
+        floor_cov = min(abs(xcov), abs(ycov));
+    }
+    return clamp(max(blend_cov, floor_cov), 0.0, 1.0);
 }
 
 // Per-axis accumulated coverage plus the combined, already-clamped value.
@@ -280,7 +314,7 @@ fn slug_coverage(g: Glyph, sample: vec2<f32>) -> Coverage {
     var result: Coverage;
     result.xcov = xcov;
     result.ycov = ycov;
-    result.value = calc_coverage(xcov, ycov, xwgt, ywgt);
+    result.value = calc_coverage(xcov, ycov, xwgt, ywgt, g.fill_rule);
     return result;
 }
 

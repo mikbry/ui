@@ -44,16 +44,27 @@
 //! blending so a Slug draw is load/store compatible with the UI/bitmap lanes in
 //! one render pass.
 //!
-//! ## VectorPath + Stroke reuse the glyph pipeline unchanged
+//! ## VectorPath + Stroke reuse the glyph pipeline
 //!
 //! The WGSL shader is a *general* quadratic-curve coverage rasterizer, so
-//! rendering an arbitrary [`VectorPath`] or a [`Stroke`] needs **no shader
-//! change** — only extra CPU prepare-time work. A fill is encoded with
-//! `mkui-vector2d`'s `encode_vector_path` (cubics subdivided); a stroke is first
-//! lowered to a fillable outline with `stroke_to_fill` and then encoded the same
-//! way. Both produce a [`SlugGlyph`] that flows through the identical
-//! pack/upload/draw path as a glyph blob, so the glyph lane is byte-identical
-//! and the two new lanes share every downstream GPU record.
+//! rendering an arbitrary [`VectorPath`] or a [`Stroke`] needs no new GPU
+//! record kind — only extra CPU prepare-time work, plus (#304) one `u32`
+//! read in `calc_coverage` for the fill rule. A fill is encoded with
+//! `mkui-vector2d`'s `encode_vector_path` (cubics subdivided, the path's own
+//! [`VectorPath::fill`] and [`VectorPath::transform`] both honoured); a
+//! stroke is first lowered to a fillable outline with `stroke_to_fill`
+//! (which carries the centreline's transform onto that outline, but always
+//! emits a non-zero-wound outline regardless of the centreline's own fill
+//! rule — see that function's docs for why) and then encoded the same way.
+//! Both produce a [`SlugGlyph`] that flows through the identical
+//! pack/upload/draw path as a glyph blob (the glyph lane itself stays
+//! non-zero/identity-only, so it is byte-identical to before), and the two
+//! path lanes share every downstream GPU record. `SlugGlyph::fill_rule`
+//! carries the winding rule down into each packed `Glyph`'s `fill_rule`
+//! field, which `slug.wgsl`'s `calc_coverage` reads to choose non-zero vs.
+//! even-odd coverage — the only place either rule is actually rasterized;
+//! everything upstream of the GPU (this crate's `pack`, `mkui-vector2d`'s
+//! encoders) is rule-agnostic geometry.
 
 use std::sync::Arc;
 
@@ -152,13 +163,17 @@ pub struct PlacedSlugGlyph {
 ///
 /// Unlike [`PlacedSlugGlyph`], the geometry is carried un-encoded: the path is
 /// lowered to the shared coverage records at [`SlugAdapter::prepare_paths`] time
-/// (cubics subdivided, non-zero winding). The placement matches the glyph lane —
-/// an `origin_px` where the path's own `(0, 0)` lands and a uniform
-/// `scale_px_per_unit` — so a path scales with zoom exactly like a glyph. The
-/// path stays in its own units, y-up; the adapter performs the y-flip.
+/// (cubics subdivided; the path's own [`VectorPath::fill`] and
+/// [`VectorPath::transform`] are both honoured, #304). The placement applies
+/// on top of `path.transform`, not instead of it: authored point →
+/// `path.transform` → this struct's `origin_px`/`scale_px_per_unit` — so a
+/// path-local transform and the placement scale compose, and a path scales
+/// with zoom exactly like a glyph either way. The path stays in its own
+/// units, y-up; the adapter performs the y-flip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedVectorPath {
-    /// The backend-neutral fill geometry (its `fill` is treated as non-zero).
+    /// The backend-neutral fill geometry — `path.fill` and `path.transform`
+    /// are both applied by the encoder, see the struct docs.
     pub path: VectorPath,
     /// Screen-pixel position (y-down) of the path's origin `(0, 0)`.
     pub origin_px: [f32; 2],
@@ -171,10 +186,16 @@ pub struct PlacedVectorPath {
 /// A [`Stroke`]d centreline [`VectorPath`] placed on screen.
 ///
 /// The stroke is expanded to a fillable outline on the CPU (`stroke_to_fill`:
-/// caps, joins, dashing) and then encoded like any other fill. [`Stroke::width_px`]
-/// and the dash lengths are consumed in the path's own coordinate units and
-/// scaled to screen pixels by `scale_px_per_unit` alongside the geometry, so a
-/// stroke's width tracks zoom like its fill.
+/// caps, joins, dashing — all in the centreline's own local space) and then
+/// encoded like any other fill, always as a non-zero outline regardless of
+/// the centreline's own `path.fill` (see `stroke_to_fill`'s docs). The
+/// centreline's `path.transform` is carried onto that outline and applied by
+/// the encoder before this struct's placement, same as [`PlacedVectorPath`]
+/// — so a transform scales the stroke width together with the geometry.
+/// [`Stroke::width_px`] and the dash lengths are consumed in the path's own
+/// (pre-transform) coordinate units and scaled to screen pixels by
+/// `scale_px_per_unit` alongside the geometry, so a stroke's width tracks
+/// zoom like its fill.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlacedStroke {
     /// The centreline geometry to stroke.
@@ -281,7 +302,9 @@ pub(crate) struct GpuBand {
 /// band for a sample the same way the reference adapter's `band_transform`
 /// does: a clamped index derived from the glyph's own font-unit bounds, not a
 /// containment scan — so AA coverage stays correct in the dilation margin
-/// just outside the exact glyph bounds.
+/// just outside the exact glyph bounds. `fill_rule` (#304, formerly the spare
+/// `_pad` field — the struct's size is unchanged) is `0` for non-zero or `1`
+/// for even-odd; `slug.wgsl`'s `calc_coverage` branches on it.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, PartialEq)]
 pub(crate) struct GpuGlyph {
@@ -299,7 +322,19 @@ pub(crate) struct GpuGlyph {
     vband_base: u32,
     vband_count: u32,
     vindex_base: u32,
-    _pad: u32,
+    fill_rule: u32,
+}
+
+/// Map a [`FillRule`] to the `u32` code `slug.wgsl`'s `Glyph.fill_rule` and
+/// `calc_coverage` expect: `0` for non-zero, `1` for even-odd. `FillRule` is
+/// `#[non_exhaustive]`; a rule this crate doesn't yet know how to rasterize
+/// falls back to non-zero's `0` rather than failing this infallible, pure
+/// pack step.
+fn fill_rule_code(rule: FillRule) -> u32 {
+    match rule {
+        FillRule::EvenOdd => 1,
+        _ => 0,
+    }
 }
 
 /// GPU viewport uniform matching the WGSL `Viewport` struct, 16 bytes.
@@ -411,7 +446,7 @@ pub(crate) fn pack(glyphs: &[PlacedSlugGlyph], device_pixel_ratio: f32) -> Packe
             vband_base,
             vband_count: blob.vertical_bands.len() as u32,
             vindex_base,
-            _pad: 0,
+            fill_rule: fill_rule_code(blob.fill_rule),
         });
     }
     packed
@@ -1070,6 +1105,7 @@ mod tests {
     fn empty_curve_glyph_is_skipped() {
         let empty = Arc::new(SlugGlyph {
             revision: 1,
+            fill_rule: FillRule::NonZero,
             bounds: GlyphBounds {
                 x_min: 0.0,
                 y_min: 0.0,
@@ -1084,6 +1120,28 @@ mod tests {
         });
         let packed = pack(&[placed(empty)], 1.0);
         assert!(packed.glyphs.is_empty(), "a curve-less glyph emits no quad");
+    }
+
+    fn triangle_blob_with_fill(fill: FillRule) -> Arc<SlugGlyph> {
+        let path = VectorPath::new(
+            vec![
+                PathCommand::MoveTo(Vec2::new(0.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(100.0, 0.0)),
+                PathCommand::LineTo(Vec2::new(0.0, 100.0)),
+                PathCommand::Close,
+            ],
+            fill,
+            Bounds::new(Vec2::new(0.0, 0.0), Vec2::new(100.0, 100.0)),
+        );
+        Arc::new(encode_vector_path(&path, &SlugConfig::new(2, 2, 1)).unwrap())
+    }
+
+    #[test]
+    fn pack_encodes_the_blob_fill_rule_into_the_gpu_glyph() {
+        let nz = pack(&[placed(triangle_blob_with_fill(FillRule::NonZero))], 1.0);
+        assert_eq!(nz.glyphs[0].fill_rule, 0);
+        let eo = pack(&[placed(triangle_blob_with_fill(FillRule::EvenOdd))], 1.0);
+        assert_eq!(eo.glyphs[0].fill_rule, 1);
     }
 
     #[test]

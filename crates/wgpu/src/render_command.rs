@@ -314,13 +314,14 @@ mod tests {
     #[test]
     fn slug_glyph_primitive_routes_to_slug_lane_preserving_paint_order() {
         use mkui_vector2d::Vec2;
-        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use mkui_vector2d_wgpu::{FillRule, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
         use std::sync::Arc;
 
         let slug = || {
             Primitive::SlugGlyph(PlacedSlugGlyph {
                 blob: Arc::new(SlugGlyph {
                     revision: 1,
+                    fill_rule: FillRule::NonZero,
                     bounds: GlyphBounds {
                         x_min: 0.0,
                         y_min: 0.0,
@@ -405,12 +406,13 @@ mod tests {
     #[test]
     fn vector_path_and_slug_glyph_are_distinct_adjacent_lanes() {
         use mkui_vector2d::Vec2;
-        use mkui_vector2d_wgpu::{GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
+        use mkui_vector2d_wgpu::{FillRule, GlyphBounds, PlacedSlugGlyph, SlugCurve, SlugGlyph};
         use std::sync::Arc;
 
         let slug = Primitive::SlugGlyph(PlacedSlugGlyph {
             blob: Arc::new(SlugGlyph {
                 revision: 1,
+                fill_rule: FillRule::NonZero,
                 bounds: GlyphBounds {
                     x_min: 0.0,
                     y_min: 0.0,
