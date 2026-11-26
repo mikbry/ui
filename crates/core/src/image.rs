@@ -87,6 +87,11 @@ pub fn decode_rgba8(bytes: &[u8], format: ImageFormat) -> Result<DecodedImage, I
 /// match below covers the remaining color types those flags do not touch
 /// (grayscale never gains an RGB expansion or an alpha channel from them —
 /// see `png`'s own `Transformations` docs).
+// `slice::as_chunks` (clippy's newer-only suggestion for the two
+// `chunks_exact` calls below) only stabilized in Rust 1.88, past this
+// workspace's declared 1.87 MSRV floor — keep `chunks_exact` and silence
+// the lint instead of taking the suggestion literally.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ImageDecodeError> {
     use png::{BitDepth, ColorType, Transformations};
 
@@ -130,6 +135,11 @@ fn decode_png(bytes: &[u8]) -> Result<DecodedImage, ImageDecodeError> {
 /// the source has no alpha channel ([`image_webp::WebPDecoder::has_alpha`])
 /// and RGBA8 otherwise; the RGB8 case is expanded with an opaque alpha
 /// channel below.
+// `slice::as_chunks` (clippy's newer-only suggestion for the `chunks_exact`
+// call below) only stabilized in Rust 1.88, past this workspace's declared
+// 1.87 MSRV floor — keep `chunks_exact` and silence the lint instead of
+// taking the suggestion literally.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 fn decode_webp(bytes: &[u8]) -> Result<DecodedImage, ImageDecodeError> {
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes))?;
     let (width, height) = decoder.dimensions();
