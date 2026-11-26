@@ -335,29 +335,56 @@ same "lean on the platform" story `TextField`'s `<input>` has.
 `mkui-wgpu` paints the existing `components::scroll_area`/`scrollbar`
 chrome (#194) — promoted into the shared contract's render path for the
 first time; previously this widget had no live consumer anywhere in the
-crate at all (dead code reachable only from its own unit tests).
-`mkui-console` renders it transparently, same as a plain `View` — the
-terminal has no pixel-level viewport to clip against and the user's own
-terminal emulator already provides scrollback, so unlike `Card`'s chrome
-(a real visual cue drawable with box-drawing characters) there is no
-console-native analogue to fall back to (point 6's "renders" bar is
-satisfied by "doesn't drop content from the flow", the same bar
-`Image`'s `[image WxH]` stub clears).
+crate at all (dead code reachable only from its own unit tests) — and
+wires real mouse-wheel input: `WgpuApp::apply_wheel_to_scroll_area`
+hit-tests the latched cursor against the innermost `ScrollArea` under
+it and mutates a host-owned `HashMap<NodeId, f32>` (offset is host-side
+view state, never tree data, per `NodeKind::ScrollArea`'s own doc
+comment — `NodeId`s are stable across frames since the tree persists,
+so keying on them directly is safe). Each rebuild,
+`walker::apply_scroll_offsets` translates every scrolled `ScrollArea`'s
+descendant rects *after* `compute_layout` and *before* any painting —
+one `mkui_layout::LayoutResult::translate` call per descendant — so
+painted pixels, per-node layouts, and hit-test rects all agree on the
+live offset with no separate bookkeeping. `WalkCache` keys on
+`(subtree_revision, rect, foreground)`, and a `ScrollArea`'s *own* rect
+never moves when its content scrolls, so `render_scroll_area` poisons
+its own cache entry (`stats.saw_custom = true`, the same mechanism a
+`Custom` node's unknowable external state already uses) — without it, a
+second frame at a different offset would hit the stale cached paint
+from the first. `mkui-console` renders it transparently, same as a
+plain `View` — the terminal has no pixel-level viewport to clip against
+and the user's own terminal emulator already provides scrollback, so
+unlike `Card`'s chrome (a real visual cue drawable with box-drawing
+characters) there is no console-native analogue to fall back to (point
+6's "renders" bar is satisfied by "doesn't drop content from the flow",
+the same bar `Image`'s `[image WxH]` stub clears).
 
-Explicit out-of-scope (point 8): wheel/drag/keyboard/gamepad input *on
-the promoted component* for `mkui-wgpu` — `ScrollState` itself already
-supports all four (#194), but wiring a live `winit::WindowEvent::MouseWheel`
-(etc.) arm into this crate's event loop, plus shifting hit-test rects by
-the live scroll offset, is new input-substrate surgery this issue's own
-"spin off a follow-up if the fix needs deeper surgery" escape hatch
-covers; tracked as a follow-up issue. Nested clipping (a `ScrollArea`
-inside another scrollable region) is also deferred — `Scene` has no
-generic clip/scissor primitive today, and the common case (one
-root-level `ScrollArea` sized to the whole window) needs none: the
-window's own render-target bounds are the only clip required. Real
-per-area console scrolling, min-content width for the row (width) axis'
-own shrink floor, and `mkui-c`/`mkui-py` constructors are deferred too,
-same shape as every prior promotion's FFI gap.
+**`mkui-wgpu` has no clip/scissor on scrolled content.** `Scene` carries
+no generic clip-rect primitive today (confirmed:
+`grep -rn "clip\|scissor" crates/wgpu/src` turns up only one narrow
+`pass.set_scissor_rect` use in the Slug text-rendering fallback lane),
+so an overflowing child simply draws past the box's own edge with no
+clipping, scrolled or not. This is invisible for the shipped usage — the
+whole page wrapped in one root-spanning `ScrollArea` with nothing else
+sharing the window, so the window's own render-target bounds are the
+only clip that ever mattered — but it is a real, general gap: **any**
+`ScrollArea` with neighboring content (a sibling above/below it, not
+only one nested inside another scrollable region) will paint its
+scrolled-past content directly over that neighbor once scrolled.
+Tracked as #336, not assumed safe-by-construction.
+
+Explicit out-of-scope (point 8): drag/keyboard/gamepad input *on the
+promoted component* for `mkui-wgpu` — `ScrollState` itself already
+supports all three in addition to wheel (#194), but each needs its own
+input-routing design (hit-testing the thumb through a drag gesture, a
+focus model for keyboard, a gamepad abstraction that doesn't exist yet)
+meaningfully bigger than the wheel path this promotion did ship;
+tracked as #335. The clip/scissor gap above is #336. Real per-area
+console scrolling is #337. Min-content width for the row (width) axis'
+own shrink floor (a pre-existing, orthogonal gap this promotion's column-
+axis fix did not touch) is #338. `mkui-c`/`mkui-py` constructors are
+#339, same shape as every prior promotion's FFI gap.
 
 ### Component status (2026-11-26)
 
@@ -367,7 +394,7 @@ same shape as every prior promotion's FFI gap.
 | Card | `NodeKind::Card` (#270) | yes | yes | yes (border rule) | **Done** (chrome only — see #195 for image/grid/states) |
 | Text field (Input) | `NodeKind::TextField` (+`disabled`/`invalid`, #312) | yes (typing/caret/selection; clipboard/IME wiring deferred — #317) | yes (native `<input>`) | yes (typed input; caret/selection deferred — #317) | **Done** (#185's editing logic unchanged; #317 tracks the deferred platform integrations) |
 | Image | `NodeKind::Image` (#196) | yes (new textured-quad pipeline) | yes (`<img>` + placeholder for the texture source) | yes (`[image WxH]` stub) | **Done** (standalone `Renderer` only — `EmbeddedRenderer`/offscreen live lane, FFI constructors deferred) |
-| Scroll area | `NodeKind::ScrollArea` (#328) | yes (scrollbar chrome via `components::scroll_area`; drag/wheel/keyboard/gamepad input on the promoted component deferred — follow-up tracked in the #328 PR) | yes (native `overflow-y: auto`) | yes (transparent pass-through — no console-native scroll primitive) | **Done** (nested clipping, real console scrolling, FFI constructors deferred) |
+| Scroll area | `NodeKind::ScrollArea` (#328) | yes (scrollbar chrome via `components::scroll_area` + live mouse-wheel input; drag/keyboard/gamepad on the promoted component deferred — #335) | yes (native `overflow-y: auto`) | yes (transparent pass-through — no console-native scroll primitive, #337) | **Done** (clip/scissor for non-root-spanning use — #336; FFI constructors — #339) |
 | Badge, Dot, Tooltip, Toast | — | `mkui-wgpu`-only (badge/dot/tooltip reachable via `NodeKind::Custom`, wgpu-registered only) | no | no | Not promoted |
 | Dialog, Slider, Toggle, Segmented select, Chip group, Progress bar, Panels | — | `mkui-wgpu`-only | no | no | Not promoted |
 

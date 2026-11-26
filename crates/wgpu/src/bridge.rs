@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use mkui_core::error::MkuiError;
-use mkui_runtime::{AppTree, Node};
+use mkui_runtime::{AppTree, Node, NodeId};
 use mkui_text::TextSystem;
 
 use crate::theme::WgpuTheme;
@@ -139,6 +139,18 @@ pub struct WgpuRenderCtx<'a> {
     /// `cursor_y` are: an extension that lays out wrapped text should be
     /// able to measure it the same way the built-in path does.
     pub text_system: &'a dyn TextSystem,
+    /// Live scroll offset per `ScrollArea` node (#328), in logical pixels
+    /// down from the top — host-side view state, not tree data (see
+    /// [`mkui_runtime::NodeKind::ScrollArea`]'s doc comment for why). A
+    /// node with no entry (the common case: nothing has scrolled it yet)
+    /// is at offset `0.0`. Already clamped to `[0, max_offset]` by
+    /// `walker::apply_scroll_offsets`, which both applies the matching
+    /// rect translation (the step that actually moves painted content,
+    /// run once upfront, before any node in this walk is visited) and
+    /// populates this map — `render_scroll_area` reads the value here
+    /// as-is rather than re-deriving it, since translating a rect loses
+    /// the information needed to recompute the clamp from it directly.
+    pub scroll_offsets: &'a HashMap<NodeId, f32>,
 }
 
 /// Registry of custom-component handlers keyed by `type_name`. Built-in
@@ -629,6 +641,7 @@ mod tests {
             content_x: 0.0,
             current_foreground: theme.body_style().color,
             text_system: &text_system,
+            scroll_offsets: &HashMap::new(),
         };
 
         let outcome = registry
@@ -694,6 +707,7 @@ mod tests {
             content_x: 0.0,
             current_foreground: theme.body_style().color,
             text_system: &text_system,
+            scroll_offsets: &HashMap::new(),
         };
 
         registry
@@ -708,6 +722,15 @@ mod tests {
     }
 
     // ---- #192: Badge overlay must not disturb layout ----
+
+    /// A genuinely `'static`, always-empty map for test helpers that build
+    /// a [`WgpuRenderCtx`] with no live scroll state to report (#328) —
+    /// a plain `&HashMap::new()` temporary doesn't outlive `render_ctx`'s
+    /// own `'a` return lifetime.
+    fn empty_scroll_offsets() -> &'static HashMap<NodeId, f32> {
+        static EMPTY: std::sync::OnceLock<HashMap<NodeId, f32>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(HashMap::new)
+    }
 
     fn render_ctx<'a>(
         tree: &'a AppTree,
@@ -728,6 +751,7 @@ mod tests {
             content_x: 0.0,
             current_foreground: theme.body_style().color,
             text_system,
+            scroll_offsets: empty_scroll_offsets(),
         }
     }
 

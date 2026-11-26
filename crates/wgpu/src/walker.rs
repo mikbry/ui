@@ -214,6 +214,12 @@ pub struct WalkOptions<'a> {
     pub theme: WgpuTheme,
     pub text_system: &'a dyn TextSystem,
     pub slug_font_id: Option<FontId>,
+    /// Live scroll offset per `ScrollArea` node (#328) — see
+    /// [`WgpuRenderCtx::scroll_offsets`]'s doc comment. The common case
+    /// (no live host, or nothing scrolled yet) passes an empty map; a
+    /// real host (`WgpuApp`) owns one across frames, mutated by its own
+    /// wheel-input handling.
+    pub scroll_offsets: &'a HashMap<NodeId, f32>,
 }
 
 /// Output of one [`walk_app_tree`] pass: the freshly built scene, the
@@ -614,6 +620,71 @@ pub fn walk_app_tree_cached(
     walk_app_tree_inner(tree, registry, options, Some(cache))
 }
 
+/// Apply each live `ScrollArea`'s scroll offset (#328) to its descendants'
+/// already-computed rects, so painting, per-node layouts, and hit-testing
+/// all agree on the scrolled position with no separate offset bookkeeping
+/// downstream — see [`mkui_layout::LayoutResult::translate`]'s doc
+/// comment. Runs once per frame, right after `compute_layout` and before
+/// any painting.
+///
+/// Returns the *clamped* offset actually applied per `ScrollArea` id —
+/// `[0, content_len - viewport_len]`, computed here against the
+/// *untranslated* rects this same `compute_layout` call just produced.
+/// `render_scroll_area` reads this (via [`WgpuRenderCtx::scroll_offsets`])
+/// instead of the raw host-stored intent, so it never needs to re-derive
+/// the clamp itself — translating a descendant's rect loses the
+/// information needed to recompute content length from it directly (the
+/// shift itself *is* the offset), so the clamped value has to travel
+/// forward from here, not be recomputed downstream.
+fn apply_scroll_offsets(
+    tree: &AppTree,
+    layout: &mut mkui_layout::LayoutResult,
+    scroll_offsets: &HashMap<NodeId, f32>,
+) -> HashMap<NodeId, f32> {
+    let mut clamped_offsets = HashMap::with_capacity(scroll_offsets.len());
+    for (&scroll_id, &raw_offset) in scroll_offsets {
+        let Some(node) = tree.get(scroll_id) else {
+            continue;
+        };
+        if !matches!(node.kind, NodeKind::ScrollArea(_)) {
+            continue;
+        }
+        let Some(own_rect) = node_rect(layout, scroll_id) else {
+            continue;
+        };
+        let content_len = node
+            .children
+            .iter()
+            .filter_map(|id| node_rect(layout, *id))
+            .map(|child_rect| child_rect.height_end() - own_rect.origin.y)
+            .fold(own_rect.size.height, f32::max);
+        let max_offset = (content_len - own_rect.size.height).max(0.0);
+        let clamped = raw_offset.clamp(0.0, max_offset);
+        clamped_offsets.insert(scroll_id, clamped);
+        if clamped == 0.0 {
+            continue;
+        }
+        for descendant_id in subtree_node_ids(tree, scroll_id) {
+            layout.translate(descendant_id, mkui_layout::Point::new(0.0, -clamped));
+        }
+    }
+    clamped_offsets
+}
+
+/// Every id in `id`'s subtree, not including `id` itself — used to shift
+/// a whole scrolled region's rects in one pass (#328).
+fn subtree_node_ids(tree: &AppTree, id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    let mut stack: Vec<NodeId> = tree.get(id).map(|n| n.children.clone()).unwrap_or_default();
+    while let Some(next_id) = stack.pop() {
+        out.push(next_id);
+        if let Some(node) = tree.get(next_id) {
+            stack.extend(node.children.iter().copied());
+        }
+    }
+    out
+}
+
 fn walk_app_tree_inner(
     tree: &AppTree,
     registry: &WgpuRendererRegistry,
@@ -638,11 +709,13 @@ fn walk_app_tree_inner(
         text_system: options.text_system,
         slug_font_id: options.slug_font_id,
     };
-    let layout_result = mkui_layout::compute_layout(
+    let mut layout_result = mkui_layout::compute_layout(
         tree,
         mkui_layout::Size::new(options.viewport.width, options.viewport.height),
         &measure,
     );
+    let clamped_scroll_offsets =
+        apply_scroll_offsets(tree, &mut layout_result, options.scroll_offsets);
 
     {
         let mut ctx = WgpuRenderCtx {
@@ -656,6 +729,7 @@ fn walk_app_tree_inner(
             content_x: 0.0,
             current_foreground: options.theme.body_style().color,
             text_system: options.text_system,
+            scroll_offsets: &clamped_scroll_offsets,
         };
 
         if let Some(root) = tree.get(tree.root()) {
@@ -1104,20 +1178,30 @@ fn render_scroll_area(
     cache: Option<&mut WalkCache>,
     stats: &mut WalkStats,
 ) -> Result<(), MkuiError> {
+    // #328: never cache this subtree, the same way a `Custom` node's
+    // output poisons caching (see `walk_node_or_cached`'s doc comment) —
+    // `WalkCache`'s key (`subtree_revision`, the node's own `rect`,
+    // `foreground`) has no way to see a scroll-offset change, since a
+    // `ScrollArea`'s *own* rect never moves; only its descendants'
+    // (already-translated, by the time `layout` reaches here) rects do.
+    // Without this, scrolling would hit the cache and keep replaying
+    // whatever was painted at the previous offset.
+    stats.saw_custom = true;
+
+    // `rect.origin.y` is this box's own (untranslated) top; a child's
+    // rect was already shifted up by the clamped offset in
+    // `apply_scroll_offsets`, so adding that offset back here recovers
+    // each child's *unscrolled* bottom — content length must reflect the
+    // full content regardless of how far it's currently scrolled.
+    let offset = ctx.scroll_offsets.get(&node.id).copied().unwrap_or(0.0);
     let content_len = node
         .children
         .iter()
         .filter_map(|id| node_rect(layout, *id))
-        .map(|child_rect| child_rect.height_end() - rect.origin.y)
+        .map(|child_rect| child_rect.height_end() - rect.origin.y + offset)
         .fold(rect.size.height, f32::max);
-    let state = ScrollState::new(content_len, rect.size.height);
-    scroll_area(
-        ctx.scene,
-        rect,
-        SCROLLBAR_TRACK_WIDTH_PX,
-        &state,
-        &ctx.theme.scrollbar(),
-    );
+    let mut state = ScrollState::new(content_len, rect.size.height);
+    state.scroll_to(offset);
 
     walk_children(
         tree,
@@ -1129,6 +1213,21 @@ fn render_scroll_area(
         cache,
         stats,
     )?;
+
+    // Painted after the content (not before, like `render_card`'s
+    // background chrome) so the scrollbar sits on top of whatever it
+    // scrolls, matching a native scrollbar's paint order; skipped
+    // entirely once there's nothing to scroll, so an ordinary
+    // shorter-than-its-box `ScrollArea` paints no chrome at all.
+    if state.is_scrollable() {
+        scroll_area(
+            ctx.scene,
+            rect,
+            SCROLLBAR_TRACK_WIDTH_PX,
+            &state,
+            &ctx.theme.scrollbar(),
+        );
+    }
 
     layouts.push(NodeLayout {
         node: node.id,
@@ -1610,6 +1709,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -1675,6 +1775,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
         let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
 
@@ -1821,6 +1922,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
         let bitmap_out =
             walk_app_tree(core.tree(), &registry, &bitmap_options).expect("walk (bitmap)");
@@ -1831,6 +1933,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: Some(font_id),
+            scroll_offsets: &HashMap::new(),
         };
         let slug_out = walk_app_tree(core.tree(), &registry, &slug_options).expect("walk (slug)");
         let slug_width = text_primitives(&slug_out.scene)[0].rect.size.width;
@@ -2075,6 +2178,169 @@ mod tests {
             last_text_bottom,
             scroll_layout.rect.height_end()
         );
+    }
+
+    /// Same as [`walk`], but with a live scroll-offset map — the shape
+    /// `WgpuApp` feeds through [`WalkOptions::scroll_offsets`] once wheel
+    /// input is wired to a `ScrollArea` (#328).
+    fn walk_with_scroll_offsets(
+        core: &CoreMkui,
+        scroll_offsets: &HashMap<NodeId, f32>,
+    ) -> WalkOutput {
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let options = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+            slug_font_id: None,
+            scroll_offsets,
+        };
+        walk_app_tree(core.tree(), &registry, &options).expect("walk")
+    }
+
+    /// #328: a live scroll offset must move both a descendant's own rect
+    /// (what gets painted) and its hit-test entry (what a click resolves
+    /// against) by the same clamped amount — if these ever disagreed, a
+    /// scrolled button would render in one place and only be clickable
+    /// in another.
+    #[test]
+    fn scroll_offset_shifts_a_descendants_rect_and_hit_entry_together() {
+        let action = std::cell::Cell::new(0u32);
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let scroll_id = core.tree().get(core.tree().root()).unwrap().children[0];
+
+        let unscrolled = walk(&core);
+        // Well within the clamp range (five lines of real text comfortably
+        // exceed a 64px box by more than this) — the clamp itself is
+        // covered by the box-height test above; this one isolates "does
+        // the offset propagate at all" from "is the clamp exact".
+        let scroll_offsets = HashMap::from([(scroll_id, 5.0)]);
+        let scrolled = walk_with_scroll_offsets(&core, &scroll_offsets);
+        let _ = action; // not fired; this test only checks position agreement.
+
+        // The ScrollArea's own box never moves.
+        let scroll_rect_before = unscrolled
+            .layouts
+            .iter()
+            .find(|l| l.node == scroll_id)
+            .unwrap()
+            .rect;
+        let scroll_rect_after = scrolled
+            .layouts
+            .iter()
+            .find(|l| l.node == scroll_id)
+            .unwrap()
+            .rect;
+        assert_eq!(
+            scroll_rect_before, scroll_rect_after,
+            "the ScrollArea's own box must not move when its content scrolls"
+        );
+
+        // Every descendant's rect must have moved up by exactly 5px.
+        for layout_before in unscrolled.layouts.iter().filter(|l| l.node != scroll_id) {
+            let layout_after = scrolled
+                .layouts
+                .iter()
+                .find(|l| l.node == layout_before.node)
+                .expect("every descendant must still have a layout entry once scrolled");
+            assert!(
+                (layout_after.rect.origin.y - (layout_before.rect.origin.y - 5.0)).abs() < 0.01,
+                "descendant must move up by exactly the scroll offset: before {} after {}",
+                layout_before.rect.origin.y,
+                layout_after.rect.origin.y
+            );
+        }
+
+        // The hit-test entry for the button must have moved by the same
+        // amount as its own rect, not stayed behind at the pre-scroll
+        // position.
+        let hit_before = unscrolled.hit_tests[0];
+        let hit_after = scrolled.hit_tests[0];
+        assert!(
+            (hit_after.rect.origin.y - (hit_before.rect.origin.y - 5.0)).abs() < 0.01,
+            "hit-test rect must move with the scrolled content: before {} after {}",
+            hit_before.rect.origin.y,
+            hit_after.rect.origin.y
+        );
+    }
+
+    /// #328's cache-poisoning requirement: `WalkCache` keys on
+    /// `(subtree_revision, rect, foreground)`, and a `ScrollArea`'s own
+    /// rect never changes when its content scrolls — without explicitly
+    /// poisoning its cache entry (see `render_scroll_area`'s
+    /// `stats.saw_custom = true`), a second walk at a different offset
+    /// would hit the cache and replay the first offset's stale frame.
+    #[test]
+    fn walk_app_tree_cached_moves_scrolled_content_on_a_second_walk_at_a_different_offset() {
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(CoreText::new("line five")),
+            ),
+        );
+        let scroll_id = core.tree().get(core.tree().root()).unwrap().children[0];
+        let registry = WgpuRendererRegistry::with_defaults();
+        let text_system = BitmapTextSystem::new();
+        let mut cache = WalkCache::new();
+
+        let options_0 = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+            slug_font_id: None,
+            scroll_offsets: &HashMap::from([(scroll_id, 0.0)]),
+        };
+        let (out_0, _) =
+            walk_app_tree_cached(core.tree(), &registry, &options_0, &mut cache).expect("walk 0");
+
+        // Well within the clamp range — see the sibling test's own note.
+        let offsets_5 = HashMap::from([(scroll_id, 5.0)]);
+        let options_5 = WalkOptions {
+            viewport: Size::new(800.0, 600.0),
+            theme: WgpuTheme::default(),
+            text_system: &text_system,
+            slug_font_id: None,
+            scroll_offsets: &offsets_5,
+        };
+        let (out_5, _) =
+            walk_app_tree_cached(core.tree(), &registry, &options_5, &mut cache).expect("walk 5");
+
+        let y_at = |out: &WalkOutput, node: NodeId| {
+            out.layouts
+                .iter()
+                .find(|l| l.node == node)
+                .unwrap()
+                .rect
+                .origin
+                .y
+        };
+        let text_ids: Vec<NodeId> = out_0
+            .layouts
+            .iter()
+            .filter(|l| l.node != scroll_id)
+            .map(|l| l.node)
+            .collect();
+        for id in text_ids {
+            assert!(
+                (y_at(&out_5, id) - (y_at(&out_0, id) - 5.0)).abs() < 0.01,
+                "a second cached walk at a different offset must not replay \
+                 the first offset's stale position for node {id:?}"
+            );
+        }
     }
 
     /// #312: `NodeKind::TextField` paints the same input chrome + value
@@ -2527,6 +2793,7 @@ mod tests {
             theme,
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
         walk_app_tree(core.tree(), &registry, &options).expect("walk")
     }
@@ -2690,6 +2957,7 @@ mod tests {
                     theme: WgpuTheme::default(),
                     text_system: &text_system,
                     slug_font_id: None,
+                    scroll_offsets: &HashMap::new(),
                 };
                 let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
 
@@ -2845,6 +3113,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
 
         let mut tree_without_badge = AppTree::new();
@@ -2933,6 +3202,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
 
         let mut tree = AppTree::new();
@@ -2982,6 +3252,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
 
         let mut baseline_tree = AppTree::new();
@@ -3028,12 +3299,22 @@ mod tests {
 
     // ---- per-subtree dirty tracking / WalkCache (#229) ----
 
+    /// A genuinely `'static`, always-empty map for test helpers that
+    /// return a `WalkOptions<'a>` with no live scroll state to report
+    /// (#328) — a plain `&HashMap::new()` temporary doesn't outlive the
+    /// function's own `'a` return lifetime.
+    fn empty_scroll_offsets() -> &'static HashMap<NodeId, f32> {
+        static EMPTY: std::sync::OnceLock<HashMap<NodeId, f32>> = std::sync::OnceLock::new();
+        EMPTY.get_or_init(HashMap::new)
+    }
+
     fn hud_options<'a>(text_system: &'a dyn TextSystem, viewport: Size) -> WalkOptions<'a> {
         WalkOptions {
             viewport,
             theme: WgpuTheme::default(),
             text_system,
             slug_font_id: None,
+            scroll_offsets: empty_scroll_offsets(),
         }
     }
 
@@ -3232,6 +3513,7 @@ mod tests {
             theme: theme_b,
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &HashMap::new(),
         };
 
         let (out, stats) =

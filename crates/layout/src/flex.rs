@@ -38,12 +38,18 @@
 //!
 //! ## Named tolerances and gaps (per issue #63's "own the stack" discipline)
 //!
-//! - **`flex-shrink` only ever shrinks `View` children.** A `Text` leaf
-//!   shrinks by re-wrapping (handled naturally — it's re-measured at its
-//!   final width); a `Button`/`Custom` leaf has no re-flow mechanism this
-//!   engine can drive, so it never participates in the shrink pool. An
-//!   overflowing line with no `View` children simply overflows (matches
-//!   ordinary CSS `flex-shrink` behaviour when nothing *can* shrink enough).
+//! - **`flex-shrink` only ever shrinks `View`/`Card`/`ScrollArea`
+//!   children** (collectively, every container kind — see
+//!   `is_container`). A `Text` leaf shrinks by re-wrapping (handled
+//!   naturally — it's re-measured at its final width); a `Button`/
+//!   `Custom` leaf has no re-flow mechanism this engine can drive, so it
+//!   never participates in the shrink pool. An overflowing line with no
+//!   shrinkable children simply overflows (matches ordinary CSS
+//!   `flex-shrink` behaviour when nothing *can* shrink enough). On the
+//!   **column** (height) axis specifically, a plain `View`/`Card`'s
+//!   floor is its own natural height (#328) — it never actually shrinks
+//!   there, so in practice only a `ScrollArea` (floor `0.0`) absorbs
+//!   column shrink at all; see `distribute_main_axis`'s doc comment.
 //! - **`align-items: stretch` is a no-op on `Text`/`Button`/`Custom`
 //!   leaves.** Only a `View`/`Root` child is re-measured at the line's/
 //!   column's cross size; a leaf's content box can't stretch without
@@ -136,6 +142,20 @@ impl LayoutResult {
 
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+
+    /// Shift `id`'s already-computed rect by `offset`, if it has one.
+    /// `compute_layout` itself has no notion of scroll offset — a
+    /// `ScrollArea`'s live offset is host-side view state (#328), applied
+    /// as a pure post-layout viewport transform: a backend calls this
+    /// once per visible descendant of a scrolled `ScrollArea`, after
+    /// `compute_layout` and before painting/hit-testing against the
+    /// result, so position, painted pixels, and hit-test rects all stay
+    /// in agreement with no separate offset bookkeeping needed downstream.
+    pub fn translate(&mut self, id: NodeId, offset: Point) {
+        if let Some(rect) = self.rects.get_mut(&id) {
+            rect.origin = rect.origin + offset;
+        }
     }
 }
 

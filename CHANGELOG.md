@@ -37,21 +37,30 @@ breaking changes can land on minor bumps).
   `overflow-y: auto` box (the browser owns scrolling entirely natively);
   `mkui-wgpu` paints the existing `components::scroll_area`/`scrollbar`
   chrome (#194) — its first live consumer anywhere in the crate, with a
-  scrollbar thumb sized to the real content:viewport ratio each frame;
-  `mkui-console` renders it transparently (no console-native scroll
-  primitive, same bar `Image`'s `[image WxH]` stub clears). The example
-  showcase's outermost page container (`examples/showcase-common`,
-  shared verbatim by `native-showcase`/`web-showcase`/`console-showcase`)
-  and `component-gallery`'s own root are now wrapped in `ScrollArea`
-  instead of a plain `View`, so content taller than the window scrolls
-  (web) or stays reachable past the window edge (wgpu/console) instead of
-  overlapping. Deferred, tracked as follow-ups: wheel/drag/keyboard/
-  gamepad input on the promoted `mkui-wgpu` component (`ScrollState`
-  itself already supports all four, #194 — wiring it into this crate's
-  live `winit` event loop plus shifting hit-test rects by the live offset
-  is separate input-substrate work), nested clipping (no generic clip/
-  scissor primitive on `Scene` yet), real per-area console scrolling, and
-  `mkui-c`/`mkui-py` constructors.
+  scrollbar thumb sized to the real content:viewport ratio each frame —
+  and wires real mouse-wheel input: `WgpuApp` now owns a
+  `HashMap<NodeId, f32>` of live scroll offsets (host-side view state,
+  mutated by a new `WindowEvent::MouseWheel` handler), and each rebuild
+  translates every scrolled `ScrollArea`'s descendant rects right after
+  layout and before any painting, so painted pixels, per-node layouts,
+  and hit-test rects all agree on the live offset. `mkui-console` renders
+  it transparently (no console-native scroll primitive, same bar
+  `Image`'s `[image WxH]` stub clears). The example showcase's outermost
+  page container (`examples/showcase-common`, shared verbatim by
+  `native-showcase`/`web-showcase`/`console-showcase`) and
+  `component-gallery`'s own root are now wrapped in `ScrollArea` instead
+  of a plain `View`, so content taller than the window actually scrolls
+  (web natively; wgpu via the new wheel input) instead of overlapping.
+  `mkui-wgpu` has no clip/scissor on scrolled content yet (`Scene` has no
+  generic clip-rect primitive) — harmless for the shipped root-spanning
+  usage (the window's own render-target bounds are the only clip that
+  ever mattered there), but a `ScrollArea` with neighboring content would
+  paint over it once scrolled; tracked as #336. Deferred, tracked as
+  follow-ups: drag/keyboard/gamepad input on the promoted `mkui-wgpu`
+  component (`ScrollState` itself already supports all three in addition
+  to wheel, #194 — #335), the clip/scissor gap above (#336), real
+  per-area console scrolling (#337), and `mkui-c`/`mkui-py` constructors
+  (#339).
 
 - **`examples/shadcn-parity` — runnable side-by-side `mkui-web` vs.
   shadcn/ui parity fixture (#278).** Renders the shared `Card`/`Button`
@@ -305,13 +314,19 @@ breaking changes can land on minor bumps).
   than zero on both axes; on the column axis this let a child's box end up
   smaller than its own children needed, so those grandchildren were
   positioned inside an undersized box and visibly overlapped the next
-  sibling — observed on `component-gallery` (#310) once a window's height
-  dropped below the showcase tree's natural content height. Block height
+  sibling — the "Button Components"/"Text Field"/"Image Component" card
+  sections in `examples/showcase-common::create_showcase_ui` (rendered by
+  `native-showcase`/`web-showcase`/`console-showcase`) once a window's
+  height dropped below the showcase tree's natural content height; issue
+  #328 attributes the observation to `component-gallery` (#310), but that
+  example's own tree (`create_gallery_ui`) carries no matching sections —
+  the overlap is real and reproducible on the showcase tree regardless.
+  Block height
   has no CSS "min-content" narrower than a child's own natural height, so
   a plain `View`/`Card` column child's shrink floor is now that natural
   height (it never actually shrinks on this axis); the row (width) axis
   keeps its pre-existing zero floor unchanged (no min-content-width
-  concept exists yet). Once every shrinkable child bottoms out, remaining
+  concept exists yet — tracked separately as #338). Once every shrinkable child bottoms out, remaining
   negative free space is left unresolved and surfaces as genuine overflow
   past the container's own box instead of overlap. Two new regression
   tests in `crates/layout/src/lib.rs` lay out a minimal two-sibling repro
