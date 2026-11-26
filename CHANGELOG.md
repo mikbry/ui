@@ -271,9 +271,11 @@ breaking changes can land on minor bumps).
   dependency so the opt-out is real at *every* layer, not just wherever
   `mkui-wgpu` happens to sit. `cargo run -p native-showcase
   --no-default-features --features wgpu --release` now genuinely renders
-  bitmap, CI-verified by resolving the actual `--cfg feature="slug"` flag
-  `rustc` receives (not just a successful compile) in a dedicated
-  `mkui-examples` job step, plus a new `mkui-bridge-wgpu-slug` test leg at
+  bitmap, CI-verified (not just a successful compile) by checking whether
+  `mkui-vector2d-wgpu` — the Slug GPU-resource crate, pulled in by
+  `mkui-wgpu` only when its `slug` feature is active — is present in
+  `cargo tree`'s resolved dependency graph, in a dedicated `mkui-examples`
+  job step, plus a new `mkui-bridge-wgpu-slug` test leg at
   the bridge-crate layer — the pre-existing `mkui-bridge-wgpu` leg's own
   behavior flips from implicit slug-on to real slug-off as part of this
   change, since it passes `--no-default-features`.

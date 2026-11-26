@@ -129,8 +129,10 @@ to the GPU backend choice.
   `--no-default-features --features wgpu` genuinely suppresses `slug`
   at every layer instead of it leaking back in through whichever
   dependency's own default happened not to be pinned — CI verifies this
-  against the actual `--cfg feature="slug"` flag `rustc` receives, not
-  just a successful compile. `console-showcase`/`web-showcase` are
+  (not just a successful compile) by checking whether `mkui-vector2d-wgpu`,
+  the Slug GPU-resource crate `mkui-wgpu` pulls in only when its `slug`
+  feature is active, is present in `cargo tree`'s resolved dependency
+  graph. `console-showcase`/`web-showcase` are
   unaffected — Slug has no console/web lane, and `mkui-wgpu` never enters
   their build graph. `atoms-on-wgpu`/`examples/text` keep their own
   independent, pre-existing
