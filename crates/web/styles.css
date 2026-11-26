@@ -12,6 +12,35 @@
     box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   }
 
+  /* `Image` (#196). `border-radius` on an `<img>` clips its own bitmap
+     directly — no extra wrapper/overflow:hidden needed. `object-fit`
+     governs contain/cover once the box's CSS size (set via application
+     `w-*`/`h-*` classes, same as any other node) differs from the
+     `width`/`height` attributes mkui-web sets from the node's intrinsic
+     size. */
+  :where(img.image) {
+    display: block;
+    border-radius: var(--radius, 0.5rem);
+  }
+  :where(img.image-contain) {
+    object-fit: contain;
+  }
+  :where(img.image-cover) {
+    object-fit: cover;
+  }
+
+  /* `ImageSource::Texture` has no web equivalent (no decoded bytes to hand
+     the browser) — the documented placeholder standing in for it. */
+  :where(.image-texture-placeholder) {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--muted, #f4f4f5);
+    color: var(--muted-foreground, #71717a);
+    border-radius: var(--radius, 0.5rem);
+    font-size: 0.75rem;
+  }
+
   :where(button.btn:disabled) {
     opacity: 0.5;
     /* Native disabled buttons block the painted surface without activating.

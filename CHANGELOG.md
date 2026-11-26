@@ -82,6 +82,52 @@ breaking changes can land on minor bumps).
   a leaf, like `Text`/`Button` — never a container); `mkui_layout::
   LeafMeasure` implementors must add `measure_text_field`. No existing
   constructor signature changed.
+- **`NodeKind::Image` — GPU-texture or decoded-bytes source, contain/cover
+  fit, rounded clip, no visible seams (#196).** `mkui-runtime` gains
+  `NodeKind::Image(ImageProps)` (`source: ImageSource::Texture(TextureHandle)`
+  for a host-supplied GPU texture already in VRAM, or
+  `ImageSource::Encoded { format, bytes }` for still-encoded PNG/WebP bytes;
+  `fit: ImageFit::Contain | Cover`; intrinsic `width`/`height`) and a
+  matching `AppTree::push_image`/`push_image_unchecked`. `mkui-core::image`
+  decodes PNG (via `png`, promoted from `mkui-wgpu`'s dev-dependency
+  golden-comparison role to a real dependency here) and WebP (via the new
+  `image-webp` real dependency — no AVIF; no general multi-format decoder)
+  once, at `Image::from_encoded` construction time, to validate the bytes
+  and recover `width`/`height`; the node keeps the *original encoded
+  bytes*, not the decoded pixels, so a backend with its own decoder never
+  pays for a redundant decode. `mkui-layout` treats `Image` as a leaf whose
+  intrinsic size is already known data on the node — unlike `Text`/
+  `Button` it needs no `LeafMeasure` callback — and keeps that intrinsic
+  width unless the node has `flex-1` (`ResolvedStyle::flex_grow`), in which
+  case it takes the flex algorithm's already-distributed `avail_width`
+  instead (the lever that gives an `Image` a box whose aspect ratio
+  diverges from its own, the scenario the fit modes exist to handle); a
+  non-growing `Image` keeps its intrinsic width even under a `Column`'s
+  default stretch alignment, which otherwise hands every child the full
+  container width regardless of kind. Height stays the image's own
+  intrinsic height either way. Every backend renders it through its own
+  native primitive: `mkui-wgpu` builds a brand-new textured-quad pipeline
+  (`image.wgsl`) with a per-fragment rounded-rect SDF clip evaluated across
+  the whole quad — one shader, no separate corner geometry to seam against,
+  unlike a tessellated rounded rect — decoding/uploading/caching a
+  decoded-bytes texture once per node and resolving a host-registered
+  texture (`Renderer::register_texture`/`unregister_texture`) by handle —
+  both reachable from a real `WgpuApp` consumer via the matching
+  `WgpuApp::renderer`/`register_texture`/`unregister_texture` accessors;
+  `mkui-web` emits a native `<img>` sourced from a `data:` URI built from
+  the same encoded bytes (hand-rolled base64, no new crate) for the
+  decoded-bytes path, styled via the opt-in `mkui-web/styles.css` /
+  `DEFAULT_COMPONENT_CSS` recipe (`object-fit: contain|cover`, a
+  `border-radius` that clips the `<img>`'s own bitmap directly), and a
+  documented placeholder for the host-texture path (no web equivalent of a
+  GPU handle); `mkui-console` renders a documented `[image WxH]` stub (no
+  terminal pixel/texture primitive). `mkui-c`/`mkui-py` FFI constructors
+  (#320) and wiring the pipeline into `EmbeddedRenderer::render_into`
+  (#321 — the standalone `Renderer` path above is fully reachable and
+  GPU-tested; only the host-embedded path remains) are explicit
+  out-of-scope follow-ups (ADR 0015 step 8) — a GPU acceptance test drives
+  the real pipeline directly against the offscreen harness's device/queue
+  instead.
 - **`NodeKind::Card` — the second component promoted into the shared
   contract, plus `Button`'s `disabled` field folded in as the first
   completed case (#270, #245).** `mkui-runtime::tree::NodeKind` gains a

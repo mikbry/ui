@@ -50,6 +50,11 @@ pub enum RenderLane {
     /// and reopen a fresh one after. Not feature-gated: glass chrome has no
     /// vector-pipeline dependency.
     Backdrop,
+    /// GPU-texture or decoded-bytes image content (#196) on its own
+    /// textured-quad pipeline (`render::build_image_pipeline`). Not
+    /// feature-gated: texture sampling has no vector-pipeline dependency,
+    /// just a dedicated pipeline/shader.
+    Image,
 }
 
 /// One ordered draw command: a lane plus the contiguous `Scene::primitives`
@@ -67,6 +72,8 @@ pub enum RenderCommand {
     VectorPath(Range<usize>),
     /// Backdrop blur primitives (#187) for `primitives[range]`.
     Backdrop(Range<usize>),
+    /// Image primitives (#196) for `primitives[range]`.
+    Image(Range<usize>),
 }
 
 impl RenderCommand {
@@ -78,6 +85,7 @@ impl RenderCommand {
             RenderCommand::SlugGlyphs(_) => RenderLane::SlugGlyphs,
             RenderCommand::VectorPath(_) => RenderLane::VectorPath,
             RenderCommand::Backdrop(_) => RenderLane::Backdrop,
+            RenderCommand::Image(_) => RenderLane::Image,
         }
     }
 
@@ -88,7 +96,8 @@ impl RenderCommand {
             | RenderCommand::BitmapText(r)
             | RenderCommand::SlugGlyphs(r)
             | RenderCommand::VectorPath(r)
-            | RenderCommand::Backdrop(r) => r.clone(),
+            | RenderCommand::Backdrop(r)
+            | RenderCommand::Image(r) => r.clone(),
         }
     }
 
@@ -99,6 +108,7 @@ impl RenderCommand {
             RenderLane::SlugGlyphs => RenderCommand::SlugGlyphs(range),
             RenderLane::VectorPath => RenderCommand::VectorPath(range),
             RenderLane::Backdrop => RenderCommand::Backdrop(range),
+            RenderLane::Image => RenderCommand::Image(range),
         }
     }
 }
@@ -127,6 +137,10 @@ pub fn classify_primitive(primitive: &Primitive) -> RenderLane {
         // Slug/VectorPath this is not feature-gated, since it has no
         // vector-pipeline dependency, just a dedicated GPU pass.
         Primitive::Backdrop(_) => RenderLane::Backdrop,
+        // Image (#196) always gets its own lane too, same reasoning as
+        // Backdrop: a dedicated textured-quad pipeline, no vector-pipeline
+        // dependency.
+        Primitive::Image(_) => RenderLane::Image,
     }
 }
 

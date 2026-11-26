@@ -241,6 +241,70 @@ and Python default dispatch are covered by tests.
   and out of this issue's scope, but a future reader should treat ADR
   0005 and this ADR as the current statement of where the contract lives.
 
+### Image: the fourth completed case (#196)
+
+`NodeKind::Image(ImageProps)` — unlike `Card`, `Image` carries real
+per-instance data (`source`, `fit`, intrinsic `width`/`height`), because
+unlike chrome-only surface styling an image's content genuinely varies per
+instance. It stays `Eq`-compatible (point 3 of the checklist above) by
+construction: `fit` is a small enum, `width`/`height` are `u32`, and
+`source` is either an opaque `u64`-wrapping `TextureHandle` or `Vec<u8>` —
+no `f32`, no GPU resource type. Corner radius still comes from each
+backend's own theme (`WgpuTheme::image()`, the web `.image` CSS rule), the
+same "no field on the node" story `Card`'s chrome has.
+
+A leaf, not a container (point 2) — but an unusual one: `Text`/`Button`
+need a `LeafMeasure` callback because their content size depends on glyph
+metrics this crate doesn't own; `Image`'s intrinsic size is already known
+data on the node itself, so `mkui-layout`'s `Image` arm reads it directly.
+The one real wrinkle: with no dedicated per-leaf `w-*`/`h-*` style override
+in this engine (only `h-*` on a *container*'s own box exists), the only way
+to give an `Image` a box whose aspect ratio diverges from its own — the
+scenario `ImageFit` exists to handle — is `flex-1` growing its width via
+the flex algorithm's ordinary per-child `avail_width` distribution. Without
+`flex-1` the `Image` arm ignores `avail_width` entirely and keeps the
+intrinsic width — load-bearing under a `Column`'s default stretch
+alignment, which hands *every* child the full container width as
+`avail_width` regardless of kind (see `layout_column_children`); without
+that gate a plain `Image` dropped into an ordinary column would silently
+stretch to the column's width. Height stays the image's own intrinsic
+height regardless of `flex-1`. This is a narrower mechanism than a real
+per-leaf size override would be, deliberately: adding one is a
+`mkui-layout` concern bigger than this issue, not specific to `Image`.
+
+Each backend renders through its own native primitive, same as every other
+promoted component — but `Image` is also the first one needing a wholly
+new GPU pipeline, not a reuse of the existing triangle lane: `mkui-wgpu`
+had no texture-sampling infrastructure anywhere before this (text is
+bitmap-tessellated or Slug vector, never atlas-sampled). The rounded clip
+is a single per-fragment SDF evaluated across the whole textured quad —
+no separate corner geometry exists to seam against, a structurally
+stronger "no visible seams" guarantee than a tessellated rounded rect's
+corner-fan approximation gets. `mkui-web` leans on the browser's own PNG/
+WebP decoder (a `data:` URI `<img>`) rather than re-decoding bytes
+`mkui-core` already validated once; `mkui-console` is a documented
+`[image WxH]` stub, per point 6's "renders" bar (some backend-native visual
+cue, not pixel parity).
+
+Decode library choice (PNG via `png`, WebP via `image-webp`, both promoted
+to real — non-dev — dependencies of `mkui-core`) and AVIF's exclusion (a
+full AV1 decoder is a much bigger dependency than either format here) are
+the issue's own decision, not this ADR's; `mkui-wgpu`'s pre-existing `png`
+dev-dependency (golden-image test comparison) is unrelated and untouched.
+
+Explicit out-of-scope (point 8), same deferral shape as Card's FFI gap:
+`mkui-c`/`mkui-py` gain no `push_image`/`image_child` constructor (#320);
+`EmbeddedRenderer::render_into` gains no live `Image` lane (#321 — an
+`Image` primitive silently no-ops there today, the same gap `Backdrop`
+already has). The *standalone* `Renderer` path is not deferred — it is
+fully wired, reachable from a real consumer via
+`WgpuApp::renderer`/`register_texture`/`unregister_texture`, and proven
+by a GPU acceptance test that drives `build_image_pipeline`/
+`ImageTextures` directly against the offscreen harness's device/queue
+(the harness itself has no live per-frame command loop to patch, so that
+is not a separate gap). JPEG/other formats are a follow-up, tracked
+separately from this ADR.
+
 ### Component status (2026-11-26)
 
 | Component | `mkui-core`/`mkui-runtime` | `mkui-wgpu` | `mkui-web` | `mkui-console` | Status |
@@ -248,6 +312,7 @@ and Python default dispatch are covered by tests.
 | Button | `NodeKind::Button` (+`disabled`, #245) | yes | yes | yes | **Done** |
 | Card | `NodeKind::Card` (#270) | yes | yes | yes (border rule) | **Done** (chrome only — see #195 for image/grid/states) |
 | Text field (Input) | `NodeKind::TextField` (+`disabled`/`invalid`, #312) | yes (typing/caret/selection; clipboard/IME wiring deferred — #317) | yes (native `<input>`) | yes (typed input; caret/selection deferred — #317) | **Done** (#185's editing logic unchanged; #317 tracks the deferred platform integrations) |
+| Image | `NodeKind::Image` (#196) | yes (new textured-quad pipeline) | yes (`<img>` + placeholder for the texture source) | yes (`[image WxH]` stub) | **Done** (standalone `Renderer` only — `EmbeddedRenderer`/offscreen live lane, FFI constructors deferred) |
 | Badge, Dot, Tooltip, Toast | — | `mkui-wgpu`-only (badge/dot/tooltip reachable via `NodeKind::Custom`, wgpu-registered only) | no | no | Not promoted |
 | Dialog, Slider, Toggle, Segmented select, Chip group, Progress bar, Scroll area, Panels | — | `mkui-wgpu`-only | no | no | Not promoted |
 

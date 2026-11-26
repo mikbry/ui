@@ -1,8 +1,22 @@
 # mkui-web component recipes
 
-`mkui-web` renders `Card` as `<div class="card ...">` and `Button` as a
-native `<button class="btn ...">`. Applications own the theme and may supply
-all CSS themselves. Rendering does not install CSS or change theme variables.
+`mkui-web` renders `Card` as `<div class="card ...">`, `Button` as a native
+`<button class="btn ...">`, and `Image` (#196) as a native
+`<img class="image image-contain|image-cover ...">` for its decoded-bytes
+source, or a `<div class="image-texture-placeholder">` for a host GPU-texture
+source (no web equivalent of that handle). Applications own the theme and may
+supply all CSS themselves. Rendering does not install CSS or change theme
+variables.
+
+`Image`'s `<img>` sources from a `data:` URI built directly from the same
+PNG/WebP bytes `mkui-core` already decoded once (to validate them and recover
+`width`/`height`) — the browser's own decoder handles the rest, so no pixel
+data is re-decoded or re-encoded in `mkui-web`. `border-radius` on the `<img>`
+itself clips its bitmap directly; `object-fit: contain`/`cover` (from the
+`image-contain`/`image-cover` class the node's `fit` picks) governs how it
+fills a box whose aspect ratio differs from the image's own — set via an
+ordinary `w-*`/`h-*`/`flex-1` class on the `Image`, the same as any other
+element.
 
 For default Card chrome and disabled Button styling, import the public
 [`styles.css`](styles.css) before your application styles, or embed the exact
@@ -26,9 +40,12 @@ application-owned. No global reset, palette, padding, or typography is installed
 
 Card reads `--card`, `--card-foreground`, `--border`, and `--radius` as complete
 CSS values, with neutral fallbacks. Set them on the app root or a card; unstyled
-children inherit the foreground. The `mkui-defaults` cascade layer and
-`:where()` selectors let application classes override defaults, even when those
-unlayered classes appear earlier in the stylesheet. For example:
+children inherit the foreground. `Image` reads `--radius` too (the same clip
+radius every backend's `Image` applies unconditionally — see ADR 0015), and
+its host-texture placeholder reads `--muted`/`--muted-foreground`. The
+`mkui-defaults` cascade layer and `:where()` selectors let application classes
+override defaults, even when those unlayered classes appear earlier in the
+stylesheet. For example:
 
 ```css
 .my-app { --card: #202024; --card-foreground: #fafafa; --radius: 12px; }

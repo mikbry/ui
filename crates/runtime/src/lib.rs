@@ -50,8 +50,12 @@ pub mod snapshot;
 
 pub use actions::{ActionId, ActionRegistry, LocalAction, RuntimeCtx, RuntimeSignal};
 pub use diff::{diff_keyed, DiffOp};
-pub use props::{ButtonVariant, ButtonVariantParseError, TextVariant, TextVariantParseError};
+pub use props::{
+    ButtonVariant, ButtonVariantParseError, ImageFit, ImageFormat, TextVariant,
+    TextVariantParseError,
+};
 pub use style::{ClassParseError, ColorRole, ResolvedStyle, StateStyle, StyleClass};
 pub use tree::{
-    AppTree, ButtonProps, Node, NodeId, NodeKind, TextFieldProps, TextProps, ViewProps,
+    AppTree, ButtonProps, ImageProps, ImageSource, Node, NodeId, NodeKind, TextFieldProps,
+    TextProps, TextureHandle, ViewProps,
 };

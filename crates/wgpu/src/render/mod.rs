@@ -63,6 +63,7 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use backdrop::{BackdropBlur, BackdropCompositeTarget};
+use image::{build_image_pipeline, image_vertex_buffer, ImageTextures};
 
 use crate::render_command::{build_render_commands, classify_primitive, RenderCommand};
 use crate::types::Backdrop;
@@ -99,6 +100,15 @@ enum LaneDraw {
     Backdrop(Backdrop),
     #[cfg(feature = "slug")]
     Slug(PreparedSlug),
+    /// One `Image` primitive's draw resources (#196): a 6-vertex quad plus
+    /// the bind group [`ImageTextures::resolve`] resolved its source to.
+    /// Unlike `Backdrop`, this needs no deferred GPU work at draw time —
+    /// it samples its own independent texture, not the frame — so it is
+    /// fully prepared up front like `Triangles`/`Slug`.
+    Image {
+        buffer: wgpu::Buffer,
+        bind_group: wgpu::BindGroup,
+    },
 }
 
 /// Host-owned GPU and frame — borrowed-resources entry point for embedding
@@ -112,6 +122,12 @@ pub mod embedded;
 /// `Primitive::Backdrop`. See [`backdrop::BackdropBlur`] for the design and
 /// its own GPU acceptance tests (gated the same way as the ones below).
 mod backdrop;
+
+/// Textured-quad pipeline behind `Primitive::Image` (#196): the pipeline/
+/// shader builders, the vertex-mapping math, and [`image::ImageTextures`]
+/// (the decode/upload/cache + host-texture registry). Not feature-gated —
+/// see that module's own docs for why.
+mod image;
 
 /// Surfaceless offscreen renderer + readback harness (#106). Gated behind the
 /// `gpu-tests` feature so the displayless default CI `test` job needs no Vulkan
@@ -166,6 +182,14 @@ mod vvl_regression;
 /// Slug dependency).
 #[cfg(all(test, feature = "gpu-tests"))]
 mod linear_blend_gpu;
+
+/// Cross-consumer GPU acceptance test for `Image` (#196): renders the real
+/// textured-quad pipeline on #106's Lavapipe harness and reads back pixels,
+/// proving both source paths render, both fit modes behave correctly, and
+/// the rounded clip has no seam around the curve. Gated on `gpu-tests` only
+/// — the `Image` pipeline has no `slug`-feature dependency.
+#[cfg(all(test, feature = "gpu-tests"))]
+mod image_gpu;
 
 /// Cross-consumer integration test for `card` (#141, Sprint 8 plan v2 §4.3):
 /// renders `components::card`'s triangulated and vector lanes on #106's
@@ -282,6 +306,15 @@ pub struct Renderer {
     /// Real backdrop blur GPU resources (#187), built against the linear
     /// intermediate's format. Resized alongside [`Self::intermediate_view`].
     backdrop_blur: BackdropBlur,
+    /// Textured-quad pipeline for `Primitive::Image` (#196), built against
+    /// the linear intermediate's format — same reasoning as
+    /// [`Self::ui_pipeline`].
+    image_pipeline: wgpu::RenderPipeline,
+    /// Decode/upload cache + host-texture registry backing
+    /// [`Renderer::register_texture`] and every `Image` draw. Persists
+    /// across frames and resizes — resolution has no bearing on a
+    /// texture's own pixels.
+    image_textures: ImageTextures,
     /// Native Slug glyph adapter (#66), present only when the `slug` feature is
     /// enabled. Built once against the swapchain format; invoked inside the UI
     /// render pass so Slug glyphs composite in scene paint order. Off-feature
@@ -404,6 +437,14 @@ impl Renderer {
         let backdrop_blur =
             BackdropBlur::new(&device, INTERMEDIATE_FORMAT, width, height, sample_count);
 
+        let image_textures = ImageTextures::new(&device);
+        let image_pipeline = build_image_pipeline(
+            &device,
+            INTERMEDIATE_FORMAT,
+            sample_count,
+            image_textures.bind_group_layout(),
+        );
+
         let (present_pipeline, present_bind_group_layout) = build_present_pipeline(&device, format);
         let present_sampler = create_present_sampler(&device);
         let present_flags_buffer = create_present_flags_buffer(&device, format.is_srgb());
@@ -434,6 +475,8 @@ impl Renderer {
             present_bind_group,
             msaa_color_view,
             backdrop_blur,
+            image_pipeline,
+            image_textures,
             #[cfg(feature = "slug")]
             slug_adapter,
             #[cfg(feature = "slug")]
@@ -459,6 +502,48 @@ impl Renderer {
     /// the renderer fell back to no anti-aliasing on this device.
     pub fn sample_count(&self) -> u32 {
         self.sample_count
+    }
+
+    /// Register a GPU texture a host already created on this renderer's
+    /// own [`Self::device`]/[`Self::queue`] — "already in VRAM" (#196) —
+    /// returning the [`mkui_runtime::TextureHandle`] an `Image::from_texture`
+    /// call embeds into the tree. `view` must be a `D2`, non-multisampled,
+    /// filterable-float view (`TextureSampleType::Float { filterable: true
+    /// }` — an ordinary color texture qualifies; a depth/stencil or
+    /// non-filterable-integer format does not) — the same shape the
+    /// image pipeline's bind group layout requires for every draw. Its
+    /// format should also be (or be an `*Srgb` reinterpretation of) an
+    /// sRGB format, so sampling it linearizes the same way a
+    /// decoded-bytes `Image`'s texture does — see
+    /// [`mkui_core::components::Image::from_texture`]'s own docs.
+    pub fn register_texture(&mut self, view: &wgpu::TextureView) -> mkui_runtime::TextureHandle {
+        mkui_runtime::TextureHandle(
+            self.image_textures
+                .register_host_texture(&self.device, view),
+        )
+    }
+
+    /// Drop a previously-registered texture's bind group. A no-op if
+    /// `handle` was never registered or was already unregistered — a host
+    /// tearing down a texture it owns is not obligated to call this first,
+    /// but doing so frees the bind group promptly instead of only on the
+    /// next [`Self::register_texture`] cache churn.
+    pub fn unregister_texture(&mut self, handle: mkui_runtime::TextureHandle) {
+        self.image_textures.unregister_host_texture(handle.0);
+    }
+
+    /// The `wgpu::Device` this renderer owns — a host building its own GPU
+    /// texture to pass to [`Self::register_texture`] creates it against
+    /// this device (and its matching [`Self::queue`]), the same way an
+    /// embedded host's own resources must share
+    /// [`embedded::EmbeddedRenderer`]'s borrowed device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The `wgpu::Queue` paired with [`Self::device`].
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Current surface size in physical pixels.
@@ -671,6 +756,38 @@ impl Renderer {
                         }
                     }
                 }
+                RenderCommand::Image(_) => {
+                    // Flush any open triangle run so each image composites
+                    // over exactly the primitives that preceded it — same
+                    // invariant as every other non-triangle lane above.
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                    for primitive in &primitives[range] {
+                        let crate::types::Primitive::Image(placed) = primitive else {
+                            continue;
+                        };
+                        let Some(bind_group) =
+                            self.image_textures
+                                .resolve(&self.device, &self.queue, &placed.source)
+                        else {
+                            // Decode failure or an unregistered host handle
+                            // (see `ImageTextures::resolve`'s docs) — skip
+                            // just this one primitive rather than the frame.
+                            continue;
+                        };
+                        let buffer = image_vertex_buffer(
+                            &self.device,
+                            placed,
+                            scene.viewport.width,
+                            scene.viewport.height,
+                        );
+                        lane_draws.push(LaneDraw::Image {
+                            buffer,
+                            bind_group: bind_group.clone(),
+                        });
+                    }
+                }
             }
         }
         if let Some(open) = pending_triangles.take() {
@@ -714,6 +831,7 @@ impl Renderer {
                     &ui_pass_target,
                     &mut cleared,
                     &self.ui_pipeline,
+                    &self.image_pipeline,
                     #[cfg(feature = "slug")]
                     &self.slug_adapter,
                     &lane_draws[segment_start..i],
@@ -749,6 +867,7 @@ impl Renderer {
                 &ui_pass_target,
                 &mut cleared,
                 &self.ui_pipeline,
+                &self.image_pipeline,
                 #[cfg(feature = "slug")]
                 &self.slug_adapter,
                 &lane_draws[segment_start..],
@@ -814,11 +933,13 @@ struct UiPassTarget<'a> {
     clear: wgpu::Color,
 }
 
+#[allow(clippy::too_many_arguments)] // `image_pipeline` (#196) joins the existing load-bearing lane pipelines; see this function's own clippy escape hatch note above.
 fn draw_pass_segment(
     encoder: &mut wgpu::CommandEncoder,
     target: &UiPassTarget<'_>,
     cleared: &mut bool,
     ui_pipeline: &wgpu::RenderPipeline,
+    image_pipeline: &wgpu::RenderPipeline,
     #[cfg(feature = "slug")] slug_adapter: &SlugAdapter,
     draws: &[LaneDraw],
 ) {
@@ -871,6 +992,12 @@ fn draw_pass_segment(
             }
             LaneDraw::Backdrop(_) => {
                 unreachable!("callers split `lane_draws` at every Backdrop boundary")
+            }
+            LaneDraw::Image { buffer, bind_group } => {
+                pass.set_pipeline(image_pipeline);
+                pass.set_bind_group(0, bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..6, 0..1);
             }
         }
     }

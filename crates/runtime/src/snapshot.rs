@@ -71,10 +71,31 @@ pub enum KindSnapshot {
         disabled: bool,
         invalid: bool,
     },
+    /// Summarized, not a byte-for-byte mirror of [`crate::tree::ImageProps`]
+    /// (#196): `source` collapses to a cheap discriminant (`"texture"` or
+    /// the encoded format name) instead of inlining a host handle id or a
+    /// potentially multi-megabyte byte buffer into the parity JSON — the
+    /// gate compares structural shape, not image content.
+    Image {
+        source: ImageSourceSnapshot,
+        fit: crate::props::ImageFit,
+        width: u32,
+        height: u32,
+    },
     Custom {
         type_name: String,
         props: serde_json::Value,
     },
+}
+
+/// Cheap discriminant for [`crate::tree::ImageSource`] (#196) — see
+/// [`KindSnapshot::Image`] for why the snapshot never inlines a handle id or
+/// the encoded byte buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSourceSnapshot {
+    Texture,
+    Encoded { format: crate::props::ImageFormat },
 }
 
 impl TreeSnapshot {
@@ -125,6 +146,17 @@ impl NodeSnapshot {
                 anchor: f.anchor,
                 disabled: f.disabled,
                 invalid: f.invalid,
+            },
+            crate::tree::NodeKind::Image(img) => KindSnapshot::Image {
+                source: match &img.source {
+                    crate::tree::ImageSource::Texture(_) => ImageSourceSnapshot::Texture,
+                    crate::tree::ImageSource::Encoded { format, .. } => {
+                        ImageSourceSnapshot::Encoded { format: *format }
+                    }
+                },
+                fit: img.fit,
+                width: img.width,
+                height: img.height,
             },
             crate::tree::NodeKind::Custom { type_name, props } => KindSnapshot::Custom {
                 type_name: type_name.clone(),

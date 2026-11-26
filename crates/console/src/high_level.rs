@@ -252,6 +252,18 @@ impl Mkui {
                     renderer.print_styled(2, current_row, card_border_row(false).dark_grey())?;
                     current_row += 1;
                 }
+                Line::Image { width, height } => {
+                    // Documented stub (#196): no sixel/kitty-graphics
+                    // support here, so an `Image` node's terminal-native
+                    // visual cue is a bracketed placeholder carrying its
+                    // dimensions, same bracketing idiom
+                    // `button_styled_content`'s `[ ]` and `Line::CardTop`/
+                    // `CardBottom`'s border rows already use for "this is
+                    // chrome, not real content."
+                    let text = format!("[image {width}x{height}]");
+                    renderer.print_styled(2, current_row, text.dark_grey())?;
+                    current_row += 1;
+                }
                 Line::Button(index) => {
                     if let Some(Selectable::Button(button)) = self.selectables.get(*index) {
                         let is_selected = self.app.selected_index() == *index;

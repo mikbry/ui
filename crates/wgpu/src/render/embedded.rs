@@ -495,6 +495,15 @@ impl EmbeddedRenderer {
                         lane_draws.extend(make_triangles(open));
                     }
                 }
+                RenderCommand::Image(_) => {
+                    // `Image` (#196) is not wired into the embedded path
+                    // yet either — same documented gap, same silent-skip
+                    // treatment, as `Backdrop` just above. Tracked as
+                    // explicit out-of-scope for this issue (see its PR).
+                    if let Some(open) = pending_triangles.take() {
+                        lane_draws.extend(make_triangles(open));
+                    }
+                }
             }
         }
         if let Some(open) = pending_triangles.take() {

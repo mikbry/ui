@@ -151,6 +151,15 @@ pub enum Line {
     /// node existed.
     CardTop,
     CardBottom,
+    /// Documented stub for an `Image` node (#196): the terminal has no
+    /// pixel/texture rendering primitive (no sixel/kitty-graphics support
+    /// here), so this is the backend-native visual cue ADR 0015 asks for —
+    /// a placeholder carrying the image's dimensions, rather than silently
+    /// dropping it from the flow.
+    Image {
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Walk an [`AppTree`] and flatten it into lines + a unified list of
@@ -216,6 +225,13 @@ fn walk_children(
                     invalid: f.invalid,
                 }));
                 layout.push(Line::TextField(index));
+            }
+            NodeKind::Image(img) => {
+                layout.push(Line::Image {
+                    width: img.width,
+                    height: img.height,
+                });
+                layout.push(Line::Spacer);
             }
             NodeKind::Custom { type_name, props } if type_name == "menu_list" => {
                 push_menu_list_lines(props, layout, selectables);
@@ -481,6 +497,28 @@ mod tests {
             matches!((top, body, bottom), (Some(t), Some(b), Some(bot)) if t < b && b < bot),
             "expected CardTop, then the body line, then CardBottom, got {layout:?}"
         );
+    }
+
+    #[test]
+    fn image_node_renders_as_a_documented_dimension_stub() {
+        // #196: the terminal backend has no pixel/texture primitive, so an
+        // `Image` node's "render" is a documented `Line::Image` stub
+        // carrying its dimensions — see ADR 0015's "some backend-native
+        // visual cue, not pixel parity" bar for what counts as rendering.
+        let app = Mkui::new().child(mkui_core::components::Image::from_texture(
+            mkui_runtime::TextureHandle(7),
+            200,
+            100,
+        ));
+
+        let mut layout = Vec::new();
+        let mut selectables = Vec::new();
+        walk_tree(app.tree(), &mut layout, &mut selectables);
+
+        assert!(layout.contains(&Line::Image {
+            width: 200,
+            height: 100
+        }));
     }
 
     #[test]

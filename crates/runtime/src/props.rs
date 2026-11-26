@@ -112,6 +112,34 @@ impl std::fmt::Display for TextVariantParseError {
 
 impl std::error::Error for TextVariantParseError {}
 
+/// How an `Image` node's content is scaled to fit its laid-out box when the
+/// box's aspect ratio does not match the image's own (#196). Mirrors CSS
+/// `object-fit: contain` / `object-fit: cover` — `fill`/`none` are not
+/// offered, keeping the choice binary and unambiguous for every backend.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFit {
+    /// Scale down (preserving aspect ratio) until the whole image fits
+    /// inside the box, letterboxing the remainder transparent.
+    Contain,
+    /// Scale up (preserving aspect ratio) until the box is fully covered,
+    /// cropping whatever overflows.
+    Cover,
+}
+
+/// Encoding of an `Image` node's [`crate::tree::ImageSource::Encoded`]
+/// bytes (#196). Scoped to the two formats issue #196 asks for; a decoder
+/// routes on this tag instead of re-sniffing magic bytes at every
+/// consumption site.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    Png,
+    WebP,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

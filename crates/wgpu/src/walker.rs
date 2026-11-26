@@ -124,20 +124,23 @@ use std::collections::HashMap;
 use mkui_core::error::MkuiError;
 use mkui_layout::{LeafMeasure, Measured};
 use mkui_runtime::{
-    ActionId, AppTree, ButtonVariant, ColorRole, NodeId, NodeKind, ResolvedStyle, TextVariant,
+    ActionId, AppTree, ButtonVariant, ColorRole, ImageFormat, ImageSource as RuntimeImageSource,
+    NodeId, NodeKind, ResolvedStyle, TextVariant,
 };
 use mkui_text::{FontId, HintingMode, LayoutSpec, TextSystem, VariationSettings};
 
 use crate::bridge::{WgpuRenderCtx, WgpuRenderOutcome, WgpuRendererRegistry};
-use crate::components::{card, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX};
+use crate::components::{
+    card, image as render_image_primitive, DISABLED_ALPHA_FACTOR, MIN_TOUCH_TARGET_PX,
+};
 use crate::tessellation::map_align;
 use crate::theme::{
     ButtonSize, ButtonVariant as ThemeButtonVariant, InputStyle, TextVariant as ThemeTextVariant,
     WgpuTheme,
 };
 use crate::types::{
-    Color, CornerRadii, Point, Primitive, Quad, Rect, Scene, Size, Stroke, Text, TextAlign,
-    TextStyle,
+    Color, CornerRadii, ImageEncoding, ImageSource, Point, Primitive, Quad, Rect, Scene, Size,
+    Stroke, Text, TextAlign, TextStyle,
 };
 
 /// One interactive region or inert blocker collected during the walk. The
@@ -839,6 +842,9 @@ fn walk_node(
             rect.unwrap_or_else(fallback_rect),
             layouts,
         ),
+        NodeKind::Image(img) => {
+            render_image(node, img, ctx, rect.unwrap_or_else(fallback_rect), layouts)
+        }
         NodeKind::Custom { type_name, props } => {
             // Custom renderers may read state that lives outside the tree
             // (#229 — see the module docs): poison this subtree for caching
@@ -1242,6 +1248,60 @@ fn render_text_field(
         node: node.id,
         rect,
     });
+}
+
+/// Renders [`mkui_runtime::NodeKind::Image`] (#196): maps the tree's
+/// source/format tags onto this crate's own [`ImageSource`]/[`ImageEncoding`]
+/// (the same "renderer keeps its own copy, this function is the boundary"
+/// shape [`map_button_variant`] already establishes for `ButtonVariant`) and
+/// delegates to [`crate::components::image`] for the fit/clip math and
+/// primitive push. Not interactive — no [`HitTestEntry`], unlike
+/// `render_button`.
+fn render_image(
+    node: &mkui_runtime::Node,
+    img: &mkui_runtime::ImageProps,
+    ctx: &mut WgpuRenderCtx<'_>,
+    rect: Rect,
+    layouts: &mut Vec<NodeLayout>,
+) {
+    let source = match &img.source {
+        RuntimeImageSource::Texture(handle) => ImageSource::Host(handle.0),
+        RuntimeImageSource::Encoded { format, bytes } => ImageSource::Encoded {
+            encoding: match format {
+                ImageFormat::Png => ImageEncoding::Png,
+                ImageFormat::WebP => ImageEncoding::WebP,
+                // ImageFormat is `#[non_exhaustive]`; #196 is the only
+                // producer of a tree-stored `Image` node and never yields
+                // anything else.
+                _ => ImageEncoding::Png,
+            },
+            bytes: std::sync::Arc::from(bytes.as_slice()),
+            cache_key: pack_node_id(node.id),
+        },
+    };
+    render_image_primitive(
+        ctx.scene,
+        rect,
+        Size::new(img.width as f32, img.height as f32),
+        img.fit,
+        source,
+        ctx.theme.image(),
+    );
+
+    layouts.push(NodeLayout {
+        node: node.id,
+        rect,
+    });
+}
+
+/// Pack a [`mkui_runtime::NodeId`]'s `(index, generation)` into one `u64` —
+/// the texture cache key [`crate::render::Renderer`] keys its
+/// decoded-bytes-upload cache on (#196). Stable across frames for a given
+/// node (nothing in this issue mutates an already-built `Image` node's
+/// source) and distinct from whatever a *different* node — including a
+/// slot the arena recycled, which bumps `generation` — would produce.
+fn pack_node_id(id: mkui_runtime::NodeId) -> u64 {
+    (u64::from(id.index()) << 32) | u64::from(id.generation())
 }
 
 /// Sub-pixel (below rendering precision) inset applied to each padding

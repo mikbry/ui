@@ -37,7 +37,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use mkui_runtime::{AppTree, ButtonVariant, NodeId, NodeKind, RuntimeSignal};
+use mkui_runtime::{
+    AppTree, ButtonVariant, ImageFit, ImageFormat, ImageSource, NodeId, NodeKind, RuntimeSignal,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element};
@@ -232,6 +234,7 @@ fn render_node(
         }
         NodeKind::Button(b) => render_button(tree, node, b, document, owner)?,
         NodeKind::TextField(f) => render_text_field(node, f, document, owner)?,
+        NodeKind::Image(img) => render_image(node, img, document)?,
         NodeKind::Custom { type_name, props } => {
             // Custom renderers are responsible for their own children; we
             // do not recurse automatically because a Custom may want to
@@ -504,6 +507,99 @@ fn render_text_field(
     Ok(input.into())
 }
 
+/// Renders an `Image` node (#196).
+///
+/// [`ImageSource::Encoded`] gets the "native `<img>`" half of the issue's
+/// web option: the bytes mkui-core already decoded once (to validate them
+/// and recover `width`/`height`) are handed to the browser's *own* decoder
+/// as a `data:` URI, so mkui-web never re-decodes or re-encodes anything.
+/// [`ImageSource::Texture`] has no web equivalent — a host's GPU texture
+/// handle names a resource this backend cannot see — so it renders as the
+/// documented placeholder `styles.css`/`DEFAULT_COMPONENT_CSS` style under
+/// `.image-texture-placeholder`.
+fn render_image(
+    node: &mkui_runtime::Node,
+    img: &mkui_runtime::ImageProps,
+    document: &Document,
+) -> Result<Element, JsValue> {
+    let fit_class = match img.fit {
+        ImageFit::Contain => "image-contain",
+        ImageFit::Cover => "image-cover",
+        // ImageFit is `#[non_exhaustive]`; fall back to the non-cropping default.
+        _ => "image-contain",
+    };
+
+    match &img.source {
+        ImageSource::Encoded { format, bytes } => {
+            let el = document.create_element("img")?;
+            let class = if node.class.raw().is_empty() {
+                format!("image {fit_class}")
+            } else {
+                format!("image {fit_class} {}", node.class.raw())
+            };
+            el.set_class_name(&class);
+            let mime = match format {
+                ImageFormat::Png => "image/png",
+                ImageFormat::WebP => "image/webp",
+                // ImageFormat is `#[non_exhaustive]`; #196 scopes decoding
+                // to exactly these two, so `sniff_format` never yields
+                // anything else for bytes that made it into the tree.
+                _ => "application/octet-stream",
+            };
+            el.set_attribute(
+                "src",
+                &format!("data:{mime};base64,{}", base64_encode(bytes)),
+            )?;
+            el.set_attribute("width", &img.width.to_string())?;
+            el.set_attribute("height", &img.height.to_string())?;
+            Ok(el)
+        }
+        ImageSource::Texture(_) => {
+            let el = document.create_element("div")?;
+            let class = if node.class.raw().is_empty() {
+                "image-texture-placeholder".to_string()
+            } else {
+                format!("image-texture-placeholder {}", node.class.raw())
+            };
+            el.set_class_name(&class);
+            el.set_text_content(Some(&format!(
+                "[gpu texture image {}x{}]",
+                img.width, img.height
+            )));
+            Ok(el)
+        }
+    }
+}
+
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Hand-rolled base64 (RFC 4648 standard alphabet, `=` padding) — #196
+/// deliberately avoids a `base64` crate dependency for one `data:` URI
+/// call site.
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (b0 as u32) << 16 | (b1 as u32) << 8 | b2 as u32;
+        out.push(BASE64_ALPHABET[((n >> 18) & 0x3F) as usize] as char);
+        out.push(BASE64_ALPHABET[((n >> 12) & 0x3F) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +653,31 @@ mod tests {
         assert_eq!(utf16_offset_to_byte_offset(s, 0), 0);
         assert_eq!(utf16_offset_to_byte_offset(s, 1), 4);
         assert_eq!(utf16_offset_to_byte_offset(s, 2), 4);
+    }
+
+    #[test]
+    fn base64_encode_matches_known_vectors() {
+        // RFC 4648 §10 test vectors.
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_encode_handles_arbitrary_binary_bytes() {
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        let encoded = base64_encode(&bytes);
+        // No crate to decode against here, but length + alphabet are a
+        // meaningful structural check: 256 bytes -> ceil(256/3)*4 chars,
+        // and only the standard alphabet (plus trailing '=' padding) appears.
+        assert_eq!(encoded.len(), bytes.len().div_ceil(3) * 4);
+        assert!(encoded
+            .trim_end_matches('=')
+            .chars()
+            .all(|c| BASE64_ALPHABET.contains(&(c as u8))));
     }
 }

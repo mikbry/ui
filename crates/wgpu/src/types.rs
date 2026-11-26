@@ -145,12 +145,65 @@ pub struct Icon {
     pub tint: Color,
 }
 
+/// Which format [`ImageSource::Encoded`]'s bytes are in — a wgpu-local
+/// mirror of `mkui_runtime::ImageFormat`, the same "renderer keeps its own
+/// copy of the tag, `walker.rs` maps between them" shape
+/// `theme::ButtonVariant`/`mkui_runtime::ButtonVariant` already establishes
+/// (#196).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageEncoding {
+    Png,
+    WebP,
+}
+
+/// Where an [`Primitive::Image`]'s pixels come from, resolved to what this
+/// crate's renderer needs to draw it — mirrors `mkui_runtime::ImageSource`
+/// without depending on that crate's type directly (#196).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImageSource {
+    /// A GPU texture a host already registered via
+    /// `Renderer::register_texture`/`EmbeddedRenderer::register_texture`,
+    /// identified by the handle it returned.
+    Host(u64),
+    /// Still-encoded PNG/WebP bytes (decoded, and the resulting texture
+    /// cached, at draw time). `cache_key` identifies the tree node these
+    /// bytes came from — stable across frames, since nothing in this issue
+    /// mutates an already-built `Image` node's source — so the renderer's
+    /// texture cache uploads an unchanged node's pixels at most once.
+    Encoded {
+        encoding: ImageEncoding,
+        bytes: std::sync::Arc<[u8]>,
+        cache_key: u64,
+    },
+}
+
+/// A placed `Image` primitive (#196): `rect` is the laid-out box (what the
+/// rounded-corner clip clips to); `uv_min`/`uv_max` already encode the
+/// contain/cover fit decision (computed by [`crate::components::fit_uv`])
+/// — sampling `rect`'s full area with this UV range reproduces the fit,
+/// including `Contain`'s letterbox (a UV coordinate outside `[0, 1]`
+/// renders transparent rather than clamping to the edge pixel).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImage {
+    pub rect: Rect,
+    pub uv_min: [f32; 2],
+    pub uv_max: [f32; 2],
+    pub corner_radii: CornerRadii,
+    pub source: ImageSource,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Primitive {
     Shadow(Shadow),
     Quad(Quad),
     Text(Text),
     Icon(Icon),
+    /// GPU-texture or decoded-bytes image content (#196), drawn through its
+    /// own textured-quad pipeline — see `render::build_image_pipeline` and
+    /// `image.wgsl`. Not feature-gated: texture sampling has no
+    /// vector-pipeline dependency, just a dedicated GPU pipeline, the same
+    /// unconditional shape [`Primitive::Backdrop`] already has.
+    Image(PlacedImage),
     /// A real backdrop-blur sample (#187). Not feature-gated (unlike
     /// `SlugGlyph`/`VectorPath` below) — glass chrome has no vector-pipeline
     /// dependency, just a dedicated GPU pass. See [`Backdrop`].
@@ -667,6 +720,10 @@ impl Scene {
 
     pub fn icon(&mut self, icon: Icon) {
         self.push(Primitive::Icon(icon));
+    }
+
+    pub fn image(&mut self, image: PlacedImage) {
+        self.push(Primitive::Image(image));
     }
 
     /// Record a Slug vector glyph (#66) at its scene position. The glyph draws

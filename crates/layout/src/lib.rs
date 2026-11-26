@@ -464,4 +464,101 @@ mod tests {
         let heading = result.get(showcase.hero_heading).unwrap();
         assert!(heading.size.width > 0.0 && heading.size.height > 0.0);
     }
+
+    #[test]
+    fn image_leaf_takes_its_intrinsic_size_without_flex_grow() {
+        // #196: an `Image` with no `flex-1` gets exactly its own
+        // intrinsic width/height as its final box — `avail_width` for a
+        // non-growing Row child equals its natural width (see
+        // `layout_row_children`'s basis-then-distribute shape), so this
+        // is the common case, not a special one.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "flex").unwrap();
+        let image = tree
+            .push_image(
+                row,
+                mkui_runtime::ImageSource::Texture(mkui_runtime::TextureHandle(1)),
+                mkui_runtime::ImageFit::Cover,
+                40,
+                20,
+                "",
+            )
+            .unwrap();
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(400.0, 300.0), &measure);
+        let rect = result.get(image).unwrap();
+        assert_eq!(rect.size.width, 40.0);
+        assert_eq!(rect.size.height, 20.0);
+    }
+
+    #[test]
+    fn flex_grow_image_fills_the_rows_free_width_but_keeps_its_intrinsic_height() {
+        // #196: `flex-1` is the (only) mechanism that gives an `Image`'s
+        // box a different aspect ratio than its own intrinsic one — the
+        // exact scenario `ImageFit::Contain`/`Cover` exist to handle.
+        // `layout_subtree`'s `Image` arm uses `avail_width` (the row's
+        // already-distributed per-child budget) for width while keeping
+        // the intrinsic height, so growing past the 40px natural width
+        // must not also grow the 20px height.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "flex").unwrap();
+        let image = tree
+            .push_image(
+                row,
+                mkui_runtime::ImageSource::Texture(mkui_runtime::TextureHandle(1)),
+                mkui_runtime::ImageFit::Contain,
+                40,
+                20,
+                "flex-1",
+            )
+            .unwrap();
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(400.0, 300.0), &measure);
+        let rect = result.get(image).unwrap();
+        assert!(
+            rect.size.width > 40.0,
+            "flex-1 must grow past the intrinsic width, got {}",
+            rect.size.width
+        );
+        assert_eq!(
+            rect.size.height, 20.0,
+            "height stays the image's own intrinsic height"
+        );
+    }
+
+    #[test]
+    fn image_without_flex_grow_keeps_its_intrinsic_width_under_a_stretch_aligned_column() {
+        // Regression: a `Column`'s default `Align::Stretch` hands *every*
+        // child the full `inner_width` as `avail_width` regardless of
+        // child kind (see `layout_column_children`) — without the
+        // `flex_grow` gate in the `Image` arm, a plain `Image` dropped
+        // into an ordinary column (no `flex-1`) would silently stretch to
+        // the column's full width instead of staying at its own 40px
+        // intrinsic size.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let column = tree.push_view(root, "").unwrap(); // default direction is Column
+        let image = tree
+            .push_image(
+                column,
+                mkui_runtime::ImageSource::Texture(mkui_runtime::TextureHandle(1)),
+                mkui_runtime::ImageFit::Cover,
+                40,
+                20,
+                "",
+            )
+            .unwrap();
+        let measure = FakeMeasure::new();
+        // A viewport far wider than the 40px intrinsic width, so a bug
+        // that stretches to `inner_width` is unmistakable.
+        let result = compute_layout(&tree, Size::new(400.0, 300.0), &measure);
+        let rect = result.get(image).unwrap();
+        assert_eq!(
+            rect.size.width, 40.0,
+            "an Image with no flex-1 must keep its intrinsic width even under a stretch column"
+        );
+        assert_eq!(rect.size.height, 20.0);
+    }
 }

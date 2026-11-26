@@ -101,6 +101,11 @@ pub fn tessellate_primitives(
             // tessellated to triangles either.
             #[cfg(feature = "slug")]
             Primitive::VectorPath(_) => {}
+            // `Image` (#196) draws on its own textured-quad pipeline
+            // (`render::build_image_pipeline`), not tessellated to
+            // triangles — same "own dedicated GPU pass" shape as
+            // `Backdrop` above.
+            Primitive::Image(_) => {}
         }
     }
     triangles

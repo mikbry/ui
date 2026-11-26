@@ -448,6 +448,42 @@ impl WgpuApp {
         self.headless
     }
 
+    /// Borrow the live [`Renderer`] (#196), e.g. to read [`Renderer::device`]/
+    /// [`Renderer::queue`] when building a GPU texture to hand to
+    /// [`WgpuApp::register_texture`]. `None` until winit's `resumed` event
+    /// has actually created one (and always `None` under `HEADLESS=1`,
+    /// which exits before that point) — a host checks this before trying
+    /// to register anything.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn renderer(&self) -> Option<&Renderer> {
+        self.state.as_ref().map(|s| &s.renderer)
+    }
+
+    /// Register a GPU texture the host already created on this app's own
+    /// [`WgpuApp::renderer`] device/queue — "already in VRAM" (#196) —
+    /// returning the handle an `mkui_core::components::Image::from_texture`
+    /// call embeds into the tree. `None` if the renderer does not exist
+    /// yet (see [`WgpuApp::renderer`]'s docs).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn register_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+    ) -> Option<mkui_runtime::TextureHandle> {
+        self.state
+            .as_mut()
+            .map(|s| s.renderer.register_texture(view))
+    }
+
+    /// Drop a previously-registered texture's bind group — a no-op if the
+    /// renderer does not exist (see [`WgpuApp::renderer`]'s docs) or
+    /// `handle` was never registered.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn unregister_texture(&mut self, handle: mkui_runtime::TextureHandle) {
+        if let Some(state) = self.state.as_mut() {
+            state.renderer.unregister_texture(handle);
+        }
+    }
+
     /// Pull the runtime tree's `is_dirty` state, rebuild the scene from
     /// it via the walker, and clear the dirty flag. No-op when the app
     /// is in scene-only mode (the legacy `with_scene` path).
@@ -1379,6 +1415,51 @@ mod tests {
         let app = WgpuApp::new(scene);
         assert_eq!(app.scene().viewport, Size::new(640.0, 480.0));
         assert!(app.core().is_none(), "scene-only constructor has no core");
+    }
+
+    #[test]
+    fn texture_registration_is_unavailable_before_resumed_creates_a_renderer() {
+        // #196: `renderer()`/`register_texture` are `None`/no-op until
+        // winit's `resumed` event has actually created the live
+        // `Renderer` — this test exercises the only part of that contract
+        // reachable without a real window (a unit test cannot drive a
+        // winit event loop); the registration logic itself is exercised
+        // on real GPU hardware by `render::image_gpu`.
+        let mut app = WgpuApp::new(Scene::new(Size::new(640.0, 480.0)));
+        assert!(app.renderer().is_none());
+
+        let device_descriptor = crate::render::device_descriptor();
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()));
+        let Ok(adapter) = adapter else {
+            eprintln!("skipping: no GPU adapter available in this test environment");
+            return;
+        };
+        let Ok((device, _queue)) = pollster::block_on(adapter.request_device(&device_descriptor))
+        else {
+            return;
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        assert!(
+            app.register_texture(&view).is_none(),
+            "registering against a renderer-less app must return None, not panic"
+        );
+        app.unregister_texture(mkui_runtime::TextureHandle(1)); // must not panic either
     }
 
     #[test]
