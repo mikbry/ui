@@ -5,6 +5,21 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Slug promoted to the default text-rendering lane (#330, mirroring #311's
+# native-showcase default): a plain `cargo run -p component-gallery
+# --release` renders component text through the Slug lane with no extra
+# flags. `--no-default-features --features wgpu` is the bitmap-fallback
+# opt-out path.
+default = ["wgpu", "slug"]
+wgpu = ["showcase-common/wgpu", "mkui/wgpu"]
+slug = ["showcase-common/slug", "mkui/slug"]
+
 [dependencies]
-showcase-common = { path = "../showcase-common", features = ["wgpu"] }
-mkui = { path = "../../crates/mkui", features = ["wgpu"] }
+# `default-features = false` on both: showcase-common and mkui each default
+# to `slug`-on. Pinning it here is what makes this crate's own
+# `default`/`slug` features above the actual source of truth, so
+# `--no-default-features --features wgpu` really does suppress Slug instead
+# of it leaking back in through either dependency's own default.
+showcase-common = { path = "../showcase-common", default-features = false }
+mkui = { path = "../../crates/mkui", default-features = false }

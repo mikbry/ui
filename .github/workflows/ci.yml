@@ -594,8 +594,28 @@ jobs:
             ${{ runner.os }}-cargo-mkui-examples-
       - name: Build console-showcase (console backend)
         run: cargo build -p console-showcase --locked
-      - name: Build component-gallery (wgpu backend, #310)
+      - name: Build component-gallery (wgpu backend, Slug default, #310/#330)
         run: cargo build -p component-gallery --locked
+      # Slug promoted to component-gallery's own default (#330, mirroring
+      # #311's native-showcase treatment): keeps the explicit
+      # bitmap-fallback opt-out path from silently rotting now that
+      # nothing hits it by accident.
+      - name: Build component-gallery (wgpu backend, --no-default-features)
+        run: cargo build -p component-gallery --no-default-features --features wgpu --locked
+      - name: Assert component-gallery default resolves the Slug lane ON
+        run: |
+          set -euo pipefail
+          if ! cargo tree -p component-gallery --locked | grep -q 'mkui-vector2d-wgpu'; then
+            echo "::error::component-gallery's default build no longer resolves mkui-wgpu's slug feature — mkui-vector2d-wgpu missing from the graph (#330 regressed)"
+            exit 1
+          fi
+      - name: Assert component-gallery --no-default-features resolves the Slug lane OFF
+        run: |
+          set -euo pipefail
+          if cargo tree -p component-gallery --no-default-features --features wgpu --locked | grep -q 'mkui-vector2d-wgpu'; then
+            echo "::error::slug leaked into component-gallery's --no-default-features --features wgpu build (bitmap opt-out path broken)"
+            exit 1
+          fi
       - name: Build native-showcase (wgpu backend, Slug default)
         run: cargo build -p native-showcase --locked
       # Slug promoted to native-showcase's own default (#311): keeps the

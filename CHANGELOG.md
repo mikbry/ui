@@ -464,6 +464,25 @@ breaking changes can land on minor bumps).
   accidental-leak bug this PR fixes at the bridge layer — tracked
   separately as #323, out of scope here). ADR 0007 amended with the dated
   rationale.
+- **`examples/component-gallery` now actually selects a Slug font before
+  `.run()`, closing the same gap #311 closed for `native-showcase` (#330).**
+  `component-gallery` already compiled with `slug` on at build time (it
+  depends on `showcase-common`, which default-enables `slug`), but its
+  `main.rs` still called the plain `mkui::run!(create_gallery_ui, wgpu)`
+  macro with no seam to call `Mkui::with_slug_font` in between, so it
+  rendered bitmap text at runtime regardless. `component-gallery` gains its
+  own `slug`/`wgpu` `[features]` table (default-on, mirroring
+  `native-showcase`'s, with `default-features = false` pinned on both its
+  `showcase-common` and `mkui` dependencies) so `--no-default-features
+  --features wgpu` is a real bitmap-fallback opt-out here too; `main.rs` is
+  expanded by hand (`run!`'s own `wgpu` arm, with the Slug font-selection
+  step inserted) to embed the same per-example Abel fixture
+  `native-showcase` uses and call `.with_slug_font(text_system, font_id)`
+  before `.run()`. CI-verified the same way as #311/#324: a dedicated
+  `mkui-examples` job step builds the `--no-default-features --features
+  wgpu` leg, and two `cargo tree` assertions confirm `mkui-vector2d-wgpu`
+  (the Slug GPU-resource crate) is present in the default build's resolved
+  graph and absent from the opt-out build's.
 
 ### Added
 - **New crate `mkui-hud` — second-class, host-reusable HUD plumbing

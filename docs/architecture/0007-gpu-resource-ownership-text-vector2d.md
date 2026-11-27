@@ -182,6 +182,23 @@ to the GPU backend choice.
   `with_slug_font` either, so it stays on the bitmap lane despite also
   building with `slug` on by default; wiring it the same ~5-line way is
   deferred to [#330](https://github.com/mikbry/ui/issues/330).
+- **The `component-gallery` gap above was closed on 2026-11-27 (#330).**
+  `examples/component-gallery/src/main.rs` is now `run!`'s own `wgpu` arm,
+  expanded by hand the same way `native-showcase`'s was for #311: it embeds
+  the same per-example Abel fixture and calls `.with_slug_font(text_system,
+  font_id)` on the `Mkui` `create_gallery_ui()` returns, before `.run()`.
+  Unlike `native-showcase`, `component-gallery` had no `[features]` table
+  of its own at all before this change — it only built with `slug` on
+  because its `showcase-common`/`mkui` dependencies defaulted it on, which
+  is enough to pull `mkui-vector2d-wgpu` into the dependency graph but not
+  enough for `#[cfg(feature = "slug")]` to gate anything in
+  `component-gallery`'s own `main.rs` (a crate's `cfg(feature = ...)` only
+  sees its own declared features, never a dependency's). `component-gallery`
+  therefore gains the same `default = ["wgpu", "slug"]` feature table and
+  `default-features = false` dependency pins #324 gave `native-showcase`, so
+  `cargo run -p component-gallery --release` renders Slug text with no
+  extra flags and `--no-default-features --features wgpu` is a real,
+  CI-verified bitmap opt-out here too.
 
 ### Ordered render-command semantics
 
