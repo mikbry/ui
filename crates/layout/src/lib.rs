@@ -808,6 +808,110 @@ mod tests {
     }
 
     #[test]
+    fn row_children_floor_at_min_content_width_instead_of_collapsing_further() {
+        // #338: mirrors #328's column (height) floor fix for the row
+        // (width) axis. Two `View` children, each wrapping `Text` with two
+        // whitespace-separated words of very different lengths, laid out
+        // in a Row narrower than even their *combined* min-content width
+        // (each child's longer word). Before this fix, `layout_row_children`
+        // shrank with a flat zero floor, so both children would keep
+        // shrinking past the point their longest word could still fit; the
+        // fix's contract: a `View` child's row-axis floor is its own
+        // min-content width, so it never shrinks narrower than that, and
+        // any further shortfall surfaces as genuine overflow past the
+        // Row's own box instead.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "flex").unwrap();
+
+        let first = tree.push_view(row, "").unwrap();
+        // Natural (unwrapped) width: 13 chars * 8px = 104px. Min-content
+        // width: the longer word, "AAAAAAAAAA" (10 chars) = 80px.
+        tree.push_text(first, "AAAAAAAAAA BB", TextVariant::Body, "")
+            .unwrap();
+        let second = tree.push_view(row, "").unwrap();
+        // Natural width: 20 chars * 8px = 160px. Min-content width: the
+        // longer word, "DDDDDDDDDDDDDDDD" (16 chars) = 128px.
+        tree.push_text(second, "CCC DDDDDDDDDDDDDDDD", TextVariant::Body, "")
+            .unwrap();
+
+        let measure = FakeMeasure::new();
+        // Narrower than the combined min-content width (80 + 128 = 208px),
+        // so both children are forced all the way down to their own floors.
+        let result = compute_layout(&tree, Size::new(150.0, 100.0), &measure);
+
+        let first_rect = result.get(first).unwrap();
+        let second_rect = result.get(second).unwrap();
+
+        assert!(
+            (first_rect.size.width - 80.0).abs() < 0.01,
+            "expected the first child to floor at its min-content width (80px), got {}",
+            first_rect.size.width
+        );
+        assert!(
+            (second_rect.size.width - 128.0).abs() < 0.01,
+            "expected the second child to floor at its min-content width (128px), got {}",
+            second_rect.size.width
+        );
+
+        // Sanity: the floors together (208px) already exceed the 150px
+        // Row budget — without them, the old zero floor would have let
+        // both children keep shrinking proportionally to fit inside it.
+        assert!(first_rect.size.width + second_rect.size.width > 150.0);
+    }
+
+    #[test]
+    fn row_min_content_width_of_a_wrapping_child_is_its_widest_item_not_the_sum() {
+        // #338 follow-up: a `flex-wrap` row's own min-content contribution
+        // is bounded by its single widest child, not the sum of every
+        // child's — a line break can fall between any two items, so
+        // everything but the widest one can always drop onto its own
+        // line. Getting this wrong (treating a wrapping row the same as a
+        // non-wrapping one, i.e. summing) would make `button_row` below
+        // floor at its full unwrapped width (88 + gap-4 (16px) + 72 = 176px)
+        // and never shrink at all — worse than the pre-#338 zero floor,
+        // which let it shrink and still wrap correctly.
+        //
+        // `button_row` ("Primary" 88px + "Ghost" 72px via the fake
+        // measurer's button padding) sits inside an outer Row squeezed to
+        // 60px — narrower than even `button_row`'s correct 88px floor (its
+        // widest single button), so `button_row` must bottom out at 88px
+        // (not 176px), and its buttons must still wrap onto separate lines
+        // at that width.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "flex").unwrap();
+        let button_row = tree.push_view(row, "flex flex-wrap gap-4").unwrap();
+        let primary = tree
+            .push_button(button_row, "Primary", ButtonVariant::Primary, "", None)
+            .unwrap();
+        let ghost = tree
+            .push_button(button_row, "Ghost", ButtonVariant::Ghost, "", None)
+            .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(60.0, 100.0), &measure);
+
+        let button_row_rect = result.get(button_row).unwrap();
+        assert!(
+            (button_row_rect.size.width - 88.0).abs() < 0.01,
+            "expected button_row to floor at its widest child's width (88px), not \
+             its full unwrapped sum (176px) or shrink past it: got {}",
+            button_row_rect.size.width
+        );
+
+        let primary_rect = result.get(primary).unwrap();
+        let ghost_rect = result.get(ghost).unwrap();
+        assert!(
+            ghost_rect.origin.y > primary_rect.origin.y,
+            "the two buttons must still wrap onto separate lines at the floored \
+             width: Primary top {} vs Ghost top {}",
+            primary_rect.origin.y,
+            ghost_rect.origin.y
+        );
+    }
+
+    #[test]
     fn scroll_area_box_clamps_to_the_viewport_while_its_child_keeps_its_natural_height() {
         // #328: a `ScrollArea` wrapping content taller than the viewport
         // must still report its own box at the viewport's height (so a
