@@ -36,6 +36,13 @@
 //! height" in CSS) — so a Column container's basis pass is a full
 //! `layout_container` call with `avail_height: None`.
 //!
+//! `min_content_width` (#338) is `natural_width`'s other sibling: the width
+//! at which the widest unbreakable run of content — a whitespace-separated
+//! word, for `Text` — still fits, narrower than max-content whenever text
+//! is involved. It exists purely to give `layout_row_children`'s shrink
+//! pass a non-zero floor (the row/width analogue of #328's column/height
+//! natural-height floor), never to size anything's basis.
+//!
 //! ## Named tolerances and gaps (per issue #63's "own the stack" discipline)
 //!
 //! - **`flex-shrink` only ever shrinks `View`/`Card`/`ScrollArea`
@@ -49,7 +56,11 @@
 //!   **column** (height) axis specifically, a plain `View`/`Card`'s
 //!   floor is its own natural height (#328) — it never actually shrinks
 //!   there, so in practice only a `ScrollArea` (floor `0.0`) absorbs
-//!   column shrink at all; see `distribute_main_axis`'s doc comment.
+//!   column shrink at all; see `distribute_main_axis`'s doc comment. On
+//!   the **row** (width) axis, a plain `View`/`Card`'s floor is its own
+//!   min-content width (#338, `min_content_width`) — it can still shrink,
+//!   just never narrower than its widest unbreakable content run — with
+//!   the same `ScrollArea` (floor `0.0`) exception as the column axis.
 //! - **`align-items: stretch` is a no-op on `Text`/`Button`/`Custom`
 //!   leaves.** Only a `View`/`Root` child is re-measured at the line's/
 //!   column's cross size; a leaf's content box can't stretch without
@@ -107,6 +118,22 @@ const TAILWIND_UNIT_PX: f32 = 4.0;
 /// token with a numeric max-width today; `min`/`max` clamping in this
 /// engine is otherwise generic (see the module docs).
 const MAX_W_4XL_PX: f32 = 896.0;
+
+/// A `TextField`'s row-axis min-content floor (#342 review follow-up to
+/// #338). Unlike `Text`/`Button`, a `TextField` is a viewport onto its
+/// value, not an atomic token — `measure_text_field`'s own doc comment
+/// (`crate::measure::LeafMeasure::measure_text_field`) confirms it fills
+/// exactly whatever width it's asked for, same as a real `<input>`, with
+/// no dependency on `value`/`placeholder` once a width is given. So its
+/// min-content width must not be its full (potentially very long) value's
+/// width the way `min_content_width`'s other leaf arms use their own
+/// max-content size — that would make a `TextField` refuse to shrink at
+/// all, pushing siblings out of a Row that would otherwise fit. A small
+/// fixed floor (enough for a handful of characters, matching
+/// `mkui-wgpu/src/walker.rs`'s `BUTTON_MIN_WIDTH_PX`'s role for buttons)
+/// keeps the field visible and usable without holding a Row hostage to
+/// one field's content length.
+const TEXT_FIELD_MIN_WIDTH_PX: f32 = 64.0;
 
 /// The output of [`crate::compute_layout`]: absolute border-box rects keyed
 /// by [`NodeId`]. A hidden subtree (`resolved.hidden`), and any subtree
@@ -319,10 +346,12 @@ fn is_container(tree: &AppTree, id: NodeId) -> bool {
 }
 
 /// Whether `id` is a `ScrollArea` (#328) — the one container kind whose
-/// column-shrink floor is zero rather than its own natural height (see
-/// [`ChildPlan::shrink_to_zero`] and [`layout_column_children`]): it exists
-/// specifically to absorb overflow its box can't fit, not to protect its
-/// content's minimum size the way a plain `View`/`Card` does.
+/// shrink floor is zero rather than its own natural height on the column
+/// axis, or its own min-content width on the row axis (#338; see
+/// [`ChildPlan::shrink_to_zero`], [`layout_column_children`] and
+/// [`layout_row_children`]): it exists specifically to absorb overflow its
+/// box can't fit, not to protect its content's minimum size the way a plain
+/// `View`/`Card` does.
 fn is_scroll_area(tree: &AppTree, id: NodeId) -> bool {
     matches!(tree.get(id).map(|n| &n.kind), Some(NodeKind::ScrollArea(_)))
 }
@@ -414,6 +443,100 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
         // node itself (the decoded header's dimensions, or whatever the
         // host supplied alongside its texture handle) — unlike
         // `Text`/`Button` it needs no `LeafMeasure` callback to size itself.
+        NodeKind::Image(img) => img.width as f32,
+    }
+}
+
+/// Min-content width of `id`'s subtree: the width at which the widest
+/// *unbreakable* run of content still fits — for `Text`, a single
+/// whitespace-separated word, since wrapping can break a line between
+/// words but never inside one. Used only as the row (width) axis's
+/// per-child shrink floor in `layout_row_children`'s `distribute_main_axis`
+/// call (#338) — the width analogue of a plain `View`/`Card`'s
+/// natural-height floor on the column axis (#328); never used to size a
+/// basis.
+///
+/// Mirrors [`natural_width`]'s recursion shape exactly, with three
+/// differences: the `Text` leaf case measures each word in isolation and
+/// takes the widest instead of measuring the whole (never-wrapped) string;
+/// the `Direction::Row` container case sums each child's *min-content*
+/// width rather than its max-content width (a row's own min-content width
+/// is still the sum of its children's, laid out side by side — only each
+/// child's own contribution shrinks); and `TextField` floors at
+/// [`TEXT_FIELD_MIN_WIDTH_PX`] rather than its own max-content width (see
+/// that constant's doc comment — a text field is a viewport onto its
+/// value, not an atomic token, so it can shrink much narrower than its
+/// content). Every other leaf kind (`Button`, `Custom`, `Image`) has no
+/// re-flow mechanism this engine can drive, so — same as `natural_width`
+/// — its min-content width equals its max-content width: its own
+/// intrinsic/unwrapped size.
+fn min_content_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
+    let Some(node) = tree.get(id) else {
+        return 0.0;
+    };
+    match &node.kind {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
+            let style = &node.resolved;
+            let pad_x = padding_x_px(style);
+            let kids = visible_children(tree, measure, node);
+            let inner = match direction(style) {
+                // `flex-wrap` changes a Row's own min-content contribution:
+                // with it, a line break can always fall between any two
+                // children, so the narrowest this box can get is bounded
+                // only by its single widest child (every other child drops
+                // onto its own line) — same as the Column case below, not
+                // a sum. Without it, nothing may drop to a new line, so
+                // every child's own floor adds up, same as `natural_width`.
+                Direction::Row if style.flex_wrap => kids
+                    .iter()
+                    .map(|id| min_content_width(tree, measure, *id))
+                    .fold(0.0_f32, f32::max),
+                Direction::Row => {
+                    let gap = gap_px(style, Direction::Row);
+                    let sum: f32 = kids
+                        .iter()
+                        .map(|id| min_content_width(tree, measure, *id))
+                        .sum();
+                    sum + gap * kids.len().saturating_sub(1) as f32
+                }
+                Direction::Column => kids
+                    .iter()
+                    .map(|id| min_content_width(tree, measure, *id))
+                    .fold(0.0_f32, f32::max),
+            };
+            let mut width = inner + pad_x * 2.0;
+            if style.max_w_4xl {
+                width = width.min(MAX_W_4XL_PX);
+            }
+            width
+        }
+        NodeKind::Text(t) => t
+            .content
+            .split_whitespace()
+            .map(|word| {
+                measure
+                    .measure_text(word, t.variant, &node.resolved, None)
+                    .size
+                    .width
+            })
+            .fold(0.0_f32, f32::max),
+        NodeKind::Button(b) => {
+            measure
+                .measure_button(&b.label, b.variant, &node.resolved, None)
+                .size
+                .width
+        }
+        // See `TEXT_FIELD_MIN_WIDTH_PX`'s doc comment: a text field fills
+        // whatever width it's given, so its floor is a small fixed
+        // minimum, not its (potentially much wider) value/placeholder
+        // content width.
+        NodeKind::TextField(_) => TEXT_FIELD_MIN_WIDTH_PX,
+        NodeKind::Custom { type_name, props } => {
+            measure
+                .measure_custom(type_name, props, &node.resolved, None)
+                .size
+                .width
+        }
         NodeKind::Image(img) => img.width as f32,
     }
 }
@@ -628,9 +751,11 @@ fn layout_container(
 struct ChildPlan {
     id: NodeId,
     is_view: bool,
-    /// `true` only for a `ScrollArea` child (#328): its column-shrink
-    /// floor is zero rather than its own natural height — see
-    /// `layout_column_children`'s `min_heights` computation.
+    /// `true` only for a `ScrollArea` child (#328): its shrink floor is
+    /// zero rather than its own natural height on the column axis — see
+    /// `layout_column_children`'s `min_heights` computation — or its own
+    /// min-content width on the row axis (#338) — see
+    /// `layout_row_children`'s `min_basis` computation.
     shrink_to_zero: bool,
     flex_grow: bool,
     mt_auto: bool,
@@ -663,12 +788,15 @@ fn plan_children(tree: &AppTree, measure: &dyn LeafMeasure, node: &Node) -> Vec<
 /// is called with its own natural (pre-shrink) height as its `min`, so it
 /// never shrinks at all on the column (height) axis — matching real CSS,
 /// where block height has no narrower "min-content" than the content's own
-/// height. A container designed to absorb overflow itself (e.g. a
-/// `ScrollArea`, #328) instead passes `0.0`, the same floor the row (width)
-/// axis always used. Once every shrinkable child has bottomed out at its
-/// own `min`, any further overflow is left unresolved — the caller sees it
-/// in the gap between the returned consumed amount and `free`, and that
-/// gap becomes genuine visible overflow rather than overlap.
+/// height. A plain `View`/`Card` row child is likewise called with its own
+/// min-content width (#338, `min_content_width`) as its `min` — the
+/// narrowest it can get without compressing its widest unbreakable content
+/// run (e.g. a long word) further. A container designed to absorb overflow
+/// itself (e.g. a `ScrollArea`, #328) instead passes `0.0` on either axis.
+/// Once every shrinkable child has bottomed out at its own `min`, any
+/// further overflow is left unresolved — the caller sees it in the gap
+/// between the returned consumed amount and `free`, and that gap becomes
+/// genuine visible overflow rather than overlap.
 ///
 /// Shrinking iterates: each round splits the *remaining* overflow
 /// proportionally across children that still have room (`basis[i] >
@@ -944,12 +1072,33 @@ fn layout_row_children(
         let gaps_total = gap * (line.len().saturating_sub(1)) as f32;
         let total: f32 = line_basis.iter().sum::<f32>() + gaps_total;
         let free = inner_width - total;
-        // Row (width) shrink keeps its pre-existing floor of zero: unlike
-        // column/height (see `layout_column_children`'s call), there is no
-        // minimum-content-width concept in this engine yet (`natural_width`
-        // is max-content/shrink-to-fit, not min-content) — deferred, #328.
-        let zero_floor = vec![0.0_f32; line_basis.len()];
-        distribute_main_axis(&line_plans, &mut line_basis, &zero_floor, free);
+        // Row (width) shrink floor (#338): a plain `View`/`Card` child
+        // never shrinks narrower than its own min-content width — the
+        // width its widest unbreakable content run (e.g. a long word)
+        // still needs — same exception for a `ScrollArea` child (floor
+        // `0.0`, it exists to absorb overflow rather than protect a
+        // minimum size) as the column (height) axis already has in
+        // `layout_column_children`. `min_content_width` is a full
+        // recursive subtree walk (one `measure_text` call per word), so
+        // it's computed only when this line is actually shrinking
+        // (`distribute_main_axis`'s grow/no-op branches never read `min`
+        // at all) rather than unconditionally like `basis` above, which
+        // every line needs just to know whether `free` is negative.
+        let line_min: Vec<f32> = if free < 0.0 {
+            line.iter()
+                .map(|&i| {
+                    let p = &plans[i];
+                    if p.shrink_to_zero {
+                        0.0
+                    } else {
+                        min_content_width(tree, measure, p.id)
+                    }
+                })
+                .collect()
+        } else {
+            vec![0.0_f32; line.len()]
+        };
+        distribute_main_axis(&line_plans, &mut line_basis, &line_min, free);
 
         let mut line_computed: Vec<ComputedNode> = line_plans
             .iter()
