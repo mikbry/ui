@@ -429,12 +429,39 @@ fn layout_subtree(
     avail_width: f32,
     avail_height: Option<f32>,
 ) -> ComputedNode {
+    layout_subtree_inner(tree, measure, id, avail_width, avail_height, false)
+}
+
+/// Like `layout_subtree`, but when `force_height` is true and
+/// `avail_height` is `Some`, it wins outright over this node's own
+/// explicit `h-*` class — used only by `layout_column_children`'s
+/// re-resolve pass (#341), where `avail_height` is not an ambient budget
+/// the child may ignore but the parent's flex algorithm's own already-
+/// final decision for this child's main size.
+fn layout_subtree_forced_height(
+    tree: &AppTree,
+    measure: &dyn LeafMeasure,
+    id: NodeId,
+    avail_width: f32,
+    height: f32,
+) -> ComputedNode {
+    layout_subtree_inner(tree, measure, id, avail_width, Some(height), true)
+}
+
+fn layout_subtree_inner(
+    tree: &AppTree,
+    measure: &dyn LeafMeasure,
+    id: NodeId,
+    avail_width: f32,
+    avail_height: Option<f32>,
+    force_height: bool,
+) -> ComputedNode {
     let Some(node) = tree.get(id) else {
         return ComputedNode::leaf(Size::ZERO);
     };
     match &node.kind {
         NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
-            layout_container(tree, measure, node, avail_width, avail_height)
+            layout_container(tree, measure, node, avail_width, avail_height, force_height)
         }
         NodeKind::Text(t) => {
             let m = measure.measure_text(
@@ -508,6 +535,7 @@ fn layout_container(
     node: &Node,
     avail_width: f32,
     avail_height: Option<f32>,
+    force_height: bool,
 ) -> ComputedNode {
     let style = &node.resolved;
     let pad_x = padding_x_px(style);
@@ -523,12 +551,23 @@ fn layout_container(
     // explicit `h-*` wins outright; `h-auto` opts out of whatever the
     // parent offered; otherwise an inherited `avail_height` (this node is
     // itself a `flex-grow` target, or the root call) passes through.
+    //
+    // `force_height` (#341) is the one exception: the caller — only
+    // `layout_column_children`'s re-resolve pass — has already decided
+    // this node's final main size via its own flex algorithm, so
+    // `avail_height` must win outright over `explicit` instead of the
+    // other way around; everything downstream (the budget this box hands
+    // its own children below) then derives from that forced size too.
     let explicit = explicit_height_px(style);
-    let definite_target = explicit.or(if style.height_auto {
-        None
-    } else {
+    let definite_target = if force_height {
         avail_height
-    });
+    } else {
+        explicit.or(if style.height_auto {
+            None
+        } else {
+            avail_height
+        })
+    };
 
     let dir = direction(style);
     let (mut children, content_height) = match dir {
@@ -764,25 +803,27 @@ fn layout_column_children(
         // `heights[i]` is this column's own authoritative decision for
         // the child's final main-size (grown or shrunk by
         // `distribute_main_axis` above) — it must win outright over
-        // whatever `layout_subtree`'s own internal precedence (an
-        // explicit `h-*` on the child always wins there, since from a
-        // single call's perspective it has no way to distinguish "an
-        // ambient budget the parent merely offers" from "the parent's
-        // flex algorithm already decided this exact size") would
-        // otherwise report. Without forcing `.size.height` here too, a
-        // `ScrollArea.h-16` shrunk to 36px by the column above (because a
-        // sibling needed the rest of the viewport) would re-resolve back
-        // to its explicit 64px — the box renders past wherever the
-        // shrink accounting assumed it would end (#341). This is a no-op
-        // for every other case: a plain `View`/`Card` never reaches this
-        // branch at all (its floor is already its own natural height, so
-        // `heights[i]` never actually changes for it), and ordinary
-        // growth with no explicit height already has `layout_subtree`
-        // agree with `heights[i]` on its own.
+        // whatever the child's own internal precedence (an explicit
+        // `h-*` always wins there by default, since from a single call's
+        // perspective it has no way to distinguish "an ambient budget the
+        // parent merely offers" from "the parent's flex algorithm already
+        // decided this exact size") would otherwise report — not just for
+        // the child's own box, but for whatever budget that box in turn
+        // hands its own descendants (`layout_subtree_forced_height`,
+        // #341). A `ScrollArea.h-16` shrunk to 36px by the column above
+        // (because a sibling needed the rest of the viewport) must
+        // actually resolve its own box, and any `flex-1` descendant
+        // inside it, against 36px — re-deriving only the outer box's
+        // `.size.height` left a `flex-1` child inside still sized against
+        // the original 64px budget, overflowing past the corrected outer
+        // box. This is a no-op for every other case: a plain `View`/
+        // `Card` never reaches this branch at all (its floor is already
+        // its own natural height, so `heights[i]` never actually changes
+        // for it), and ordinary growth with no explicit height already
+        // has the child agree with `heights[i]` on its own.
         for (i, (plan, &w)) in plans.iter().zip(&child_widths).enumerate() {
             if (heights[i] - computed[i].size.height).abs() > f32::EPSILON {
-                computed[i] = layout_subtree(tree, measure, plan.id, w, Some(heights[i]));
-                computed[i].size.height = heights[i];
+                computed[i] = layout_subtree_forced_height(tree, measure, plan.id, w, heights[i]);
             }
         }
     }

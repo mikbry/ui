@@ -654,7 +654,20 @@ fn apply_scroll_offsets(
     layout: &mut mkui_layout::LayoutResult,
     scroll_offsets: &HashMap<NodeId, f32>,
 ) -> HashMap<NodeId, f32> {
+    // #341 round 2: a nested `ScrollArea`'s descendants are also part of
+    // its ancestor `ScrollArea`'s own subtree, so computing one
+    // `ScrollArea`'s clamp *and* applying its `translate` before moving on
+    // to the next (the original single-pass loop, iterating a `HashMap` in
+    // nondeterministic order) let one ScrollArea's shift land on rects
+    // another ScrollArea's own content-length measurement then read —
+    // silently under- or over-counting that content by the first one's
+    // offset depending on which happened to run first. Every clamp is
+    // computed here from the untranslated layout this same `compute_layout`
+    // call just produced, before any `translate` call runs, so no
+    // ScrollArea's measurement can ever see another's shift — regardless
+    // of `HashMap` iteration order.
     let mut clamped_offsets = HashMap::with_capacity(scroll_offsets.len());
+    let mut pending_shifts: Vec<(Vec<NodeId>, f32)> = Vec::with_capacity(scroll_offsets.len());
     for (&scroll_id, &raw_offset) in scroll_offsets {
         let Some(node) = tree.get(scroll_id) else {
             continue;
@@ -682,9 +695,11 @@ fn apply_scroll_offsets(
         let max_offset = (content_len - own_rect.size.height).max(0.0);
         let clamped = raw_offset.clamp(0.0, max_offset);
         clamped_offsets.insert(scroll_id, clamped);
-        if clamped == 0.0 {
-            continue;
+        if clamped != 0.0 {
+            pending_shifts.push((descendant_ids, clamped));
         }
+    }
+    for (descendant_ids, clamped) in pending_shifts {
         for descendant_id in descendant_ids {
             layout.translate(descendant_id, mkui_layout::Point::new(0.0, -clamped));
         }
@@ -2304,6 +2319,66 @@ mod tests {
             unscrolled_text_top,
             scrolled_text_top
         );
+    }
+
+    /// #341 round 2 regression: two nested `ScrollArea`s, both scrolled in
+    /// the same frame, must produce the same clamped offset for the outer
+    /// one regardless of which order `apply_scroll_offsets` happens to
+    /// visit them in (it iterates a `HashMap`, so the order is not
+    /// guaranteed). Before the fix, the inner `ScrollArea`'s `translate`
+    /// could run before the outer one's `content_len` was measured,
+    /// silently shrinking the outer's apparent content by the inner's own
+    /// offset and producing a smaller (wrong) clamp whenever that order
+    /// happened to occur.
+    #[test]
+    fn nested_scroll_areas_clamp_the_outer_offset_deterministically() {
+        let build_core = || {
+            CoreMkui::new().child(
+                ScrollArea::new().class("h-16").child(
+                    ScrollArea::new()
+                        .class("h-16")
+                        .child(CoreText::new("line one"))
+                        .child(CoreText::new("line two"))
+                        .child(CoreText::new("line three"))
+                        .child(CoreText::new("line four"))
+                        .child(CoreText::new("line five")),
+                ),
+            )
+        };
+        let sample_core = build_core();
+        let outer_id = sample_core
+            .tree()
+            .get(sample_core.tree().root())
+            .unwrap()
+            .children[0];
+        let inner_id = sample_core.tree().get(outer_id).unwrap().children[0];
+
+        // Fresh `HashMap`s (not the same instance reused) so each run gets
+        // its own randomized hasher state — and therefore, absent the fix,
+        // a real chance of a different iteration order — rather than
+        // coincidentally repeating the same order every time.
+        let mut outer_clamped: Vec<f32> = Vec::new();
+        for _ in 0..8 {
+            let core = build_core();
+            let scroll_offsets = HashMap::from([(outer_id, 50.0_f32), (inner_id, 50.0_f32)]);
+            let out = walk_with_scroll_offsets(&core, &scroll_offsets);
+            outer_clamped.push(*out.scroll_offsets.get(&outer_id).expect("outer entry"));
+        }
+
+        let first = outer_clamped[0];
+        assert!(
+            first > 0.0,
+            "the outer ScrollArea's real (nested) content must be scrollable, \
+             not clamp to zero: got {first}"
+        );
+        for (i, &value) in outer_clamped.iter().enumerate() {
+            assert!(
+                (value - first).abs() < 0.01,
+                "the outer ScrollArea's clamped offset must be the same every \
+                 run regardless of HashMap iteration order: run 0 got {first}, \
+                 run {i} got {value}"
+            );
+        }
     }
 
     /// #328: a live scroll offset must move both a descendant's own rect

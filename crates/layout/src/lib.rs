@@ -658,6 +658,46 @@ mod tests {
     }
 
     #[test]
+    fn explicit_height_scroll_area_shrinks_its_flex_1_descendant_too() {
+        // #341 round-2 regression: forcing the ScrollArea's own
+        // `.size.height` back to 36px (the test above) is not enough on
+        // its own — a `flex-1` descendant *inside* that ScrollArea must
+        // also be laid out against the 36px budget, not the box's own
+        // explicit `h-16` (64px), or it overflows past the ScrollArea's
+        // own corrected box. Same 100px viewport / 64px sibling / h-16
+        // ScrollArea as above, but with an empty `flex-1` View inside the
+        // ScrollArea standing in for arbitrary nested content.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let _sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        let inner_rect = result.get(inner).unwrap();
+
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the ScrollArea must still be shrunk to 36px: got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            (inner_rect.size.height - 36.0).abs() < 0.01,
+            "the flex-1 descendant must be laid out against the ScrollArea's \
+             real 36px budget, not its explicit h-16 (64px): got {}",
+            inner_rect.size.height
+        );
+        assert!(
+            inner_rect.bottom() <= 100.0 + 0.01,
+            "the flex-1 descendant's box must stay within the 100px viewport: bottom at {}",
+            inner_rect.bottom()
+        );
+    }
+
+    #[test]
     fn scroll_area_shrink_floor_is_zero_unlike_a_plain_view_sibling() {
         // #328: the one case where `ChildPlan::shrink_to_zero` actually
         // changes the outcome. A `View` sibling (natural height ~60px: 3
