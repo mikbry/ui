@@ -231,18 +231,20 @@ pub struct WalkOutput {
     pub scene: Scene,
     pub hit_tests: Vec<HitTestEntry>,
     pub layouts: Vec<NodeLayout>,
-    /// Every `ScrollArea`'s offset actually used this walk, already
-    /// clamped to `[0, content_len - viewport_len]` (#328) — see
-    /// `apply_scroll_offsets`. A host that fed in an un-clamped,
-    /// possibly-over-scrolled raw offset (e.g. after a fast wheel flick
-    /// past the content's end, or a resize that shrank `content_len`)
-    /// must write *this* map back as its new `WalkOptions::scroll_offsets`
-    /// input for the next frame, not keep its own raw one — otherwise the
-    /// stored value only ever grows, and scrolling back the other way
-    /// does nothing visible until it works its way back under the real
-    /// max. A `ScrollArea` id with no entry here was not present in the
-    /// input map at all (nothing has tried to scroll it, or it no longer
-    /// exists in the tree).
+    /// Every `ScrollArea` currently in the tree's offset actually used
+    /// this walk, already clamped to `[0, content_len - viewport_len]`
+    /// (#328) — see `apply_scroll_offsets`, which (#341 round 3) now
+    /// reports one for every `ScrollArea` the tree currently has, not just
+    /// the ones `WalkOptions::scroll_offsets` happened to mention; a
+    /// never-yet-scrolled one simply gets `0.0`. A host that fed in an
+    /// un-clamped, possibly-over-scrolled raw offset (e.g. after a fast
+    /// wheel flick past the content's end, or a resize that shrank
+    /// `content_len`) must write *this* map back as its new
+    /// `WalkOptions::scroll_offsets` input for the next frame, not keep
+    /// its own raw one — otherwise the stored value only ever grows, and
+    /// scrolling back the other way does nothing visible until it works
+    /// its way back under the real max. A `ScrollArea` id with no entry
+    /// here is not a `ScrollArea` in the tree at all (or no longer is).
     pub scroll_offsets: HashMap<NodeId, f32>,
 }
 
@@ -649,11 +651,16 @@ pub fn walk_app_tree_cached(
 /// information needed to recompute content length from it directly (the
 /// shift itself *is* the offset), so the clamped value has to travel
 /// forward from here, not be recomputed downstream.
+/// Returns `(clamped_offsets, content_lens)` — every `ScrollArea` in the
+/// tree gets an entry in both maps, not just the ones `scroll_offsets`
+/// (the host's live, possibly-empty input) happens to mention, so a
+/// never-yet-scrolled `ScrollArea` still reports its real content length
+/// on first paint (`raw_offset` defaults to `0.0` for one with no entry).
 fn apply_scroll_offsets(
     tree: &AppTree,
     layout: &mut mkui_layout::LayoutResult,
     scroll_offsets: &HashMap<NodeId, f32>,
-) -> HashMap<NodeId, f32> {
+) -> (HashMap<NodeId, f32>, HashMap<NodeId, f32>) {
     // #341 round 2: a nested `ScrollArea`'s descendants are also part of
     // its ancestor `ScrollArea`'s own subtree, so computing one
     // `ScrollArea`'s clamp *and* applying its `translate` before moving on
@@ -661,20 +668,25 @@ fn apply_scroll_offsets(
     // nondeterministic order) let one ScrollArea's shift land on rects
     // another ScrollArea's own content-length measurement then read —
     // silently under- or over-counting that content by the first one's
-    // offset depending on which happened to run first. Every clamp is
-    // computed here from the untranslated layout this same `compute_layout`
-    // call just produced, before any `translate` call runs, so no
-    // ScrollArea's measurement can ever see another's shift — regardless
-    // of `HashMap` iteration order.
+    // offset depending on which happened to run first. Every clamp (and,
+    // #341 round 3, every `content_len`) is computed here from the
+    // untranslated layout this same `compute_layout` call just produced,
+    // before any `translate` call runs, so no ScrollArea's measurement can
+    // ever see another's shift — regardless of `HashMap` iteration order,
+    // and regardless of how many `ScrollArea`s sit between it and the
+    // rect being measured. `render_scroll_area` (#341 round 3) reads
+    // `content_lens` back out through `WgpuRenderCtx::scroll_content_lens`
+    // instead of re-deriving it from already-translated rects, which could
+    // only undo *its own* shift and not an inner nested `ScrollArea`'s.
     let mut clamped_offsets = HashMap::with_capacity(scroll_offsets.len());
+    let mut content_lens = HashMap::with_capacity(scroll_offsets.len());
     let mut pending_shifts: Vec<(Vec<NodeId>, f32)> = Vec::with_capacity(scroll_offsets.len());
-    for (&scroll_id, &raw_offset) in scroll_offsets {
-        let Some(node) = tree.get(scroll_id) else {
-            continue;
-        };
+    for node in tree.nodes() {
         if !matches!(node.kind, NodeKind::ScrollArea(_)) {
             continue;
         }
+        let scroll_id = node.id;
+        let raw_offset = scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0);
         let Some(own_rect) = node_rect(layout, scroll_id) else {
             continue;
         };
@@ -692,6 +704,7 @@ fn apply_scroll_offsets(
             .filter_map(|&id| node_rect(layout, id))
             .map(|descendant_rect| descendant_rect.height_end() - own_rect.origin.y)
             .fold(own_rect.size.height, f32::max);
+        content_lens.insert(scroll_id, content_len);
         let max_offset = (content_len - own_rect.size.height).max(0.0);
         let clamped = raw_offset.clamp(0.0, max_offset);
         clamped_offsets.insert(scroll_id, clamped);
@@ -704,7 +717,7 @@ fn apply_scroll_offsets(
             layout.translate(descendant_id, mkui_layout::Point::new(0.0, -clamped));
         }
     }
-    clamped_offsets
+    (clamped_offsets, content_lens)
 }
 
 /// Every id in `id`'s subtree, not including `id` itself — used to shift
@@ -750,7 +763,7 @@ fn walk_app_tree_inner(
         mkui_layout::Size::new(options.viewport.width, options.viewport.height),
         &measure,
     );
-    let clamped_scroll_offsets =
+    let (clamped_scroll_offsets, scroll_content_lens) =
         apply_scroll_offsets(tree, &mut layout_result, options.scroll_offsets);
 
     {
@@ -766,6 +779,7 @@ fn walk_app_tree_inner(
             current_foreground: options.theme.body_style().color,
             text_system: options.text_system,
             scroll_offsets: &clamped_scroll_offsets,
+            scroll_content_lens: &scroll_content_lens,
         };
 
         if let Some(root) = tree.get(tree.root()) {
@@ -1225,22 +1239,24 @@ fn render_scroll_area(
     // whatever was painted at the previous offset.
     stats.saw_custom = true;
 
-    // `rect.origin.y` is this box's own (untranslated) top; a descendant's
-    // rect was already shifted up by the clamped offset in
-    // `apply_scroll_offsets`, so adding that offset back here recovers
-    // each descendant's *unscrolled* bottom — content length must reflect
-    // the full content regardless of how far it's currently scrolled.
-    // Walking the whole subtree (not just direct children, #341) is what
-    // lets a nested, already-overflowing box (e.g. a `View.h-16` child
-    // whose own text overflows past its own 64px per #328's overflow-not-
-    // overlap contract) actually register as scrollable content instead
-    // of being measured only at its own clamped 64px.
+    // #341 round 3: `content_len` used to be re-derived here from
+    // `layout`'s already-translated descendant rects, adding back only
+    // *this* ScrollArea's own clamped offset to recover each descendant's
+    // unscrolled bottom. That undoes exactly one shift — but a descendant
+    // nested behind an inner `ScrollArea` too (two `ScrollArea`s deep) had
+    // already been shifted by *both* that inner one's offset and this
+    // one's, so adding back only this one's left the inner one's shift
+    // applied, undercounting this (outer) ScrollArea's real content length
+    // and starving or hiding its scrollbar. `apply_scroll_offsets` already
+    // computes the correct value, from the untranslated layout, before any
+    // `ScrollArea`'s shift lands on anything — read it back out instead of
+    // re-deriving it from rects that may carry more than one shift.
     let offset = ctx.scroll_offsets.get(&node.id).copied().unwrap_or(0.0);
-    let content_len = subtree_node_ids(tree, node.id)
-        .into_iter()
-        .filter_map(|id| node_rect(layout, id))
-        .map(|descendant_rect| descendant_rect.height_end() - rect.origin.y + offset)
-        .fold(rect.size.height, f32::max);
+    let content_len = ctx
+        .scroll_content_lens
+        .get(&node.id)
+        .copied()
+        .unwrap_or(rect.size.height);
     let mut state = ScrollState::new(content_len, rect.size.height);
     state.scroll_to(offset);
 
@@ -2379,6 +2395,74 @@ mod tests {
                  run {i} got {value}"
             );
         }
+    }
+
+    /// #341 round 3 regression: `render_scroll_area` used to re-derive its
+    /// own `content_len` from already-translated descendant rects, adding
+    /// back only *its own* clamped offset to undo the shift. A descendant
+    /// nested behind an *inner* `ScrollArea` that is also scrolled has
+    /// already been shifted by that inner offset too, so only one of the
+    /// two shifts got undone — undercounting the outer ScrollArea's real
+    /// content and, once the undercount is large enough, silently
+    /// dropping its scrollbar.
+    ///
+    /// The outer box here is deliberately taller (`h-32`, 128px) than the
+    /// inner one (`h-16`, 64px, not `flex-1`, so it keeps its own explicit
+    /// height rather than growing to fill the outer) specifically so the
+    /// buggy value floors out at a clearly-dominant 128 (the fold's own
+    /// `own_rect.size.height` floor) rather than landing on a delicate
+    /// exact-cancellation boundary — the assertion below doesn't depend on
+    /// matching an exact pixel value, just on the outer's track actually
+    /// existing at its own full height.
+    #[test]
+    fn nested_scroll_area_scrollbar_is_not_hidden_by_an_inner_scroll_offset() {
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-32").child(
+                ScrollArea::new()
+                    .class("h-16")
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(CoreText::new("line five"))
+                    .child(CoreText::new("line six"))
+                    .child(CoreText::new("line seven"))
+                    .child(CoreText::new("line eight"))
+                    .child(CoreText::new("line nine"))
+                    .child(CoreText::new("line ten")),
+            ),
+        );
+        let outer_id = core.tree().get(core.tree().root()).unwrap().children[0];
+        let inner_id = core.tree().get(outer_id).unwrap().children[0];
+
+        let outer_rect = walk(&core)
+            .layouts
+            .iter()
+            .find(|l| l.node == outer_id)
+            .expect("outer layout")
+            .rect;
+
+        // Scroll only the inner ScrollArea, all the way to its own real
+        // max offset (a huge raw request clamps there) — the outer is
+        // left unscrolled (offset 0), isolating the inner's own shift as
+        // the sole source of any undercount in the outer's measurement.
+        let scroll_offsets = HashMap::from([(inner_id, 1_000_000.0_f32)]);
+        let out = walk_with_scroll_offsets(&core, &scroll_offsets);
+
+        let outer_track_exists = out.scene.primitives.iter().any(|p| {
+            matches!(p, Primitive::Quad(q) if
+                (q.rect.size.width - SCROLLBAR_TRACK_WIDTH_PX).abs() < 0.5
+                    && (q.rect.size.height - outer_rect.size.height).abs() < 0.5)
+        });
+        assert!(
+            outer_track_exists,
+            "the outer ScrollArea must still paint its own scrollbar track \
+             (its real content length, read from the untranslated layout \
+             `apply_scroll_offsets` already measured, must stay well past \
+             its own {}px box) even though the inner ScrollArea beneath it \
+             is scrolled to its own maximum offset",
+            outer_rect.size.height
+        );
     }
 
     /// #328: a live scroll offset must move both a descendant's own rect

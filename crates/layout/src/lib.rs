@@ -698,6 +698,49 @@ mod tests {
     }
 
     #[test]
+    fn explicit_height_row_scroll_area_stretches_its_child_to_its_shrunk_size() {
+        // #341 round-3 regression: `layout_container`'s Row-direction
+        // `cross_override` derived straight from `explicit`, bypassing
+        // `force_height`/`definite_target` entirely — so a row-flex
+        // `ScrollArea.h-16` shrunk to 36px by the round-2 `force_height`
+        // path still stretch-aligned its child against the stale 64px
+        // explicit height instead of the real 36px budget. Same 100px
+        // viewport / 64px sibling / h-16 ScrollArea shape as the two
+        // column-axis tests above, but the ScrollArea is row-flex
+        // (`"h-16 flex"`) and the inner child is cross-axis (height)
+        // stretched rather than main-axis grown.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let _sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16 flex").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        let inner_rect = result.get(inner).unwrap();
+
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the row-flex ScrollArea must still be shrunk to 36px: got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            (inner_rect.size.height - 36.0).abs() < 0.01,
+            "the row-flex child must be cross-axis stretched to the \
+             ScrollArea's real 36px budget, not its explicit h-16 (64px): \
+             got {}",
+            inner_rect.size.height
+        );
+        assert!(
+            inner_rect.bottom() <= 100.0 + 0.01,
+            "the row-flex child's box must stay within the 100px viewport: bottom at {}",
+            inner_rect.bottom()
+        );
+    }
+
+    #[test]
     fn scroll_area_shrink_floor_is_zero_unlike_a_plain_view_sibling() {
         // #328: the one case where `ChildPlan::shrink_to_zero` actually
         // changes the outcome. A `View` sibling (natural height ~60px: 3

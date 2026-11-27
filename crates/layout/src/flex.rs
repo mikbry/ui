@@ -581,7 +581,23 @@ fn layout_container(
             // implemented (untested by the showcase token set, which never
             // combines `h-*` with `flex-wrap`); with more than one line
             // this falls back to content-derived per-line heights.
-            let cross_override = explicit.map(|h| (h - pad_y * 2.0).max(0.0));
+            //
+            // `force_height` (#341 round 3) is the same exception as
+            // `definite_target` above, applied here too: when
+            // `layout_column_children`'s re-resolve pass has already
+            // decided this row-direction box's own final height (e.g. a
+            // row-flex `ScrollArea.h-16` shrunk to 36px by a sibling), the
+            // forced `avail_height` must win over `explicit` for the
+            // row's own cross-axis stretch budget too — otherwise a
+            // `flex-1` child inside it stretches against the stale 64px
+            // even though the row's own box correctly shrank to 36px
+            // (`definite_target`, used below for `own_height`, already
+            // gets this right; only this children-facing override didn't).
+            let cross_override = if force_height {
+                avail_height.map(|h| (h - pad_y * 2.0).max(0.0))
+            } else {
+                explicit.map(|h| (h - pad_y * 2.0).max(0.0))
+            };
             let (children, size) =
                 layout_row_children(tree, measure, node, inner_width, cross_override);
             (children, size.height)

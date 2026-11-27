@@ -151,6 +151,16 @@ pub struct WgpuRenderCtx<'a> {
     /// as-is rather than re-deriving it, since translating a rect loses
     /// the information needed to recompute the clamp from it directly.
     pub scroll_offsets: &'a HashMap<NodeId, f32>,
+    /// Each `ScrollArea`'s real content length (#341 round 3), in logical
+    /// pixels, as measured by `walker::apply_scroll_offsets` against the
+    /// *untranslated* layout — before any `ScrollArea`'s offset (including
+    /// a nested one, #341 round 2) shifted any rect. `render_scroll_area`
+    /// reads this directly for its scrollbar sizing instead of re-deriving
+    /// it from already-translated descendant rects, which — for a
+    /// descendant nested behind more than one `ScrollArea` — would only be
+    /// able to undo *this* `ScrollArea`'s own shift, not an inner one's,
+    /// silently undercounting the outer `ScrollArea`'s real content.
+    pub scroll_content_lens: &'a HashMap<NodeId, f32>,
 }
 
 /// Registry of custom-component handlers keyed by `type_name`. Built-in
@@ -642,6 +652,7 @@ mod tests {
             current_foreground: theme.body_style().color,
             text_system: &text_system,
             scroll_offsets: &HashMap::new(),
+            scroll_content_lens: &HashMap::new(),
         };
 
         let outcome = registry
@@ -708,6 +719,7 @@ mod tests {
             current_foreground: theme.body_style().color,
             text_system: &text_system,
             scroll_offsets: &HashMap::new(),
+            scroll_content_lens: &HashMap::new(),
         };
 
         registry
@@ -752,6 +764,7 @@ mod tests {
             current_foreground: theme.body_style().color,
             text_system,
             scroll_offsets: empty_scroll_offsets(),
+            scroll_content_lens: empty_scroll_offsets(),
         }
     }
 
