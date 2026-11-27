@@ -118,6 +118,7 @@ impl LoweringRegistry {
         reg.register::<Text>();
         reg.register::<Button>();
         reg.register::<Card>();
+        reg.register::<ScrollArea>();
         reg.register::<TextField>();
         reg.register::<Image>();
         reg.register::<MenuList>();
@@ -605,6 +606,77 @@ impl LowerToTree for Card {
         let style = StyleClass::from_str(class);
         let _ = style.parse()?;
         let id = tree.push_card_unchecked(parent, style);
+        for child in children {
+            registry.lower_boxed(child, tree, id)?;
+        }
+        Ok(id)
+    }
+}
+
+// -------------------------------------------------------------------------
+// ScrollArea — viewport-clipping container (#328, ADR 0015)
+// -------------------------------------------------------------------------
+
+/// Cross-platform `ScrollArea` container — a [`View`]-shaped flex container
+/// whose children always lay out at their own natural height regardless of
+/// this box's own height budget, so content taller than the box becomes
+/// overflow for the box to show/scroll instead of something to compress.
+/// Every backend renders it through its own native scroll primitive
+/// (`mkui-web`: a real `overflow-y: auto`; `mkui-wgpu`: the existing
+/// `components::scroll_area`/`scrollbar` chrome). See ADR 0015 for the
+/// promotion process this follows (`Card`/`TextField`/`Image` before it).
+pub struct ScrollArea {
+    class: String,
+    children: Vec<Box<dyn Component>>,
+}
+
+impl ScrollArea {
+    pub fn new() -> Self {
+        Self {
+            class: String::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn class(mut self, class: impl Into<String>) -> Self {
+        self.class = class.into();
+        self
+    }
+
+    pub fn child(mut self, child: impl Component + 'static) -> Self {
+        self.children.push(Box::new(child));
+        self
+    }
+
+    pub fn class_name(&self) -> &str {
+        &self.class
+    }
+
+    pub fn children_len(&self) -> usize {
+        self.children.len()
+    }
+}
+
+impl Default for ScrollArea {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Component for ScrollArea {}
+
+impl LowerToTree for ScrollArea {
+    fn lower_to_tree(
+        &mut self,
+        tree: &mut AppTree,
+        parent: NodeId,
+        registry: &LoweringRegistry,
+    ) -> Result<NodeId, ClassParseError> {
+        let class = std::mem::take(&mut self.class);
+        let children = std::mem::take(&mut self.children);
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        let id = tree.push_scroll_area_unchecked(parent, style);
         for child in children {
             registry.lower_boxed(child, tree, id)?;
         }

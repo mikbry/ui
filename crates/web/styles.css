@@ -12,6 +12,14 @@
     box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   }
 
+  /* `ScrollArea` (#328): the browser's own native scroll — position,
+     wheel/touch/keyboard input, and the scrollbar itself all come from
+     `overflow-y: auto`, same as the rest of this backend prefers a native
+     primitive (`<input>` for `TextField`) over reimplementing one. */
+  :where(.scroll-area) {
+    overflow-y: auto;
+  }
+
   /* `Image` (#196). `border-radius` on an `<img>` clips its own bitmap
      directly — no extra wrapper/overflow:hidden needed. `object-fit`
      governs contain/cover once the box's CSS size (set via application

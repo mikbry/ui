@@ -9,6 +9,7 @@
 //! 0006 §"`with_scene` as the retained low-level escape hatch".
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use crate::types::{Scene, Size};
 #[cfg(not(target_arch = "wasm32"))]
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{MouseScrollDelta, WindowEvent},
     event_loop::ActiveEventLoop,
     window::{Window, WindowAttributes, WindowId},
 };
@@ -173,10 +174,35 @@ pub struct WgpuApp {
     /// guards against.
     #[cfg(not(target_arch = "wasm32"))]
     cmd_held: bool,
+    /// Live scroll offset per `ScrollArea` node (#328), in logical pixels
+    /// down from the top. `NodeId`s are stable across frames (the tree
+    /// persists; frames re-render a dirty tree rather than rebuilding it
+    /// — see `AppTree::mark_dirty`), so keying on them directly (rather
+    /// than, say, a per-frame rebuilt index) is safe. Threaded into
+    /// [`WalkOptions::scroll_offsets`] every rebuild; `WindowEvent::MouseWheel`
+    /// is the only writer today — drag/keyboard/gamepad input on the
+    /// promoted component is a follow-up (`ScrollState` itself already
+    /// supports all four, #194).
+    #[cfg(not(target_arch = "wasm32"))]
+    scroll_offsets: HashMap<NodeId, f32>,
+    /// `(node, rect)` for every `ScrollArea` the last rebuild walked,
+    /// in document order — `WindowEvent::MouseWheel` hit-tests the
+    /// latched cursor against these to find which one to scroll.
+    /// Replaced wholesale each rebuild, same lifetime as `hit_tests`.
+    #[cfg(not(target_arch = "wasm32"))]
+    scroll_areas: Vec<(NodeId, crate::types::Rect)>,
 }
 
 /// Lower bound [`WgpuApp::set_ui_scale`] clamps to — small enough to still
 /// read as "smaller" without shrinking controls below a usable hit target.
+/// Pixel height of one wheel "line" (#328) — a desktop mouse reports wheel
+/// motion in discrete notches (`MouseScrollDelta::LineDelta`), not pixels;
+/// this is the conventional notch-to-pixel conversion most browsers use.
+/// `MouseScrollDelta::PixelDelta` (precision trackpads) bypasses this
+/// entirely — it already carries exact pixels.
+#[cfg(not(target_arch = "wasm32"))]
+const WHEEL_LINE_HEIGHT_PX: f32 = 20.0;
+
 const MIN_UI_SCALE: f32 = 0.5;
 
 /// Upper bound [`WgpuApp::set_ui_scale`] clamps to. Mirrors the 1x/2x/3x
@@ -296,6 +322,10 @@ impl WgpuApp {
             ctrl_held: false,
             #[cfg(not(target_arch = "wasm32"))]
             cmd_held: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            scroll_offsets: HashMap::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            scroll_areas: Vec::new(),
         }
     }
 
@@ -587,22 +617,55 @@ impl WgpuApp {
             slug_font_id: self.slug_font_id,
             #[cfg(not(feature = "slug"))]
             slug_font_id: None,
+            scroll_offsets: &self.scroll_offsets,
         };
-        let output = {
+        let (output, scroll_areas) = {
             let core_ref = core.borrow();
-            match walk_app_tree_cached(core_ref.tree(), registry, &options, &mut self.walk_cache) {
-                Ok((out, _stats)) => out,
+            let (out, _stats) = match walk_app_tree_cached(
+                core_ref.tree(),
+                registry,
+                &options,
+                &mut self.walk_cache,
+            ) {
+                Ok(pair) => pair,
                 Err(err) => {
                     eprintln!("mkui-wgpu: walk_app_tree error: {err}");
                     return false;
                 }
-            }
+            };
+            // #328: retained for `WindowEvent::MouseWheel` hit-testing —
+            // `out.layouts` itself is not kept past this rebuild, so the
+            // `ScrollArea` subset is copied out now while the tree
+            // (needed to check each layout entry's `NodeKind`) is still
+            // borrowed.
+            let scroll_areas: Vec<(NodeId, crate::types::Rect)> = out
+                .layouts
+                .iter()
+                .filter(|l| {
+                    matches!(
+                        core_ref.tree().get(l.node).map(|n| &n.kind),
+                        Some(NodeKind::ScrollArea(_))
+                    )
+                })
+                .map(|l| (l.node, l.rect))
+                .collect();
+            (out, scroll_areas)
         };
         // Clear dirty after the walk completes so a future action firing
         // mid-walk does not get its dirty bit clobbered.
         core.borrow_mut().tree_mut().clear_dirty();
         self.scene = output.scene;
         self.hit_tests = output.hit_tests;
+        self.scroll_areas = scroll_areas;
+        // #328: write back the *clamped* offsets this walk actually used,
+        // not the raw ones `options.scroll_offsets` fed in — otherwise an
+        // over-scroll (a fast wheel flick past the content's end, or a
+        // resize that shrank `content_len`) would only ever grow in
+        // `self.scroll_offsets`, and scrolling the other way would do
+        // nothing visible until the stored value worked its way back
+        // under the real max. This also drops any id for a `ScrollArea`
+        // that no longer exists in the tree.
+        self.scroll_offsets = output.scroll_offsets;
         true
     }
 
@@ -1003,6 +1066,65 @@ impl WgpuApp {
             .any(|s| matches!(s, RuntimeSignal::RequestRedraw))
     }
 
+    /// Routes a `WindowEvent::MouseWheel` to whichever `ScrollArea` the
+    /// latched cursor sits over (#328) — the innermost one (smallest
+    /// rect area) when more than one contains it, though the showcase
+    /// token set never nests them. Returns `true` if the stored offset
+    /// actually changed, so the caller knows to rebuild/redraw.
+    ///
+    /// The *real* clamp against content/viewport length runs at the next
+    /// rebuild's `apply_scroll_offsets` pass (`walker.rs`) against freshly
+    /// computed layout — this method has no layout data of its own to
+    /// clamp against, so it only floors the stored offset at zero (via a
+    /// throwaway [`ScrollState`] with a deliberately unbounded
+    /// `content_len`) and otherwise lets it move freely; an over-scroll
+    /// recorded here is silently re-clamped down on the next rebuild,
+    /// never visible to a frame that actually paints.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn apply_wheel_to_scroll_area(&mut self, delta: MouseScrollDelta) -> bool {
+        let Some(cursor) = self.pointer.cursor_logical(self.cursor_scale_factor()) else {
+            return false;
+        };
+        let Some(&(scroll_id, _)) = self
+            .scroll_areas
+            .iter()
+            .filter(|(_, rect)| crate::types::rect_contains(*rect, cursor))
+            .min_by(|(_, a), (_, b)| {
+                (a.size.width * a.size.height).total_cmp(&(b.size.width * b.size.height))
+            })
+        else {
+            return false;
+        };
+        let wheel_delta = match delta {
+            // Dimensionless notches, not a physical quantity — no DPI
+            // conversion needed; `WHEEL_LINE_HEIGHT_PX` below is already a
+            // fixed logical-pixel constant.
+            MouseScrollDelta::LineDelta(_, y) => crate::scroll::WheelDelta::Lines(-y),
+            // #341: winit reports `PixelDelta` (precision trackpad) in
+            // *physical* pixels, but every other quantity here — cursor
+            // position, layout rects, `ScrollState`'s own offset — is in
+            // logical pixels (the same space `cursor_scale_factor()`
+            // converts into for hit-testing just above). Dividing by that
+            // same effective factor keeps a wheel-driven scroll the same
+            // visual distance regardless of display/UI scaling; without
+            // it, a 20px trackpad delta at 2x scaling moved content 40
+            // logical pixels instead of 20.
+            MouseScrollDelta::PixelDelta(pos) => {
+                crate::scroll::WheelDelta::Pixels(-(pos.y / self.cursor_scale_factor()) as f32)
+            }
+        };
+        let current = self.scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0);
+        let mut state = crate::scroll::ScrollState::new(f32::MAX / 4.0, 0.0);
+        state.scroll_to(current);
+        state.apply_wheel(wheel_delta, WHEEL_LINE_HEIGHT_PX);
+        let new_offset = state.offset();
+        if (new_offset - current).abs() < f32::EPSILON {
+            return false;
+        }
+        self.scroll_offsets.insert(scroll_id, new_offset);
+        true
+    }
+
     /// Decide and apply the click-to-focus/blur consequence of a mouse
     /// release (#312). `clicked` is whatever `NodeId` the press-to-arm
     /// gesture resolved to (`None` on a miss). Focuses `clicked` if it
@@ -1321,6 +1443,14 @@ impl ApplicationHandler for WgpuApp {
                 // Mouse left the window: cancel any armed press without
                 // firing (Codex round-10 Q4 — drag-cancel affordance).
                 self.pointer.cancel();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.apply_wheel_to_scroll_area(delta) {
+                    self.rebuild_scene_from_tree();
+                    if let Some(state) = self.state.as_ref() {
+                        state.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 // #312: tracked only so a focused `TextField`'s
@@ -1985,6 +2115,234 @@ mod tests {
             app.pointer.armed(),
             Some(hit.node),
             "a click computed via the bare OS factor (ignoring ui_scale) must miss the button"
+        );
+    }
+
+    /// #328: a wheel event over a `ScrollArea` must move its content far
+    /// enough that a later click resolves against the *scrolled* position,
+    /// not the pre-scroll one — the same "position and hit-testing must
+    /// agree" contract `set_ui_scale_keeps_hit_testing_aligned_with_the_scaled_layout`
+    /// proves for `ui_scale`, exercised here through the real event-handler
+    /// sequence (`apply_wheel_to_scroll_area` then a rebuild, mirroring
+    /// `WindowEvent::MouseWheel`'s own arm) rather than `window_event`
+    /// itself, which needs a live window this test has none of.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn wheel_scrolls_the_scroll_area_and_a_later_click_lands_on_the_scrolled_button() {
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui, ScrollArea, Text as CoreText, View};
+
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        assert!(app.update_frame());
+
+        let (scroll_id, scroll_rect) = *app
+            .scroll_areas
+            .first()
+            .expect("the ScrollArea must produce a scroll_areas entry");
+        let hit_before = *app
+            .hit_tests
+            .first()
+            .expect("the button must produce a hit-test entry");
+
+        let cursor_over_scroll_area = Point::new(
+            scroll_rect.origin.x + scroll_rect.size.width / 2.0,
+            scroll_rect.origin.y + scroll_rect.size.height / 2.0,
+        );
+        let effective = app.cursor_scale_factor();
+        app.pointer.update_cursor_raw(
+            cursor_over_scroll_area.x as f64 * effective,
+            cursor_over_scroll_area.y as f64 * effective,
+        );
+
+        assert!(
+            app.apply_wheel_to_scroll_area(MouseScrollDelta::LineDelta(0.0, -3.0)),
+            "a wheel event over the ScrollArea must change its stored offset"
+        );
+        assert!(
+            app.scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0) > 0.0,
+            "scrolling down (negative LineDelta.y, this method's own sign convention) \
+             must increase the stored offset"
+        );
+
+        // The same rebuild the real `WindowEvent::MouseWheel` arm does
+        // after a successful scroll (`rebuild_scene_from_tree`, not the
+        // dirty-gated `update_frame` — scrolling never touches the tree
+        // itself, so a dirty check alone would skip this rebuild), so
+        // `hit_tests` reflects the new offset.
+        app.rebuild_scene_from_tree();
+        let hit_after = *app
+            .hit_tests
+            .first()
+            .expect("the button must still produce a hit-test entry once scrolled");
+        assert!(
+            hit_after.rect.origin.y < hit_before.rect.origin.y,
+            "the button's hit-test rect must move up with the scrolled content: \
+             before {} after {}",
+            hit_before.rect.origin.y,
+            hit_after.rect.origin.y
+        );
+
+        // A click at the button's *new* (scrolled) center must arm it.
+        let scrolled_center = Point::new(
+            hit_after.rect.origin.x + hit_after.rect.size.width / 2.0,
+            hit_after.rect.origin.y + hit_after.rect.size.height / 2.0,
+        );
+        app.pointer.update_cursor_raw(
+            scrolled_center.x as f64 * effective,
+            scrolled_center.y as f64 * effective,
+        );
+        let cursor = app
+            .pointer
+            .cursor_logical(app.cursor_scale_factor())
+            .expect("cursor must be latched after update_cursor_raw");
+        app.pointer.on_press(&app.hit_tests, cursor);
+        assert_eq!(
+            app.pointer.armed(),
+            Some(hit_after.node),
+            "a click at the scrolled button's new position must hit it"
+        );
+    }
+
+    /// #328 regression: `try_rebuild_scene_from_tree` must write back the
+    /// *clamped* offset each walk actually used (`output.scroll_offsets`),
+    /// not leave `self.scroll_offsets` holding whatever raw, possibly
+    /// over-scrolled value a fast wheel flick produced. Without this,
+    /// scrolling far past the content's end stores a value the real max
+    /// is nowhere near, and scrolling back the other way has no visible
+    /// effect until the stored value works its way back under the real
+    /// max — exactly what every other test in this module (all well
+    /// within the clamp range) would miss.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn wheel_overscroll_past_the_end_clamps_so_scrolling_back_moves_content_immediately() {
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui, ScrollArea, Text as CoreText, View};
+
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        assert!(app.update_frame());
+
+        let (_, scroll_rect) = *app
+            .scroll_areas
+            .first()
+            .expect("the ScrollArea must produce a scroll_areas entry");
+        let cursor_over_scroll_area = Point::new(
+            scroll_rect.origin.x + scroll_rect.size.width / 2.0,
+            scroll_rect.origin.y + scroll_rect.size.height / 2.0,
+        );
+        let effective = app.cursor_scale_factor();
+        app.pointer.update_cursor_raw(
+            cursor_over_scroll_area.x as f64 * effective,
+            cursor_over_scroll_area.y as f64 * effective,
+        );
+
+        // Flick far past the end — the content here is nowhere near 1000px
+        // of overflow, so the real max_offset is far smaller than this.
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::LineDelta(0.0, -1000.0)));
+        app.rebuild_scene_from_tree();
+        let hit_at_max = *app
+            .hit_tests
+            .first()
+            .expect("the button must still produce a hit-test entry");
+
+        // Scroll back up by one small notch.
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::LineDelta(0.0, 1.0)));
+        app.rebuild_scene_from_tree();
+        let hit_after_scrolling_back = *app
+            .hit_tests
+            .first()
+            .expect("the button must still produce a hit-test entry");
+
+        assert!(
+            hit_after_scrolling_back.rect.origin.y > hit_at_max.rect.origin.y,
+            "scrolling back up even one notch must move the content down \
+             immediately — if the stored offset were left unclamped at \
+             ~1000px instead of the real max, one notch back wouldn't \
+             move anything visible yet: at max {} after one notch back {}",
+            hit_at_max.rect.origin.y,
+            hit_after_scrolling_back.rect.origin.y
+        );
+    }
+
+    /// #341 regression: `winit` reports `MouseScrollDelta::PixelDelta`
+    /// (precision trackpad input) in *physical* pixels, but everything
+    /// else here — the latched cursor, layout rects, `ScrollState`'s own
+    /// offset — is logical. At `ui_scale` 2.0, a 20-physical-pixel delta
+    /// must move content by 10 logical pixels, not 20.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pixel_delta_wheel_input_converts_physical_pixels_to_logical_before_scrolling() {
+        use crate::types::Point;
+        use mkui_core::components::{Button, Mkui as CoreMkui, ScrollArea, Text as CoreText, View};
+
+        let core = CoreMkui::new().child(
+            ScrollArea::new().class("h-16").child(
+                View::new()
+                    .child(CoreText::new("line one"))
+                    .child(CoreText::new("line two"))
+                    .child(CoreText::new("line three"))
+                    .child(CoreText::new("line four"))
+                    .child(Button::new("Scrolled")),
+            ),
+        );
+        let registry = WgpuRendererRegistry::with_defaults();
+        let mut app = WgpuApp::with_app_tree(core, registry);
+        app.set_surface_size(1600, 1200, 1.0);
+        app.set_ui_scale(2.0);
+        assert!(app.update_frame());
+
+        let (scroll_id, scroll_rect) = *app
+            .scroll_areas
+            .first()
+            .expect("the ScrollArea must produce a scroll_areas entry");
+        let effective = app.cursor_scale_factor();
+        assert!(
+            (effective - 2.0).abs() < 0.001,
+            "this test only means anything at a non-1.0 effective scale \
+             factor, got {effective}"
+        );
+        let cursor_over_scroll_area = Point::new(
+            scroll_rect.origin.x + scroll_rect.size.width / 2.0,
+            scroll_rect.origin.y + scroll_rect.size.height / 2.0,
+        );
+        app.pointer.update_cursor_raw(
+            cursor_over_scroll_area.x as f64 * effective,
+            cursor_over_scroll_area.y as f64 * effective,
+        );
+
+        // 20 *physical* pixels "down" in this method's own sign
+        // convention — negative `y`, matching the `LineDelta` arm's `-y`
+        // (see the other wheel tests, which use e.g. `LineDelta(0.0,
+        // -3.0)` to increase the stored offset).
+        assert!(app.apply_wheel_to_scroll_area(MouseScrollDelta::PixelDelta(
+            winit::dpi::PhysicalPosition::new(0.0, -20.0)
+        )));
+        let stored = app.scroll_offsets.get(&scroll_id).copied().unwrap_or(0.0);
+        assert!(
+            (stored - 10.0).abs() < 0.01,
+            "a 20-physical-pixel PixelDelta at a 2.0 effective scale factor \
+             must store a 10-logical-pixel offset, not 20: got {stored}"
         );
     }
 

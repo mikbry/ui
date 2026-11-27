@@ -168,7 +168,15 @@ mod tests {
         let mut tree = AppTree::new();
         let root = tree.root();
 
-        let page = tree.push_view(root, "flex-1").unwrap();
+        // #328: the real `create_showcase_ui` wraps its page in a
+        // `ScrollArea` rather than a plain `View` — mirrored here so this
+        // fixture's layout math matches the shipped structure exactly
+        // (same box-clamp-but-let-content-overflow contract either way,
+        // per `layout_container`/`layout_column_children`, but a `View`
+        // and a `ScrollArea` differ in their own column-shrink floor —
+        // see `distribute_main_axis`'s doc comment — so this choice is
+        // not cosmetic).
+        let page = tree.push_scroll_area(root, "flex-1").unwrap();
 
         // Header
         let header = tree.push_view(page, "border-b").unwrap();
@@ -525,6 +533,382 @@ mod tests {
         assert_eq!(
             rect.size.height, 20.0,
             "height stays the image's own intrinsic height"
+        );
+    }
+
+    #[test]
+    fn column_children_overflow_instead_of_overlapping_when_shorter_than_content() {
+        // #328: two `View` siblings, each with real text content, whose
+        // combined natural height exceeds a deliberately short viewport.
+        // Before the fix, `distribute_main_axis` shrank both proportionally
+        // with no floor, compressing each below its own text's required
+        // height — the text inside then overflowed its own box downward,
+        // past the next sibling's top, producing visible overlap. The
+        // fix's contract: a `View` never shrinks below its subtree's own
+        // natural height, so the second sibling's top must never land
+        // above the first sibling's bottom, no matter how short the
+        // viewport is.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let first = tree.push_view(root, "").unwrap();
+        tree.push_text(
+            first,
+            "First section heading and a line of body copy under it",
+            TextVariant::Heading2,
+            "",
+        )
+        .unwrap();
+        let second = tree.push_view(root, "").unwrap();
+        tree.push_text(
+            second,
+            "Second section heading and a line of body copy under it",
+            TextVariant::Heading2,
+            "",
+        )
+        .unwrap();
+
+        let measure = FakeMeasure::new();
+        // Each `View`'s natural (unwrapped) text line is far taller than
+        // this combined budget once both are present.
+        let result = compute_layout(&tree, Size::new(200.0, 10.0), &measure);
+
+        let first_rect = result.get(first).unwrap();
+        let second_rect = result.get(second).unwrap();
+        assert!(
+            first_rect.bottom() <= second_rect.origin.y + 0.01,
+            "siblings must never overlap: first bottom {} vs second top {}",
+            first_rect.bottom(),
+            second_rect.origin.y
+        );
+
+        // Each `View`'s own box must still be at least as tall as its
+        // child's natural content height — the floor the fix adds.
+        let first_text = result
+            .iter()
+            .find(|(id, _)| tree.get(*id).unwrap().parent == Some(first))
+            .map(|(_, r)| r)
+            .unwrap();
+        assert!(
+            first_rect.size.height + 0.01 >= first_text.size.height,
+            "a View must not shrink below its own subtree's required height"
+        );
+    }
+
+    #[test]
+    fn canonical_showcase_tree_does_not_overlap_at_a_short_viewport() {
+        // Same contract as the minimal repro above, exercised against the
+        // full canonical showcase tree (header / hero / card / footer) at
+        // a viewport far shorter than its natural content height.
+        let showcase = build_showcase_tree();
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&showcase.tree, Size::new(800.0, 300.0), &measure);
+
+        let header_row = result.get(showcase.header_row).unwrap();
+        let main = result.get(showcase.main_container).unwrap();
+        assert!(
+            header_row.bottom() <= main.origin.y + 0.01,
+            "header must stay above the main content even when the window is too short: \
+             header bottom {} vs main top {}",
+            header_row.bottom(),
+            main.origin.y
+        );
+
+        let heading = result.get(showcase.hero_heading).unwrap();
+        assert!(
+            heading.origin.y >= main.origin.y - 0.01,
+            "hero heading must stay inside the main container's top edge"
+        );
+    }
+
+    #[test]
+    fn explicit_height_scroll_area_keeps_its_shrunk_size_not_its_h_class() {
+        // #341 regression: a `ScrollArea` with an explicit `h-16` (64px)
+        // class, shrunk to 36px by `distribute_main_axis` because a 64px
+        // sibling leaves only 36px of a 100px viewport, must report its
+        // own box at 36px — not silently revert to the explicit 64px on
+        // `layout_column_children`'s re-resolve pass, which would push
+        // its bottom edge 28px past the viewport.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let sibling_rect = result.get(sibling).unwrap();
+        let scroll_rect = result.get(scroll).unwrap();
+
+        assert!(
+            (sibling_rect.size.height - 64.0).abs() < 0.01,
+            "the plain View sibling's own explicit height must be unaffected: got {}",
+            sibling_rect.size.height
+        );
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the ScrollArea must keep the shrunk 36px the column assigned it, \
+             not revert to its own explicit h-16 (64px): got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            scroll_rect.bottom() <= 100.0 + 0.01,
+            "the ScrollArea's box must stay within the 100px viewport: bottom at {}",
+            scroll_rect.bottom()
+        );
+    }
+
+    #[test]
+    fn explicit_height_scroll_area_shrinks_its_flex_1_descendant_too() {
+        // #341 round-2 regression: forcing the ScrollArea's own
+        // `.size.height` back to 36px (the test above) is not enough on
+        // its own — a `flex-1` descendant *inside* that ScrollArea must
+        // also be laid out against the 36px budget, not the box's own
+        // explicit `h-16` (64px), or it overflows past the ScrollArea's
+        // own corrected box. Same 100px viewport / 64px sibling / h-16
+        // ScrollArea as above, but with an empty `flex-1` View inside the
+        // ScrollArea standing in for arbitrary nested content.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let _sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        let inner_rect = result.get(inner).unwrap();
+
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the ScrollArea must still be shrunk to 36px: got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            (inner_rect.size.height - 36.0).abs() < 0.01,
+            "the flex-1 descendant must be laid out against the ScrollArea's \
+             real 36px budget, not its explicit h-16 (64px): got {}",
+            inner_rect.size.height
+        );
+        assert!(
+            inner_rect.bottom() <= 100.0 + 0.01,
+            "the flex-1 descendant's box must stay within the 100px viewport: bottom at {}",
+            inner_rect.bottom()
+        );
+    }
+
+    #[test]
+    fn explicit_height_row_scroll_area_stretches_its_child_to_its_shrunk_size() {
+        // #341 round-3 regression: `layout_container`'s Row-direction
+        // `cross_override` derived straight from `explicit`, bypassing
+        // `force_height`/`definite_target` entirely — so a row-flex
+        // `ScrollArea.h-16` shrunk to 36px by the round-2 `force_height`
+        // path still stretch-aligned its child against the stale 64px
+        // explicit height instead of the real 36px budget. Same 100px
+        // viewport / 64px sibling / h-16 ScrollArea shape as the two
+        // column-axis tests above, but the ScrollArea is row-flex
+        // (`"h-16 flex"`) and the inner child is cross-axis (height)
+        // stretched rather than main-axis grown.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let _sibling = tree.push_view(root, "h-16").unwrap();
+        let scroll = tree.push_scroll_area(root, "h-16 flex").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 100.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        let inner_rect = result.get(inner).unwrap();
+
+        assert!(
+            (scroll_rect.size.height - 36.0).abs() < 0.01,
+            "the row-flex ScrollArea must still be shrunk to 36px: got {}",
+            scroll_rect.size.height
+        );
+        assert!(
+            (inner_rect.size.height - 36.0).abs() < 0.01,
+            "the row-flex child must be cross-axis stretched to the \
+             ScrollArea's real 36px budget, not its explicit h-16 (64px): \
+             got {}",
+            inner_rect.size.height
+        );
+        assert!(
+            inner_rect.bottom() <= 100.0 + 0.01,
+            "the row-flex child's box must stay within the 100px viewport: bottom at {}",
+            inner_rect.bottom()
+        );
+    }
+
+    #[test]
+    fn scroll_area_shrink_floor_is_zero_unlike_a_plain_view_sibling() {
+        // #328: the one case where `ChildPlan::shrink_to_zero` actually
+        // changes the outcome. A `View` sibling (natural height ~60px: 3
+        // short wrapped lines at this width) and a `ScrollArea` sibling
+        // (natural height ~200px: a much longer run of text) together
+        // overflow a 100px viewport. The `View`'s floor is its own
+        // natural height, so it must come out unchanged at ~60px; the
+        // `ScrollArea`'s floor is zero, so it must absorb the entire
+        // shortfall instead, landing at `100 - 60 = 40px` — not shared
+        // proportionally the way two plain `View`s would split it.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let view = tree.push_view(root, "").unwrap();
+        tree.push_text(
+            view,
+            "Three short lines of wrapped text sit here for the view",
+            TextVariant::Body,
+            "",
+        )
+        .unwrap();
+        let scroll = tree.push_scroll_area(root, "").unwrap();
+        tree.push_text(
+            scroll,
+            "A much longer run of text that wraps across many more lines \
+             than the plain view above, so its natural content height is \
+             far taller than the view's own and than the viewport itself",
+            TextVariant::Body,
+            "",
+        )
+        .unwrap();
+
+        let measure = FakeMeasure::new();
+        // Narrow width so both text blocks wrap into multiple lines; the
+        // `View`'s natural height alone is already well under 100px, and
+        // the `ScrollArea`'s is well over it.
+        let result = compute_layout(&tree, Size::new(120.0, 100.0), &measure);
+
+        let view_rect = result.get(view).unwrap();
+        let scroll_rect = result.get(scroll).unwrap();
+
+        // Sanity: without the budget constraint, the View's natural
+        // height is far below 100px and the ScrollArea's is far above —
+        // otherwise this test wouldn't actually exercise the shrink path
+        // the way it's meant to.
+        let natural = compute_layout(&tree, Size::new(120.0, 10_000.0), &measure);
+        let view_natural = natural.get(view).unwrap().size.height;
+        let scroll_natural = natural.get(scroll).unwrap().size.height;
+        assert!(view_natural > 0.0 && view_natural < 100.0);
+        assert!(scroll_natural > 100.0);
+
+        assert!(
+            (view_rect.size.height - view_natural).abs() < 0.01,
+            "a plain View must never shrink below its own natural height: \
+             natural {view_natural} vs got {}",
+            view_rect.size.height
+        );
+        assert!(
+            (scroll_rect.size.height - (100.0 - view_natural)).abs() < 0.01,
+            "a ScrollArea's floor is zero, so it alone must absorb the \
+             shortfall the View's unshrinkable floor leaves behind: \
+             expected {} vs got {}",
+            100.0 - view_natural,
+            scroll_rect.size.height
+        );
+    }
+
+    #[test]
+    fn scroll_area_box_clamps_to_the_viewport_while_its_child_keeps_its_natural_height() {
+        // #328: a `ScrollArea` wrapping content taller than the viewport
+        // must still report its own box at the viewport's height (so a
+        // sibling laid out after it, or the window itself, is not pushed
+        // around) while its child keeps its full natural height — the
+        // overflow a scrollbar/clip would need to act on, not something
+        // silently compressed away.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let scroll = tree.push_scroll_area(root, "flex-1").unwrap();
+        tree.push_text(
+            scroll,
+            "A very long line of body copy that is much taller than the tiny viewport below",
+            TextVariant::Body,
+            "",
+        )
+        .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 50.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        assert!(
+            (scroll_rect.size.height - 50.0).abs() < 0.01,
+            "ScrollArea's own box must clamp to the viewport budget, got {}",
+            scroll_rect.size.height
+        );
+
+        let child = result
+            .iter()
+            .find(|(id, _)| tree.get(*id).unwrap().parent == Some(scroll))
+            .map(|(_, r)| r)
+            .unwrap();
+        assert!(
+            child.size.height > scroll_rect.size.height,
+            "the child must keep its own natural (overflowing) height \
+             instead of being shrunk to fit the box: child {} vs box {}",
+            child.size.height,
+            scroll_rect.size.height
+        );
+    }
+
+    #[test]
+    fn scroll_area_child_fills_a_viewport_taller_than_its_natural_content() {
+        // #328: the mirror case — content shorter than the viewport.
+        // `flex-1` on the `ScrollArea` must still let it (and transitively
+        // its child, via the same re-resolve-on-grow pass every other
+        // container uses) fill the available height, so large-window
+        // layouts are unchanged from before this promotion.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let scroll = tree.push_scroll_area(root, "flex-1").unwrap();
+        let inner = tree.push_view(scroll, "flex-1").unwrap();
+        tree.push_text(inner, "short", TextVariant::Body, "")
+            .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(200.0, 400.0), &measure);
+
+        let scroll_rect = result.get(scroll).unwrap();
+        assert!(
+            (scroll_rect.size.height - 400.0).abs() < 0.01,
+            "ScrollArea must still grow to fill the viewport when content is short, got {}",
+            scroll_rect.size.height
+        );
+        let inner_rect = result.get(inner).unwrap();
+        assert!(
+            (inner_rect.size.height - 400.0).abs() < 0.01,
+            "a flex-1 descendant inside a short ScrollArea must still fill the viewport, got {}",
+            inner_rect.size.height
+        );
+    }
+
+    #[test]
+    fn layout_result_translate_shifts_only_the_named_node() {
+        // #328: `LayoutResult::translate` is the hook a host backend uses
+        // to apply a `ScrollArea`'s live scroll offset post-layout. It
+        // must move only the node it's given, leaving every other
+        // already-computed rect (siblings, the node's own ancestors)
+        // untouched.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let a = tree.push_view(root, "").unwrap();
+        tree.push_text(a, "a", TextVariant::Body, "").unwrap();
+        let b = tree.push_view(root, "").unwrap();
+        tree.push_text(b, "b", TextVariant::Body, "").unwrap();
+
+        let measure = FakeMeasure::new();
+        let mut result = compute_layout(&tree, Size::new(200.0, 200.0), &measure);
+        let a_before = result.get(a).unwrap();
+        let b_before = result.get(b).unwrap();
+
+        result.translate(a, Point::new(0.0, -15.0));
+
+        let a_after = result.get(a).unwrap();
+        assert!((a_after.origin.y - (a_before.origin.y - 15.0)).abs() < 0.001);
+        assert_eq!(a_after.size, a_before.size, "translate must not resize");
+        assert_eq!(
+            result.get(b).unwrap(),
+            b_before,
+            "an untranslated sibling must be unaffected"
         );
     }
 

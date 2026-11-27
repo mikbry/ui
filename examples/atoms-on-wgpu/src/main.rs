@@ -179,6 +179,7 @@ mod tests {
             theme: WgpuTheme::default(),
             text_system: &text_system,
             slug_font_id: None,
+            scroll_offsets: &std::collections::HashMap::new(),
         };
         let out = walk_app_tree(core.tree(), &registry, &options).expect("walk");
         assert!(

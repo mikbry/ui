@@ -101,6 +101,24 @@ pub enum NodeKind {
     /// own theme" story as [`Card`](NodeKind::Card)'s chrome, so it is not a
     /// field here either.
     Image(ImageProps),
+    /// A viewport-clipping container (#328) — promoted from `mkui-wgpu`'s
+    /// wgpu-local `components::scroll_area`/`scrollbar` (#194) into the
+    /// shared contract, following the same promotion pattern `Card`/
+    /// `TextField`/`Image` proved (ADR 0015). Unlike a `View`/`Card`
+    /// column, a `ScrollArea`'s children always lay out at their own
+    /// natural (unbounded) height regardless of this box's own height
+    /// budget — that budget clamps only the box itself, so content taller
+    /// than the box becomes overflow for the box to show/scroll, not
+    /// something to compress. Carries no intrinsic data of its own, same
+    /// as [`ViewProps`]/[`CardProps`] — scroll *offset* is deliberately
+    /// not tree state: it's transient per-frame view state each backend
+    /// owns on its own side (`mkui-wgpu`'s existing `ScrollState`, a
+    /// browser's native `overflow-y: auto`), not something every binding
+    /// needs to round-trip. Interactive wheel/drag/keyboard/gamepad input
+    /// on the *promoted* component (`ScrollState` itself already supports
+    /// all four per #194) is deferred — see issue #328's PR for the
+    /// tracking follow-up.
+    ScrollArea(ScrollAreaProps),
     /// Extension slot. `type_name` identifies the component (`"test_widget"`,
     /// `"separator"`, …) and `props` is a renderer-readable JSON payload.
     Custom {
@@ -124,6 +142,13 @@ pub struct ViewProps {}
 /// state) can be added without a breaking `NodeKind` shape change.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardProps {}
+
+/// Payload for a `ScrollArea` node (#328). Empty for the same reason
+/// [`CardProps`] is: a backend's scrollbar chrome and scroll offset are
+/// its own transient view state, not tree-shared data — see
+/// [`NodeKind::ScrollArea`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScrollAreaProps {}
 
 /// Payload for a `TextField` node (#312): a single-line editable text
 /// input.
@@ -606,6 +631,24 @@ impl AppTree {
 
     pub fn push_card_unchecked(&mut self, parent: NodeId, class: StyleClass) -> NodeId {
         let kind = NodeKind::Card(CardProps::default());
+        self.alloc_and_attach(parent, kind, class)
+    }
+
+    /// Append a `ScrollArea` under `parent` — a viewport-clipping container
+    /// (#328). Mirrors [`AppTree::push_card`] exactly; the only difference
+    /// is the `NodeKind` tag a renderer/layout engine dispatches on.
+    pub fn push_scroll_area(
+        &mut self,
+        parent: NodeId,
+        class: impl Into<String>,
+    ) -> Result<NodeId, ClassParseError> {
+        let style = StyleClass::from_str(class);
+        let _ = style.parse()?;
+        Ok(self.push_scroll_area_unchecked(parent, style))
+    }
+
+    pub fn push_scroll_area_unchecked(&mut self, parent: NodeId, class: StyleClass) -> NodeId {
+        let kind = NodeKind::ScrollArea(ScrollAreaProps::default());
         self.alloc_and_attach(parent, kind, class)
     }
 

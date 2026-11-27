@@ -6,8 +6,9 @@
 //!
 //! Every [`mkui_runtime::NodeKind::View`] (and the synthetic `Root`, and
 //! [`mkui_runtime::NodeKind::Card`] — #270's card chrome is a container,
-//! not a leaf) is a flex container. `resolved.flex_column`, or the absence
-//! of `resolved.flex`
+//! not a leaf, and [`mkui_runtime::NodeKind::ScrollArea`] — #328's
+//! viewport-clipping chrome is likewise a container) is a flex container.
+//! `resolved.flex_column`, or the absence of `resolved.flex`
 //! entirely (ordinary tailwind block flow — children stack one per line),
 //! both mean **Column**; `resolved.flex` without `flex-col` means **Row**.
 //! This mirrors real Tailwind: a plain block element's children already
@@ -37,12 +38,18 @@
 //!
 //! ## Named tolerances and gaps (per issue #63's "own the stack" discipline)
 //!
-//! - **`flex-shrink` only ever shrinks `View` children.** A `Text` leaf
-//!   shrinks by re-wrapping (handled naturally — it's re-measured at its
-//!   final width); a `Button`/`Custom` leaf has no re-flow mechanism this
-//!   engine can drive, so it never participates in the shrink pool. An
-//!   overflowing line with no `View` children simply overflows (matches
-//!   ordinary CSS `flex-shrink` behaviour when nothing *can* shrink enough).
+//! - **`flex-shrink` only ever shrinks `View`/`Card`/`ScrollArea`
+//!   children** (collectively, every container kind — see
+//!   `is_container`). A `Text` leaf shrinks by re-wrapping (handled
+//!   naturally — it's re-measured at its final width); a `Button`/
+//!   `Custom` leaf has no re-flow mechanism this engine can drive, so it
+//!   never participates in the shrink pool. An overflowing line with no
+//!   shrinkable children simply overflows (matches ordinary CSS
+//!   `flex-shrink` behaviour when nothing *can* shrink enough). On the
+//!   **column** (height) axis specifically, a plain `View`/`Card`'s
+//!   floor is its own natural height (#328) — it never actually shrinks
+//!   there, so in practice only a `ScrollArea` (floor `0.0`) absorbs
+//!   column shrink at all; see `distribute_main_axis`'s doc comment.
 //! - **`align-items: stretch` is a no-op on `Text`/`Button`/`Custom`
 //!   leaves.** Only a `View`/`Root` child is re-measured at the line's/
 //!   column's cross size; a leaf's content box can't stretch without
@@ -135,6 +142,20 @@ impl LayoutResult {
 
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+
+    /// Shift `id`'s already-computed rect by `offset`, if it has one.
+    /// `compute_layout` itself has no notion of scroll offset — a
+    /// `ScrollArea`'s live offset is host-side view state (#328), applied
+    /// as a pure post-layout viewport transform: a backend calls this
+    /// once per visible descendant of a scrolled `ScrollArea`, after
+    /// `compute_layout` and before painting/hit-testing against the
+    /// result, so position, painted pixels, and hit-test rects all stay
+    /// in agreement with no separate offset bookkeeping needed downstream.
+    pub fn translate(&mut self, id: NodeId, offset: Point) {
+        if let Some(rect) = self.rects.get_mut(&id) {
+            rect.origin = rect.origin + offset;
+        }
     }
 }
 
@@ -290,8 +311,20 @@ fn explicit_height_px(style: &ResolvedStyle) -> Option<f32> {
 fn is_container(tree: &AppTree, id: NodeId) -> bool {
     matches!(
         tree.get(id).map(|n| &n.kind),
-        Some(NodeKind::View(_)) | Some(NodeKind::Card(_)) | Some(NodeKind::Root)
+        Some(NodeKind::View(_))
+            | Some(NodeKind::Card(_))
+            | Some(NodeKind::Root)
+            | Some(NodeKind::ScrollArea(_))
     )
+}
+
+/// Whether `id` is a `ScrollArea` (#328) — the one container kind whose
+/// column-shrink floor is zero rather than its own natural height (see
+/// [`ChildPlan::shrink_to_zero`] and [`layout_column_children`]): it exists
+/// specifically to absorb overflow its box can't fit, not to protect its
+/// content's minimum size the way a plain `View`/`Card` does.
+fn is_scroll_area(tree: &AppTree, id: NodeId) -> bool {
+    matches!(tree.get(id).map(|n| &n.kind), Some(NodeKind::ScrollArea(_)))
 }
 
 /// Whether `id` participates in layout at all. `false` for a hidden node or
@@ -329,7 +362,7 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
         return 0.0;
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
             let style = &node.resolved;
             let pad_x = padding_x_px(style);
             let kids = visible_children(tree, measure, node);
@@ -396,12 +429,39 @@ fn layout_subtree(
     avail_width: f32,
     avail_height: Option<f32>,
 ) -> ComputedNode {
+    layout_subtree_inner(tree, measure, id, avail_width, avail_height, false)
+}
+
+/// Like `layout_subtree`, but when `force_height` is true and
+/// `avail_height` is `Some`, it wins outright over this node's own
+/// explicit `h-*` class — used only by `layout_column_children`'s
+/// re-resolve pass (#341), where `avail_height` is not an ambient budget
+/// the child may ignore but the parent's flex algorithm's own already-
+/// final decision for this child's main size.
+fn layout_subtree_forced_height(
+    tree: &AppTree,
+    measure: &dyn LeafMeasure,
+    id: NodeId,
+    avail_width: f32,
+    height: f32,
+) -> ComputedNode {
+    layout_subtree_inner(tree, measure, id, avail_width, Some(height), true)
+}
+
+fn layout_subtree_inner(
+    tree: &AppTree,
+    measure: &dyn LeafMeasure,
+    id: NodeId,
+    avail_width: f32,
+    avail_height: Option<f32>,
+    force_height: bool,
+) -> ComputedNode {
     let Some(node) = tree.get(id) else {
         return ComputedNode::leaf(Size::ZERO);
     };
     match &node.kind {
-        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) => {
-            layout_container(tree, measure, node, avail_width, avail_height)
+        NodeKind::Root | NodeKind::View(_) | NodeKind::Card(_) | NodeKind::ScrollArea(_) => {
+            layout_container(tree, measure, node, avail_width, avail_height, force_height)
         }
         NodeKind::Text(t) => {
             let m = measure.measure_text(
@@ -475,6 +535,7 @@ fn layout_container(
     node: &Node,
     avail_width: f32,
     avail_height: Option<f32>,
+    force_height: bool,
 ) -> ComputedNode {
     let style = &node.resolved;
     let pad_x = padding_x_px(style);
@@ -490,12 +551,23 @@ fn layout_container(
     // explicit `h-*` wins outright; `h-auto` opts out of whatever the
     // parent offered; otherwise an inherited `avail_height` (this node is
     // itself a `flex-grow` target, or the root call) passes through.
+    //
+    // `force_height` (#341) is the one exception: the caller — only
+    // `layout_column_children`'s re-resolve pass — has already decided
+    // this node's final main size via its own flex algorithm, so
+    // `avail_height` must win outright over `explicit` instead of the
+    // other way around; everything downstream (the budget this box hands
+    // its own children below) then derives from that forced size too.
     let explicit = explicit_height_px(style);
-    let definite_target = explicit.or(if style.height_auto {
-        None
-    } else {
+    let definite_target = if force_height {
         avail_height
-    });
+    } else {
+        explicit.or(if style.height_auto {
+            None
+        } else {
+            avail_height
+        })
+    };
 
     let dir = direction(style);
     let (mut children, content_height) = match dir {
@@ -509,7 +581,23 @@ fn layout_container(
             // implemented (untested by the showcase token set, which never
             // combines `h-*` with `flex-wrap`); with more than one line
             // this falls back to content-derived per-line heights.
-            let cross_override = explicit.map(|h| (h - pad_y * 2.0).max(0.0));
+            //
+            // `force_height` (#341 round 3) is the same exception as
+            // `definite_target` above, applied here too: when
+            // `layout_column_children`'s re-resolve pass has already
+            // decided this row-direction box's own final height (e.g. a
+            // row-flex `ScrollArea.h-16` shrunk to 36px by a sibling), the
+            // forced `avail_height` must win over `explicit` for the
+            // row's own cross-axis stretch budget too — otherwise a
+            // `flex-1` child inside it stretches against the stale 64px
+            // even though the row's own box correctly shrank to 36px
+            // (`definite_target`, used below for `own_height`, already
+            // gets this right; only this children-facing override didn't).
+            let cross_override = if force_height {
+                avail_height.map(|h| (h - pad_y * 2.0).max(0.0))
+            } else {
+                explicit.map(|h| (h - pad_y * 2.0).max(0.0))
+            };
             let (children, size) =
                 layout_row_children(tree, measure, node, inner_width, cross_override);
             (children, size.height)
@@ -540,6 +628,10 @@ fn layout_container(
 struct ChildPlan {
     id: NodeId,
     is_view: bool,
+    /// `true` only for a `ScrollArea` child (#328): its column-shrink
+    /// floor is zero rather than its own natural height — see
+    /// `layout_column_children`'s `min_heights` computation.
+    shrink_to_zero: bool,
     flex_grow: bool,
     mt_auto: bool,
     mx_auto: bool,
@@ -553,6 +645,7 @@ fn plan_children(tree: &AppTree, measure: &dyn LeafMeasure, node: &Node) -> Vec<
             ChildPlan {
                 id,
                 is_view: is_container(tree, id),
+                shrink_to_zero: is_scroll_area(tree, id),
                 flex_grow: style.flex_grow,
                 mt_auto: style.mt_auto,
                 mx_auto: style.mx_auto,
@@ -563,12 +656,32 @@ fn plan_children(tree: &AppTree, measure: &dyn LeafMeasure, node: &Node) -> Vec<
 
 /// Distribute `free` pixels of main-axis space across `basis`, growing
 /// (positive `free`) or shrinking (negative `free`) in place. Growth splits
-/// evenly across every `flex-grow` child; shrink splits proportionally to
+/// evenly across every `flex-grow` child. Shrink splits proportionally to
 /// basis size across `View` children only (see the module docs' shrink
-/// tolerance) and never below zero. Returns how much of `free` was actually
-/// consumed by grow/shrink (always `free` itself unless shrink bottoms out
-/// at zero before using all of it).
-fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], free: f32) -> f32 {
+/// tolerance), never reducing `basis[i]` below the matching `min[i]` —
+/// CSS's "automatic minimum size" floor. A plain `View`/`Card` column child
+/// is called with its own natural (pre-shrink) height as its `min`, so it
+/// never shrinks at all on the column (height) axis — matching real CSS,
+/// where block height has no narrower "min-content" than the content's own
+/// height. A container designed to absorb overflow itself (e.g. a
+/// `ScrollArea`, #328) instead passes `0.0`, the same floor the row (width)
+/// axis always used. Once every shrinkable child has bottomed out at its
+/// own `min`, any further overflow is left unresolved — the caller sees it
+/// in the gap between the returned consumed amount and `free`, and that
+/// gap becomes genuine visible overflow rather than overlap.
+///
+/// Shrinking iterates: each round splits the *remaining* overflow
+/// proportionally across children that still have room (`basis[i] >
+/// min[i]`), clamps any child that would cross its floor, and feeds
+/// whatever that clamping couldn't place into the next round across the
+/// children still with room. This is the standard CSS flex-shrink
+/// algorithm's clamping loop, simplified for this engine's single-pass-per-
+/// line usage (no `flex-shrink` weights beyond basis size).
+///
+/// Returns how much of `free` was actually consumed by grow/shrink — for
+/// shrink, this can be smaller in magnitude than `free` once every child
+/// bottoms out at its `min` before absorbing all of it.
+fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], min: &[f32], free: f32) -> f32 {
     if free > 0.0 {
         let growers: Vec<usize> = children
             .iter()
@@ -594,17 +707,41 @@ fn distribute_main_axis(children: &[ChildPlan], basis: &mut [f32], free: f32) ->
         if shrinkable.is_empty() {
             return 0.0;
         }
-        let shrinkable_total: f32 = shrinkable.iter().map(|&i| basis[i]).sum();
-        if shrinkable_total <= 0.0 {
-            return 0.0;
+        let mut remaining = -free;
+        let mut consumed = 0.0_f32;
+        loop {
+            let active: Vec<usize> = shrinkable
+                .iter()
+                .copied()
+                .filter(|&i| basis[i] > min[i] + f32::EPSILON)
+                .collect();
+            if active.is_empty() || remaining <= 0.0 {
+                break;
+            }
+            let active_total: f32 = active.iter().map(|&i| basis[i]).sum();
+            if active_total <= 0.0 {
+                break;
+            }
+            let mut used_this_round = 0.0_f32;
+            let mut any_clamped = false;
+            for &i in &active {
+                let ratio = basis[i] / active_total;
+                let desired = remaining * ratio;
+                let available = basis[i] - min[i];
+                let reduction = desired.min(available);
+                basis[i] -= reduction;
+                used_this_round += reduction;
+                if reduction + f32::EPSILON < desired {
+                    any_clamped = true;
+                }
+            }
+            consumed += used_this_round;
+            remaining -= used_this_round;
+            if !any_clamped || used_this_round <= f32::EPSILON {
+                break;
+            }
         }
-        let overflow = -free;
-        for i in shrinkable {
-            let ratio = basis[i] / shrinkable_total;
-            let reduction = (overflow * ratio).min(basis[i]);
-            basis[i] -= reduction;
-        }
-        free
+        -consumed
     } else {
         0.0
     }
@@ -657,14 +794,52 @@ fn layout_column_children(
     let mut leftover = 0.0_f32;
     if let Some(budget) = budget {
         let free = budget - basis_total;
-        let consumed = distribute_main_axis(&plans, &mut heights, free);
+        // A column's main axis is height, and block height has no
+        // narrower "min-content" than a child's own natural height (see
+        // this function's module docs and `distribute_main_axis`'s doc
+        // comment) — so a plain `View`/`Card` child's floor is the natural
+        // height the basis pass above already computed for it, and in
+        // practice it never actually shrinks; any shortfall becomes
+        // visible overflow past this container's own (budget-clamped) box
+        // instead. A `ScrollArea` child (#328) is the one exception — its
+        // whole purpose is absorbing overflow its box can't fit, so its
+        // floor is zero, same as CSS's `min-height: auto` resolving to
+        // zero for a scroll container.
+        let min_heights: Vec<f32> = plans
+            .iter()
+            .zip(&heights)
+            .map(|(p, &h)| if p.shrink_to_zero { 0.0 } else { h })
+            .collect();
+        let consumed = distribute_main_axis(&plans, &mut heights, &min_heights, free);
         leftover = free - consumed;
 
         // Re-resolve any child whose height actually changed, so nested
         // content (e.g. a `flex-1` descendant) sees its real final height.
+        //
+        // `heights[i]` is this column's own authoritative decision for
+        // the child's final main-size (grown or shrunk by
+        // `distribute_main_axis` above) — it must win outright over
+        // whatever the child's own internal precedence (an explicit
+        // `h-*` always wins there by default, since from a single call's
+        // perspective it has no way to distinguish "an ambient budget the
+        // parent merely offers" from "the parent's flex algorithm already
+        // decided this exact size") would otherwise report — not just for
+        // the child's own box, but for whatever budget that box in turn
+        // hands its own descendants (`layout_subtree_forced_height`,
+        // #341). A `ScrollArea.h-16` shrunk to 36px by the column above
+        // (because a sibling needed the rest of the viewport) must
+        // actually resolve its own box, and any `flex-1` descendant
+        // inside it, against 36px — re-deriving only the outer box's
+        // `.size.height` left a `flex-1` child inside still sized against
+        // the original 64px budget, overflowing past the corrected outer
+        // box. This is a no-op for every other case: a plain `View`/
+        // `Card` never reaches this branch at all (its floor is already
+        // its own natural height, so `heights[i]` never actually changes
+        // for it), and ordinary growth with no explicit height already
+        // has the child agree with `heights[i]` on its own.
         for (i, (plan, &w)) in plans.iter().zip(&child_widths).enumerate() {
             if (heights[i] - computed[i].size.height).abs() > f32::EPSILON {
-                computed[i] = layout_subtree(tree, measure, plan.id, w, Some(heights[i]));
+                computed[i] = layout_subtree_forced_height(tree, measure, plan.id, w, heights[i]);
             }
         }
     }
@@ -769,7 +944,12 @@ fn layout_row_children(
         let gaps_total = gap * (line.len().saturating_sub(1)) as f32;
         let total: f32 = line_basis.iter().sum::<f32>() + gaps_total;
         let free = inner_width - total;
-        distribute_main_axis(&line_plans, &mut line_basis, free);
+        // Row (width) shrink keeps its pre-existing floor of zero: unlike
+        // column/height (see `layout_column_children`'s call), there is no
+        // minimum-content-width concept in this engine yet (`natural_width`
+        // is max-content/shrink-to-fit, not min-content) — deferred, #328.
+        let zero_floor = vec![0.0_f32; line_basis.len()];
+        distribute_main_axis(&line_plans, &mut line_basis, &zero_floor, free);
 
         let mut line_computed: Vec<ComputedNode> = line_plans
             .iter()

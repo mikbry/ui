@@ -63,6 +63,7 @@ pub enum KindSnapshot {
         disabled: bool,
     },
     Card,
+    ScrollArea,
     TextField {
         value: String,
         placeholder: String,
@@ -139,6 +140,7 @@ impl NodeSnapshot {
                 disabled: b.disabled,
             },
             crate::tree::NodeKind::Card(_) => KindSnapshot::Card,
+            crate::tree::NodeKind::ScrollArea(_) => KindSnapshot::ScrollArea,
             crate::tree::NodeKind::TextField(f) => KindSnapshot::TextField {
                 value: f.value.clone(),
                 placeholder: f.placeholder.clone(),

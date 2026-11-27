@@ -1,10 +1,14 @@
 //! Native showcase — drives `examples/showcase-common::create_showcase_ui`
 //! through the mkui-wgpu declarative bridge (issue #56 §7, AC #1 + #4).
 //!
-//! The showcase function itself is byte-unchanged from main (AC #3 —
-//! audit-grade preservation per Codex round-7 Q6 ratification); this
-//! binary is the wgpu-side consumer that proves the bridge runs the
-//! shared tree end-to-end.
+//! The showcase function's *content* (every section's text and component
+//! usage) is byte-unchanged from main (AC #3 — audit-grade preservation
+//! per Codex round-7 Q6 ratification); this binary is the wgpu-side
+//! consumer that proves the bridge runs the shared tree end-to-end.
+//! #328 is the one exception to date — a purely structural, additive
+//! swap of the page's outermost `View` for a `ScrollArea` so content
+//! taller than the window scrolls instead of overlapping; no visible
+//! section changed.
 //!
 //! `HEADLESS=1 cargo run -p native-showcase --release` exits
 //! after a single walker pass — useful for CI smoke validation when

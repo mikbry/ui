@@ -186,6 +186,17 @@ fn walk_children(
             NodeKind::View(_) => {
                 walk_children(tree, &node.children, layout, selectables);
             }
+            // #328 scope decision: the terminal has no pixel-level
+            // viewport to clip against, and the user's own terminal
+            // emulator already provides scrollback — unlike `Card`'s
+            // chrome (a real visual cue this backend can draw with plain
+            // box-drawing characters), a scroll viewport has no console-
+            // native analogue to fall back to (ADR 0015's "no nested-box
+            // model" rule). Rendered transparently, same as `View`; real
+            // per-area console scrolling is deferred to a follow-up.
+            NodeKind::ScrollArea(_) => {
+                walk_children(tree, &node.children, layout, selectables);
+            }
             NodeKind::Card(_) => {
                 layout.push(Line::CardTop);
                 walk_children(tree, &node.children, layout, selectables);
