@@ -119,6 +119,22 @@ const TAILWIND_UNIT_PX: f32 = 4.0;
 /// engine is otherwise generic (see the module docs).
 const MAX_W_4XL_PX: f32 = 896.0;
 
+/// A `TextField`'s row-axis min-content floor (#342 review follow-up to
+/// #338). Unlike `Text`/`Button`, a `TextField` is a viewport onto its
+/// value, not an atomic token — `measure_text_field`'s own doc comment
+/// (`crate::measure::LeafMeasure::measure_text_field`) confirms it fills
+/// exactly whatever width it's asked for, same as a real `<input>`, with
+/// no dependency on `value`/`placeholder` once a width is given. So its
+/// min-content width must not be its full (potentially very long) value's
+/// width the way `min_content_width`'s other leaf arms use their own
+/// max-content size — that would make a `TextField` refuse to shrink at
+/// all, pushing siblings out of a Row that would otherwise fit. A small
+/// fixed floor (enough for a handful of characters, matching
+/// `mkui-wgpu/src/walker.rs`'s `BUTTON_MIN_WIDTH_PX`'s role for buttons)
+/// keeps the field visible and usable without holding a Row hostage to
+/// one field's content length.
+const TEXT_FIELD_MIN_WIDTH_PX: f32 = 64.0;
+
 /// The output of [`crate::compute_layout`]: absolute border-box rects keyed
 /// by [`NodeId`]. A hidden subtree (`resolved.hidden`), and any subtree
 /// rooted at a [`crate::LeafMeasure::is_overlay`] node, has no entry at all
@@ -440,16 +456,20 @@ fn natural_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
 /// natural-height floor on the column axis (#328); never used to size a
 /// basis.
 ///
-/// Mirrors [`natural_width`]'s recursion shape exactly, with two
+/// Mirrors [`natural_width`]'s recursion shape exactly, with three
 /// differences: the `Text` leaf case measures each word in isolation and
-/// takes the widest instead of measuring the whole (never-wrapped) string,
-/// and the `Direction::Row` container case sums each child's *min-content*
+/// takes the widest instead of measuring the whole (never-wrapped) string;
+/// the `Direction::Row` container case sums each child's *min-content*
 /// width rather than its max-content width (a row's own min-content width
 /// is still the sum of its children's, laid out side by side — only each
-/// child's own contribution shrinks). Every other leaf kind (`Button`,
-/// `TextField`, `Custom`, `Image`) has no re-flow mechanism this engine can
-/// drive, so — same as `natural_width` — its min-content width equals its
-/// max-content width: its own intrinsic/unwrapped size.
+/// child's own contribution shrinks); and `TextField` floors at
+/// [`TEXT_FIELD_MIN_WIDTH_PX`] rather than its own max-content width (see
+/// that constant's doc comment — a text field is a viewport onto its
+/// value, not an atomic token, so it can shrink much narrower than its
+/// content). Every other leaf kind (`Button`, `Custom`, `Image`) has no
+/// re-flow mechanism this engine can drive, so — same as `natural_width`
+/// — its min-content width equals its max-content width: its own
+/// intrinsic/unwrapped size.
 fn min_content_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f32 {
     let Some(node) = tree.get(id) else {
         return 0.0;
@@ -506,12 +526,11 @@ fn min_content_width(tree: &AppTree, measure: &dyn LeafMeasure, id: NodeId) -> f
                 .size
                 .width
         }
-        NodeKind::TextField(f) => {
-            measure
-                .measure_text_field(&f.value, &f.placeholder, &node.resolved, None)
-                .size
-                .width
-        }
+        // See `TEXT_FIELD_MIN_WIDTH_PX`'s doc comment: a text field fills
+        // whatever width it's given, so its floor is a small fixed
+        // minimum, not its (potentially much wider) value/placeholder
+        // content width.
+        NodeKind::TextField(_) => TEXT_FIELD_MIN_WIDTH_PX,
         NodeKind::Custom { type_name, props } => {
             measure
                 .measure_custom(type_name, props, &node.resolved, None)

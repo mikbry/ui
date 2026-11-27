@@ -351,12 +351,20 @@ breaking changes can land on minor bumps).
   as the per-child `min`, computed lazily (only once a line's `free` space
   actually goes negative) so a non-shrinking Row pays nothing extra. A
   `ScrollArea` child keeps a `0.0` floor on this axis too, the same
-  absorb-overflow exception #328 gave it on the column axis. New
-  regression tests in `crates/layout/src/lib.rs`: a Row of `View` children
-  with wrapped-text content, squeezed narrower than their combined
-  min-content width, floors each at its own min-content width rather than
-  collapsing further; and a `flex-wrap` child's own floor is its widest
-  single item, not the sum of all its items.
+  absorb-overflow exception #328 gave it on the column axis. `TextField`
+  is its own carve-out too: unlike `Text`/`Button`, a field fills whatever
+  width it's given rather than measuring content at all, so flooring it at
+  its own max-content width (the full value/placeholder text, same as
+  `natural_width`'s basis call) would make a long value's wrapper refuse
+  to shrink below that full width — worse than the pre-#338 zero floor.
+  It floors at a new small fixed `TEXT_FIELD_MIN_WIDTH_PX` constant
+  instead. New regression tests in `crates/layout/src/lib.rs`: a Row of
+  `View` children with wrapped-text content, squeezed narrower than their
+  combined min-content width, floors each at its own min-content width
+  rather than collapsing further; a `flex-wrap` child's own floor is its
+  widest single item, not the sum of all its items; and a `TextField` with
+  a long value floors at the small fixed width rather than pushing a
+  sibling `Button` out of the Row's viewport.
 - **`mkui-web` button listeners now resolve their action against the tree
   that owns their own mount, not a process-wide thread-local (#305).**
   `render_button` used to capture only the raw `(index, generation)` of a

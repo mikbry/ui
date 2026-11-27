@@ -912,6 +912,57 @@ mod tests {
     }
 
     #[test]
+    fn row_text_field_floors_at_a_small_fixed_width_not_its_full_value() {
+        // #342 review follow-up: `min_content_width`'s `TextField` arm
+        // originally floored at the field's own max-content width — the
+        // full value/placeholder content width, same `measure_text_field`
+        // call `natural_width` uses for its basis — instead of a small
+        // fixed minimum. A `TextField` fills whatever width it's given
+        // (see `TEXT_FIELD_MIN_WIDTH_PX`'s doc comment), so that was
+        // strictly worse than the pre-#338 zero floor: a long value's
+        // `View` wrapper would refuse to shrink below its full content
+        // width at all, pushing a sibling clean out of the Row's own
+        // viewport instead of just shrinking the field down to a usable
+        // size.
+        //
+        // A 300px Row holds a `flex-1` `View` wrapping a `TextField` with
+        // a 100-character value (800px via the fake measurer's 8px/char)
+        // plus a 64px sibling `Button` ("Btn4": 4 chars * 8px + 32px
+        // padding). The field's `View` must shrink enough to leave room
+        // for the button, not hold its floor at the value's full width.
+        let mut tree = AppTree::new();
+        let root = tree.root();
+        let row = tree.push_view(root, "flex").unwrap();
+        let field_wrapper = tree.push_view(row, "flex-1").unwrap();
+        let long_value: String = "a".repeat(100);
+        tree.push_text_field(field_wrapper, long_value, "", "", false, false)
+            .unwrap();
+        let button = tree
+            .push_button(row, "Btn4", ButtonVariant::Primary, "", None)
+            .unwrap();
+
+        let measure = FakeMeasure::new();
+        let result = compute_layout(&tree, Size::new(300.0, 100.0), &measure);
+
+        let field_wrapper_rect = result.get(field_wrapper).unwrap();
+        let button_rect = result.get(button).unwrap();
+
+        assert!(
+            field_wrapper_rect.size.width < 700.0,
+            "the TextField's wrapper must shrink well below the value's \
+             full 800px content width, got {}",
+            field_wrapper_rect.size.width
+        );
+        assert!(
+            button_rect.right() <= 300.0 + 0.01,
+            "the sibling Button must stay inside the 300px Row viewport \
+             instead of being pushed out by an unshrinkable TextField: \
+             got right edge {}",
+            button_rect.right()
+        );
+    }
+
+    #[test]
     fn scroll_area_box_clamps_to_the_viewport_while_its_child_keeps_its_natural_height() {
         // #328: a `ScrollArea` wrapping content taller than the viewport
         // must still report its own box at the viewport's height (so a
